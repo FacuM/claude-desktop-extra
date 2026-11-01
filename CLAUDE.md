@@ -4,6 +4,10 @@
 
 AGENTS.md is upstream's (patrickjaja/claude-desktop-extra) and is kept byte-identical to it. This file adds what is specific to this fork: an experimental **Windows 11 build** with multiple profiles and the core and community extras (all but the Linux window handling and the Quick Entry socket). User guide and build details: [docs/windows.md](docs/windows.md).
 
+## Rule: one open Claude thread for this project
+
+The owner keeps a single open Claude Code thread (session) for this repository. Continue work there instead of starting new sessions or spawning sibling sessions (in-session subagents are fine). When a thread's work is finished (its PR merged or its question answered), archive it; a new thread is started only when none is open.
+
 ## Rule: never edit upstream files in place
 
 The fork only ADDS files. That is what keeps the scheduled sync with upstream (`.github/workflows/upstream-sync.yml`, GitHub's "Sync fork") conflict-free. A change the Windows build needs in an upstream file goes into `scripts/windows/upstream-overlay.patch`, which `scripts/windows/prepare-sources.sh` applies to a temp copy at build time:
