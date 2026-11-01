@@ -148,9 +148,9 @@ jobs:
           set -uo pipefail
           title="Automatic update failed"
           body=$(cat <<EOF
-          The daily [Upstream Sync run](${RUN_URL}) failed: sync **${SYNC}**, Windows build **${BUILD}** (Anthropic Windows ${LATEST:-unknown}). Nothing was published.
+          The scheduled [Upstream Sync run](${RUN_URL}) failed: sync **${SYNC}**, Windows build **${BUILD}** (Anthropic Windows ${LATEST:-unknown}). Nothing was published.
 
-          To fix it with Claude, open a Claude Code session on this repository and paste:
+          To fix it with Claude, paste this into the project's open Claude Code thread (start a new one only if none is open, and archive a thread once its work is merged):
 
           > The daily Upstream Sync workflow failed: ${RUN_URL}. Read its logs, find the cause and fix it on a branch with a PR to master. Follow AGENTS.md's patch strictness rules. If the Windows overlay no longer applies, re-fit scripts/windows/upstream-overlay.patch (see scripts/windows/prepare-sources.sh). If a Windows-set patch no longer matches the new bundle, re-fit it. When the PR's Build Windows checks are green, merge it and run Upstream Sync again.
           EOF
