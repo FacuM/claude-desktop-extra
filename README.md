@@ -96,7 +96,7 @@ sudo apt install claude-desktop-extra
 
 It replaces Anthropic's own `claude-desktop` package if installed (same files). Cowork packages come in as `Recommends`; only the `kvm` group step remains ([Cowork setup](docs/cowork.md)).
 
-Without the repo: `wget https://github.com/patrickjaja/claude-desktop-extra/releases/latest/download/claude-desktop-extra_4.4212.0-2_amd64.deb && sudo dpkg -i claude-desktop-extra_*_amd64.deb`
+Without the repo: `wget https://github.com/patrickjaja/claude-desktop-extra/releases/latest/download/claude-desktop-extra_4.4212.0-4_amd64.deb && sudo dpkg -i claude-desktop-extra_*_amd64.deb`
 </details>
 
 <a name="fedora--rhel-dnf-repository"></a>
@@ -111,7 +111,7 @@ sudo dnf install claude-desktop-extra
 
 Cowork packages come in as weak deps; only the `kvm` group step remains ([Cowork setup](docs/cowork.md)).
 
-Without the repo: `wget https://github.com/patrickjaja/claude-desktop-extra/releases/latest/download/claude-desktop-extra-4.4212.0-2.x86_64.rpm && sudo dnf install ./claude-desktop-extra-*.x86_64.rpm`
+Without the repo: `wget https://github.com/patrickjaja/claude-desktop-extra/releases/latest/download/claude-desktop-extra-4.4212.0-4.x86_64.rpm && sudo dnf install ./claude-desktop-extra-*.x86_64.rpm`
 </details>
 
 <a name="nixos--nix"></a>
@@ -216,7 +216,7 @@ Off by default; turn them on in Settings → Extra → Community. Details: [docs
 
 ## Computer Use
 
-Desktop automation (screenshot, click, type, scroll, teach mode), on for every account and every session type. The official build's own Linux Computer Use is a staged rollout that needs a RemoteDesktop portal (GNOME 46+, current Plasma) and skips wlroots; our bundled bridges take precedence and cover X11, XWayland, Sway / Hyprland / Niri, GNOME Wayland (PipeWire >= 1.0.5) and KDE Plasma 6.6+, with nothing to install. Details: [docs/computer-use.md](docs/computer-use.md), per-session matrix: [dependencies](docs/computer-use-dependencies.md). An experimental switch in Settings → Extra → Community Features points it at a second display you start yourself (Xvfb, Xephyr or a headless sway), so Claude works there while you keep your desktop: [background display](docs/computer-use.md#computer-use-on-a-background-display-experimental).
+Desktop automation (screenshot, click, type, scroll, teach mode), on for every account and every session type. The official build's own Linux Computer Use is a staged rollout that needs a RemoteDesktop portal (GNOME 46+, current Plasma) and skips wlroots; our bundled bridges take precedence and cover X11, XWayland, Sway / Hyprland / Niri, GNOME Wayland (PipeWire >= 1.0.5) and KDE Plasma 6.6+, with nothing to install. Details: [docs/computer-use.md](docs/computer-use.md), per-session matrix: [dependencies](docs/computer-use-dependencies.md). An experimental switch in Settings → Extra → Community Features points it at a second display you start yourself (Xvfb, Xephyr or a headless sway), so Claude works there while you keep your desktop: [background display](docs/computer-use.md#computer-use-on-a-background-display-experimental). A second experimental switch lets Claude read and press app controls by name through the accessibility bus instead of by screenshot: [read app controls](docs/computer-use.md#read-app-controls-through-accessibility-experimental).
 
 ## Custom Themes
 
