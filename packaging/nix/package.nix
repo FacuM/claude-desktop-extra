@@ -68,8 +68,8 @@
 let
   # Updated automatically by CI (build-and-release.yml) on each release.
   version = "4.4212.0"; # pkgver: always the upstream Claude Desktop version
-  pkgrel = "4"; # Arch-style release counter: bumped on re-releases of the same upstream version, reset to 1 on version bumps
-  hash = "sha256-gIjwrkaFF4IezR5kB1s2BqD8Kcsv4rIHqPd9gcbvpOA=";
+  pkgrel = "5"; # Arch-style release counter: bumped on re-releases of the same upstream version, reset to 1 on version bumps
+  hash = "sha256-kPSE44dl9Tx0gpWuK9dHlNyLb9nJb7TZIo+ekDh3hqg=";
   # Every release publishes under its own tag (v<version> for pkgrel 1,
   # v<version>-<pkgrel> for re-releases) and its assets are never overwritten
   # afterwards, so this URL is immutable and a pinned flake.lock keeps fetching
@@ -285,6 +285,21 @@ stdenvNoCC.mkDerivation {
     # NOT used on Nix.
     rm -rf $out/lib/claude-desktop/resources
     cp -r claude-desktop/resources $out/lib/claude-desktop/resources
+
+    # Opt-in TPM access (cloud Cowork / Dispatch Computer Use): the udev rule and
+    # its root helper stay in the tree, disabled. On NixOS the module option
+    # programs.claude-desktop-extra.tpmAccess.enable (flake.nix) installs the
+    # rule instead; on other distros `sudo <this dir>/cdb-tpm-access enable`
+    # links it from the store (fixupPhase's patchShebangs points the helper at
+    # the store's sh). The polkit action is dropped: its exec.path names the
+    # /usr/lib install, and polkit on a non-NixOS host does not read the store.
+    # Guarded: release tarballs before this change do not ship linux-udev/.
+    udev=$out/lib/claude-desktop/resources/linux-udev
+    if [ -d $udev ]; then
+      rm -f $udev/io.github.patrickjaja.claude-desktop-extra.tpm-access.policy
+      chmod 755 $udev $udev/cdb-tpm-access
+      chmod 644 $udev/70-claude-desktop-extra-tpm.rules
+    fi
 
     # Release stamp for the in-app update check: the release tag (releaseTag,
     # the same tag src is fetched from) and the package format, which picks the
