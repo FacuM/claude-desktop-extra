@@ -4,11 +4,20 @@ All notable changes to the claude-desktop-extra packages will be documented in t
 
 ## 2026-11-04
 
+### Auto-fix wakes the session when its PR is ready to merge (thanks @alexx-ftw, #309)
+
+- **New switch Settings -> Extra -> Community Features -> "Wake Auto-fix sessions when a PR is ready to merge"** (off by default, applies live). For a PR with Auto-fix on, the Code session gets a short informational notice once GitHub reports the PR open, not draft, clean, mergeable, reviewed and with its checks green (a skipped check that GitHub marks as not required does not block), seen on two consecutive Auto-fix sweeps at the same head. It never merges, enables auto-merge or deploys; Claude reports readiness and waits for you. A notice you delete or stop is not sent again for that head.
+- Cost: one GitHub read per Auto-fix PR per sweep, a notified PR re-read at most every 10 minutes, no read while the app's GraphQL budget is low or rate-limited, failed sends back off; one model turn per notice. Details: [docs/autofix-merge-ready.md](docs/autofix-merge-ready.md).
+
 ### Upstream 4.16336.0
 
 - **Re-fitted to the new release** (Electron 44.9.3): the native-frame overlay color gate, the tray left-click toggle (the "Show App" item now calls a wrapper), the hidden-launch show hook for tray-less desktops, the "Update available" link hook (the updater init now waits for the managed settings first) and the profile window title (upstream keeps the main window's OS title at "Claude" and shows the conversation title in its own title bar; named profiles still get `Claude (work)`). No patch removed.
 - **The .deb now also ships `resources/ion-dist/` with one static "Claude was updated" page** for older versions still running after an upgrade. The app never loads it; the build ships it unchanged and keeps patching only `ion-dist.asar`.
 - **Settings -> Extra -> Deployment follows the new `deploymentMode` policy key** (`any` / `3p` / `1p`): a managed `1p` keeps third-party mode off, `3p` pins it, ahead of `disableDeploymentModeChooser`. The panel lists it and `inferenceGatewayAutoModeServerChecks` (203 keys). A configuration with only a self-hosted server (`selfHostedUrl` / `selfHostedToken`) now counts as third-party there too, as it does in upstream's own mode decision, so the panel no longer refuses to switch it to 3P.
+
+### Auto-fix
+
+- **Trusted Auto-fix PR authors** (thanks @alexx-ftw, #308) in Settings -> Extra -> Community Features recognizes explicitly listed users and GitHub App bots in addition to the authenticated `gh` user. Entries are exact server/login pairs (for example `github.com/my-app[bot]`); the list is empty by default, with no blanket bypass or implicit migration from the earlier local preview. PRs from a listed author are also bound as the session's own PRs (and found on the session's branch), so the switch takes effect end to end. Authentication, origin/age, confirmation, consent and concurrent-write protection stay unchanged. Applies live to future activation attempts; does not enable Auto-fix itself or revoke already-enabled PRs.
 
 ### Faster builds
 

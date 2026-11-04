@@ -416,6 +416,28 @@ async function featuresPanel(featuresItem) {
        "the state line follows the flip: " + cmRow.querySelector(".cdbx-state").textContent);
   }
 
+  const author = panel.querySelector('#cdbx-autofix-authors');
+  ok(!!author, "renders trusted-author list editor");
+  if (author) {
+    const row = author.closest(".cdbx-row"), save = row.querySelector("button");
+    ok(author.value === "", "additional trust list defaults empty");
+    ok(!!row.querySelector('label[for="cdbx-autofix-authors"]'), "editor has an accessible label");
+    ok(/count as the session's own PRs/.test(row.textContent) && /race checks remain/.test(row.textContent), "editor explains the scope");
+    author.value = "github.com/my-app[bot]\nghe.example/human";
+    save.click(); save.click();
+    await sleep(60);
+    ok(window.__authorCalls.length === 1 && window.__authorCalls[0].join(" ") === "github.com/my-app[bot] ghe.example/human",
+       "list save serializes identities and suppresses duplicate submissions");
+    ok(/2 additional trusted author/.test(row.textContent), "saved status reports exact list size");
+    ok(!restartUp(row), "list applies without restart");
+    author.value = ""; save.click(); await sleep(60);
+    ok(window.__authorCalls[1].length === 0, "empty save revokes additional authors");
+    author.value = "invalid"; save.click(); await sleep(60);
+    ok(/Could not save trusted authors/.test(row.textContent) && author.value === "invalid" && !save.disabled,
+       "failed save retains draft and reports error for retry");
+    author.value = "";
+  }
+
   // --- Load large sessions in full: opt-in, NOT live, numbers shown but not edited
   const tlSel = '.cdbx-switch[aria-label="load large Code sessions in full"]';
   const tl = panel.querySelector(tlSel);
@@ -454,6 +476,33 @@ async function featuresPanel(featuresItem) {
     ok(!restartUp(tlRow), "and takes its Restart now away again");
     ok(tlToast() === "Large sessions off - no restart needed",
        "...and so does its toast, from the main side's pendingRestart: " + tlToast());
+  }
+
+  // --- Wake Auto-fix sessions when a PR is ready to merge: opt-in, live, says its cost
+  {
+    const afSel = '.cdbx-switch[aria-label="wake Auto-fix sessions when a PR is ready to merge"]';
+    const af = panel.querySelector(afSel);
+    ok(!!af, "renders the Auto-fix ready-to-merge switch");
+    if (af) {
+      const afRow = af.closest(".cdbx-row");
+      const afNote = afRow.querySelector(".cdbx-note").textContent;
+      ok(afRow.querySelector(".cdbx-id").textContent === "Wake Auto-fix sessions when a PR is ready to merge",
+         "titled Wake Auto-fix sessions when a PR is ready to merge");
+      ok(afRow.previousElementSibling === null && afRow.parentElement.previousElementSibling.textContent === "Code",
+         "under its own Code heading");
+      ok(af.getAttribute("aria-checked") === "false" && !af.disabled, "off by default (opt-in), not locked");
+      ok(/one GitHub read per Auto-fix PR/.test(afNote) && /one model turn per notice/.test(afNote),
+         "the note says what it costs: " + afNote);
+      ok(/never merges/.test(afNote) && /Applies live/.test(afNote), "the note says it never merges and applies live");
+      af.click();
+      await sleep(60);
+      ok((window.__afmrCalls || []).length === 1 && window.__afmrCalls[0] === true,
+         "clicking it calls autoFixMergeReadySet(true) exactly once: " + JSON.stringify(window.__afmrCalls));
+      ok(af.getAttribute("aria-checked") === "true", "the switch reflects the write");
+      af.click();
+      await sleep(60);
+      ok(af.getAttribute("aria-checked") === "false", "and flips back");
+    }
   }
 
   // --- non-Anthropic gateway models: read at startup, so the same per-row
@@ -859,12 +908,14 @@ async function featuresPanel(featuresItem) {
         .map(function (h) { return h.textContent; });
     };
     ok(visible().length === heads.length, "every row is visible before typing");
+    // The trusted-authors row is a list editor, not a switch, so count switches rather than heads.
+    const switchesBefore = panel.querySelectorAll(".cdbx-switch").length;
 
     await type("panel tabs");
     ok(visible().join(",") === "Layout",
        "a title match leaves only that section: " + visible().join(","));
     ok(!!panel.querySelector(".cdbx-row .cdbx-id"), "the matching row is still in the DOM");
-    ok(panel.querySelectorAll(".cdbx-switch").length === heads.length,
+    ok(panel.querySelectorAll(".cdbx-switch").length === switchesBefore,
        "no row was re-rendered - all switches survive the filter (" +
        panel.querySelectorAll(".cdbx-switch").length + ")");
     ok(window.__panelTabsCalls.length === 1 && window.__pickerCalls.length === 2,
@@ -3132,6 +3183,11 @@ window.cdbExtra = {
   // Load large sessions in full. Without these two the row is silently skipped
   // (renderToggleRow answers nothing when its bridge half is missing), so a
   // harness that omits them would pass while never rendering the row.
+  autoFixAuthorRead: function () { return Promise.resolve({ ok: true, entries: [], lockedByJsonc: false }); },
+  autoFixAuthorSet: function (entries) {
+    (window.__authorCalls || (window.__authorCalls = [])).push(entries);
+    return Promise.resolve(entries.indexOf("invalid") !== -1 ? { ok: false, error: "Invalid host/login" } : { ok: true, entries: entries });
+  },
   transcriptLimitsRead: function () { return Promise.resolve(window.__tlState || { ok: true, enabled: false, lockedByJsonc: false, source: "default", mainMiB: 256, subagentMiB: 192, activeNow: false, activeMainMiB: null, activeSubagentMiB: null, pendingRestart: false }); },
   // Answers pendingRestart the way the main side does: owed while the saved
   // switch differs from what the running app was started with (activeNow).
@@ -3163,6 +3219,9 @@ window.cdbExtra = {
     window.__diffViewsCalls.push(enabled);
     return Promise.resolve({ ok: true, enabled: enabled, path: "/tmp/diff-views.json", nudged: true });
   },
+  // Wake Auto-fix sessions when a PR is ready to merge: opt-in, live.
+  autoFixMergeReadyRead: function () { return Promise.resolve(window.__afmrState || { ok: true, enabled: false, lockedByJsonc: null }); },
+  autoFixMergeReadySet: function (enabled) { window.__afmrCalls = (window.__afmrCalls || []).concat([enabled]); return Promise.resolve({ ok: true, enabled: enabled, path: "/tmp/afmr.json" }); },
   pickerRead: function () { return Promise.resolve(window.__pickerState); },
   pickerSet: function (enabled) {
     window.__pickerCalls.push(enabled);

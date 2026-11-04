@@ -2316,6 +2316,76 @@
     });
   }
 
+  // --- Code: explicit additional authors, scoped to a GitHub server ---------
+  function renderAutoFixAuthorRow(panel) {
+    var api = window.cdbExtra;
+    if (!api || typeof api.autoFixAuthorRead !== "function" || typeof api.autoFixAuthorSet !== "function") return;
+    var spec = {
+      section: "Code", title: "Trusted Auto-fix PR authors",
+      note: "Empty by default: the authenticated gh user is always recognized. Add exact host/login " +
+        "pairs, one per line (for example github.com/my-app[bot]), to also recognize selected users " +
+        "or GitHub App bots. No URLs or wildcards. Their PRs count as the session's own PRs (binding, " +
+        "discovery on the session's branch, automatic and model-requested Auto-fix); authentication, " +
+        "PR scope, origin/age, consent and race checks remain. It does not enable Auto-fix itself. Applies live to future attempts."
+    };
+    var head = el("div", "cdbx-sec-h");
+    head.appendChild(el("span", "cdbx-sec-t", spec.section));
+    var host = el("div", "cdbx-list");
+    var row = el("div", "cdbx-row");
+    var main = el("div", "cdbx-row-main");
+    main.appendChild(el("div", "cdbx-id", spec.title));
+    main.appendChild(el("div", "cdbx-note", spec.note));
+    var label = el("label", "cdbx-note", "Additional trusted authors (one host/login per line)");
+    label.htmlFor = "cdbx-autofix-authors";
+    var area = el("textarea", "cdbx-area");
+    var editor = el("div", "cdbx-areawrap");
+    editor.appendChild(area);
+    area.id = label.htmlFor;
+    area.rows = 4;
+    area.maxLength = 18000;
+    area.spellcheck = false;
+    area.placeholder = "github.com/my-app[bot]";
+    area.disabled = true;
+    var save = el("button", "cdbx-btn", "Save trusted authors");
+    save.type = "button";
+    save.disabled = true;
+    var state = el("div", "cdbx-state", "Loading...");
+    state.setAttribute("role", "status");
+    state.setAttribute("aria-live", "polite");
+    main.appendChild(label); main.appendChild(editor); main.appendChild(save); main.appendChild(state);
+    row.appendChild(main); host.appendChild(row); panel.appendChild(head); panel.appendChild(host);
+    var busy = false, locked = true;
+    function show(res) {
+      if (failed(res) || !Array.isArray(res.entries)) {
+        state.textContent = "Unavailable: " + reason(res); return;
+      }
+      locked = !!res.lockedByJsonc;
+      area.value = res.entries.join("\n");
+      area.disabled = locked; save.disabled = locked;
+      state.textContent = (res.warning || (res.entries.length + " additional trusted author(s)")) +
+        (locked ? " - set in claude-desktop-extra.jsonc; edit that file to change this" : " - applies live");
+    }
+    api.autoFixAuthorRead().then(show, function (e) { state.textContent = "Unavailable: " + String(e); });
+    save.addEventListener("click", function () {
+      if (busy || locked) return;
+      var entries = area.value.split(/\r?\n/).map(function (s) { return s.trim(); }).filter(Boolean);
+      busy = true; save.disabled = true; area.disabled = true; state.textContent = "Saving...";
+      api.autoFixAuthorSet(entries).then(function (res) {
+        busy = false;
+        if (failed(res)) {
+          area.disabled = locked; save.disabled = locked;
+          state.textContent = "Could not save trusted authors: " + reason(res); return;
+        }
+        show(res);
+        toast("Trusted Auto-fix authors saved");
+      }, function (e) {
+        busy = false; area.disabled = locked; save.disabled = locked;
+        state.textContent = "Could not save trusted authors: " + String(e);
+      });
+    });
+    return { head: head, host: host, spec: spec };
+  }
+
   // --- sessions: how much of a big Code session the app loads ---------------
   // Ours, opt-in, and the other kind of row from Files quick open: NOT live. The
   // limits are handed to Anthropic's session manager when it is constructed at
@@ -2824,6 +2894,38 @@
     });
   }
 
+  // --- Code: wake Auto-fix sessions when a PR is ready to merge ------------
+  // Off by default. Main side: cdb-autofix-merge-ready:* in
+  // js/extra_settings_main.js; the sweep wrapper in
+  // patches/community/add_feature_autofix_merge_ready.nim reads it on every
+  // sweep, so it applies live.
+  function renderAutoFixMergeReadyRow(panel) {
+    return renderToggleRow(panel, {
+      section: "Code",
+      title: "Wake Auto-fix sessions when a PR is ready to merge",
+      note: "For a PR with Auto-fix on, the Code session gets a short notice when GitHub reports it " +
+        "ready to merge (open, checks green, reviews done, no conflicts); Claude reports it and waits for " +
+        "you - it never merges or turns on auto-merge. Costs one GitHub read per Auto-fix PR on each " +
+        "Auto-fix sweep (every minute while the app is focused) and one model turn per notice. Applies live.",
+      ariaLabel: "wake Auto-fix sessions when a PR is ready to merge",
+      read: "autoFixMergeReadyRead",
+      write: "autoFixMergeReadySet",
+      lockFile: "claude-desktop-extra.jsonc",
+      // Opt-in: only an explicit true is on.
+      isOn: function (res) { return res.enabled === true; },
+      describe: function (on) {
+        return on ? "on - ready-to-merge notices for Auto-fix PRs" : "off - Auto-fix as shipped";
+      },
+      writeArg: function (next) { return next; },
+      toast: function (next) {
+        return next
+          ? "Auto-fix sessions are told when their PR is ready to merge"
+          : "Auto-fix no longer sends ready-to-merge notices";
+      },
+      errorPrefix: "Could not change the setting: "
+    });
+  }
+
   // --- Computer Use: ask before controlling an app --------------------------
   // On by default (main answers enabled unless the key is false). Main side:
   // cdb-cu-ask:* in js/extra_settings_main.js; the tool side js/cu_consent.js.
@@ -3216,6 +3318,8 @@
     renderFilesQuickOpenRow,
     renderCustomModelsRow,
     renderAllowNonAnthropicModelsRow,
+    renderAutoFixAuthorRow,
+    renderAutoFixMergeReadyRow,
     renderTranscriptLimitsRow,
     renderWindowControlsRow,
     renderNativeTitlebarRow,

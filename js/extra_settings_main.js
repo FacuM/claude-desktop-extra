@@ -259,6 +259,52 @@
     return undefined;
   }
 
+  // Additional PR authors, never a blanket bypass. Exact host/login pairs;
+  // only the author check is extended, not ownership, scope or consent.
+  var __cdbEx_AUTOFIX_KEY = "autoFixTrustedAuthors";
+  function __cdbEx_normalizeAuthors(entries) {
+    if (!Array.isArray(entries) || entries.length > 50) throw new Error("Use at most 50 host/login entries");
+    var out = [];
+    entries.forEach(function (entry) {
+      if (typeof entry !== "string" || entry.length > 355) throw new Error("Each author must be a host/login string");
+      var parts = entry.trim().toLowerCase().split("/");
+      var host = parts[0], login = parts[1];
+      if (parts.length !== 2 || !host || host.length > 253 ||
+          !host.split(".").every(function (label) { return /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label); }) ||
+          !login || login.length > 100 || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\[bot\])?$/.test(login)) {
+        throw new Error("Use exact host/login entries, for example github.com/my-app[bot]; no URLs or wildcards");
+      }
+      var canonical = host + "/" + login;
+      if (out.indexOf(canonical) === -1) out.push(canonical);
+    });
+    return out;
+  }
+  function __cdbEx_autoFixAuthorPref() {
+    var p = __cdbEx_paths();
+    var jsonc;
+    try {
+      var text = _fs.readFileSync(p.jsonc, "utf8");
+      var cfg = JSON.parse(__cdbEx_strip(text) || "{}");
+      if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) throw new Error("expected an object");
+      jsonc = cfg[__cdbEx_AUTOFIX_KEY];
+    } catch (e) {
+      if (e.code !== "ENOENT") return { entries: [], locked: true, warning: "Cannot read claude-desktop-extra.jsonc; additional authors are not trusted" };
+    }
+    var locked = jsonc !== undefined;
+    var raw = locked ? jsonc : __cdbEx_readFileKey(p.json, __cdbEx_AUTOFIX_KEY);
+    try { return { entries: __cdbEx_normalizeAuthors(raw === undefined ? [] : raw), locked: locked }; }
+    catch (e) { return { entries: [], locked: locked, warning: "Invalid " + __cdbEx_AUTOFIX_KEY + ": " + e.message }; }
+  }
+  if (process.platform === "linux") {
+    globalThis.__cdbAutoFixAuthorAllowed = function (login, host) {
+      try {
+        if (typeof login !== "string" || typeof host !== "string") return false;
+        var pair = __cdbEx_normalizeAuthors([host + "/" + login])[0];
+        return __cdbEx_autoFixAuthorPref().entries.indexOf(pair) !== -1;
+      } catch (e) { return false; }
+    };
+  }
+
   // --- tray glyph: "Always use the white tray icon" (issue #305) -------------
   // patches/linux/fix_tray_icon_theme.nim makes upstream's tray-icon selector
   // ask globalThis.__cdbTrayAlwaysWhite() first: true picks the white glyph on
@@ -280,6 +326,27 @@
   if (process.platform === "linux") {
     globalThis.__cdbTrayAlwaysWhite = function () {
       try { return __cdbEx_trayPref().value === true; } catch (e) { return false; }
+    };
+  }
+
+  // --- Auto-fix: wake the session when its PR is ready to merge ------------
+  // Same shape as the tray switch above. The wrapper that
+  // patches/community/add_feature_autofix_merge_ready.nim puts around
+  // AutoFixEngine.checkSession asks globalThis.__cdbAutoFixMergeReadyEnabled()
+  // on every sweep (60 s focused, 5 min unfocused, per Auto-fix PR); only true
+  // runs the readiness check. Off is the default and the absence of the key.
+  // No cache: each call reads the two small settings files, so a flip applies
+  // from the next sweep.
+  var __cdbEx_AFMR_KEY = "autoFixMergeReady";
+  function __cdbEx_afmrPref() {
+    var p = __cdbEx_paths();
+    var jsonc = __cdbEx_readFileKey(p.jsonc, __cdbEx_AFMR_KEY);
+    if (typeof jsonc === "boolean") return { value: jsonc, locked: true };
+    return { value: __cdbEx_readFileKey(p.json, __cdbEx_AFMR_KEY) === true, locked: false };
+  }
+  if (process.platform === "linux") {
+    globalThis.__cdbAutoFixMergeReadyEnabled = function () {
+      try { return __cdbEx_afmrPref().value === true; } catch (e) { return false; }
     };
   }
 
@@ -3036,6 +3103,28 @@
       return { ok: true, enabled: enabled, path: res.path, refreshed: refreshed };
     },
 
+    // Wake Auto-fix sessions when a PR is ready to merge. Pref and reader
+    // above; the sweep wrapper reads it live, so there is nothing to refresh.
+    "cdb-autofix-merge-ready:read": function () {
+      var s = __cdbEx_afmrPref();
+      return { ok: true, enabled: s.value, lockedByJsonc: s.locked ? true : null };
+    },
+
+    "cdb-autofix-merge-ready:set": function (enabled) {
+      if (typeof enabled !== "boolean") return { ok: false, error: "enabled must be a boolean" };
+      if (__cdbEx_afmrPref().locked) {
+        return { ok: false, lockedByJsonc: true,
+          error: __cdbEx_AFMR_KEY + " is set in claude-desktop-extra.jsonc - edit that file to change it" };
+      }
+      var res = __cdbEx_writeCfg(function (cfg) {
+        if (enabled) cfg[__cdbEx_AFMR_KEY] = true;
+        else delete cfg[__cdbEx_AFMR_KEY];
+        return enabled;
+      });
+      if (!res.ok) return res;
+      return { ok: true, enabled: enabled, path: res.path };
+    },
+
     // Computer Use: read app controls (accessibility). Pref and reader above.
     "cdb-cu-ax:read": function () {
       var s = __cdbEx_cuAxPref();
@@ -3077,6 +3166,29 @@
       });
       if (!res.ok) return res;
       return { ok: true, enabled: enabled, path: res.path };
+    },
+
+    "cdb-autofix-author:read": function () {
+      var s = __cdbEx_autoFixAuthorPref();
+      return { ok: true, entries: s.entries, warning: s.warning || null, lockedByJsonc: s.locked };
+    },
+
+    "cdb-autofix-author:set": function (entries) {
+      var normalized;
+      try { normalized = __cdbEx_normalizeAuthors(entries); }
+      catch (e) { return { ok: false, error: e.message }; }
+      if (__cdbEx_autoFixAuthorPref().locked) {
+        return { ok: false, error: __cdbEx_AUTOFIX_KEY + " is set in claude-desktop-extra.jsonc - edit that file to change it" };
+      }
+      var res = __cdbEx_writeCfg(function (cfg) {
+        if (normalized.length) cfg[__cdbEx_AUTOFIX_KEY] = normalized;
+        else delete cfg[__cdbEx_AUTOFIX_KEY];
+        // An earlier local preview used this boolean. Never migrate it into trust.
+        delete cfg.autoFixAllowDifferentAuthor;
+        return normalized;
+      });
+      if (!res.ok) return res;
+      return { ok: true, entries: normalized, path: res.path };
     },
 
     "cdb-flags:catalog": function () {
@@ -3574,6 +3686,7 @@
   // The background-display channels are Linux-only: on the downstream Windows
   // build they answer a plain refusal instead of touching /proc or X sockets.
   // The tray switch too: the glyph it picks is a Linux icon.
+  // And the Auto-fix ready-to-merge wake: its patch only runs on Linux.
   if (process.platform !== "linux") {
     Object.keys(__cdbEx_handlers).forEach(function (ch) {
       if (ch.indexOf("cdb-cubg:") === 0) {
@@ -3584,8 +3697,12 @@
         __cdbEx_handlers[ch] = function () { return { ok: false, error: "Computer Use app approval is Linux only" }; };
       } else if (ch.indexOf("cdb-cu-ax:") === 0) {
         __cdbEx_handlers[ch] = function () { return { ok: false, error: "Computer Use app controls are Linux only" }; };
+      } else if (ch.indexOf("cdb-autofix-author:") === 0) {
+        __cdbEx_handlers[ch] = function () { return { ok: false, error: "the Auto-fix author option is Linux only" }; };
       } else if (ch.indexOf("cdb-tray:") === 0) {
         __cdbEx_handlers[ch] = function () { return { ok: false, error: "the tray icon switch is Linux only" }; };
+      } else if (ch.indexOf("cdb-autofix-merge-ready:") === 0) {
+        __cdbEx_handlers[ch] = function () { return { ok: false, error: "the Auto-fix ready-to-merge wake is Linux only" }; };
       }
     });
   }
