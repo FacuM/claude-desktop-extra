@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /*
- * test-cu-status-main.mjs - main-process tests for the Computer Use status page
- * (Settings -> Extra -> Community -> Computer Use -> Details): the
+ * test-cu-status-main.mjs - main-process tests for the Computer Use status block
+ * (Settings -> Extra -> Computer Use): the
  * cdb-cu-status:* ipcMain handlers in js/extra_settings_main.js, their
  * cuStatus* wrappers in js/extra_settings_bridge.js, and the unprivileged
  * refusals of the root helper they run (packaging/udev/cdb-tpm-access).
@@ -291,6 +291,24 @@ function reset() {
   DIALOG.answer = 1; DIALOG.calls.length = 0;
 }
 
+// The pkexec action exactly as the page shows it: the command is word for word
+// what pkexec runs (the resolved pkexec and helper), and Enable names what it
+// changes and how to undo it.
+const RULE_LINE = readFileSync(RULE_FILE, "utf8").split("\n").filter((l) => l && l[0] !== "#").join("\n");
+const APPLY = "udevadm control --reload\nudevadm trigger --action=change --subsystem-match=tpmrm";
+const NOOP_ENABLE = "Already enabled - the rule link is installed";
+const NOOP_DISABLE = "Nothing to remove - no rule link from this package is installed";
+const NOOP_FOREIGN = "Another file is installed at " + LINK + " - it is not replaced";
+function pkAct(verb, off) {
+  const a = { kind: "pkexec", command: PKEXEC_FAKE + " " + HELPER_FAKE + " " + verb, link: LINK, apply: APPLY };
+  if (verb === "enable") {
+    Object.assign(a, { target: SRC, rule: RULE_LINE, undo: PKEXEC_FAKE + " " + HELPER_FAKE + " disable",
+      undoManual: "sudo rm -f " + LINK + " && sudo udevadm control --reload" });
+  }
+  if (off) a.disabled = off;
+  return J(a);
+}
+
 const m = load();
 reset();
 const read = async () => m.call("cdb-cu-status:read");
@@ -298,11 +316,11 @@ const STATUSES = ["ok", "action", "na", "unknown"];
 
 section("registration and source");
 {
-  const CH = ["summary", "read", "tpm-enable", "tpm-disable", "reset-screen-sharing"].map((c) => "cdb-cu-status:" + c);
-  ok(CH.every((c) => typeof m.handlers[c] === "function"), "all five cdb-cu-status channels are registered", CH.filter((c) => !m.handlers[c]).join(","));
+  const CH = ["read", "tpm-enable", "tpm-disable", "reset-screen-sharing"].map((c) => "cdb-cu-status:" + c);
+  ok(CH.every((c) => typeof m.handlers[c] === "function"), "all four cdb-cu-status channels are registered", CH.filter((c) => !m.handlers[c]).join(","));
   ok(log() === "", "loading the module spawns nothing");
   const src = readFileSync(MAIN_JS, "utf8");
-  const a = src.indexOf("// --- Computer Use status (Community -> Computer Use -> Details)");
+  const a = src.indexOf("// --- Computer Use status (Settings -> Extra -> Computer Use)");
   const b = src.indexOf("// --- handlers ---", a);
   const part = a >= 0 && b > a ? src.slice(a, b) : "";
   ok(part.length > 5000 && !/Sync\(/.test(part), "no sync call in the status helpers", (part.match(/\w*Sync\(/g) || []).join(","));
@@ -312,10 +330,11 @@ section("registration and source");
   ok(helperDecl.test(part), "the helper path comes from process.resourcesPath only");
   ok(!/process\.env\.[A-Z_]*(HELPER|TPM)/.test(part), "no environment variable can name the helper or the device");
   const page = readFileSync(PAGE_JS, "utf8");
-  const pa = page.indexOf("// --- Computer Use status (cloud Cowork / Dispatch)");
+  const pa = page.indexOf("// --- Computer Use (its own Extra entry)");
   const pb = page.indexOf("// A copyable command block", pa);
   const ppart = pa >= 0 && pb > pa ? page.slice(pa, pb) : "";
-  ok(ppart.length > 3000 && !/\bset(Timeout|Interval)\(/.test(ppart), "the page's status code adds no timer");
+  ok(ppart.length > 3000 && !/\bsetInterval\(/.test(ppart) && (ppart.match(/\bsetTimeout\(/g) || []).length === 1 && /,\s*2000\)/.test(ppart),
+    "the page's status code has no interval and exactly one timer: the 2 s 'can take up to 8 seconds' note");
   ok(!/\bconfirm\(/.test(ppart) && /api\.cuStatusTpmEnable/.test(ppart), "the page asks no confirm() of its own: main's dialog is the only consent");
 }
 
@@ -332,7 +351,7 @@ section("bridge wrappers: fixed channels, no arguments");
   };
   vm.runInNewContext(readFileSync(BRIDGE_JS, "utf8"), vm.createContext(sandbox));
   const api = exposed || {};
-  const map = { cuStatusSummary: "summary", cuStatusRead: "read", cuStatusTpmEnable: "tpm-enable",
+  const map = { cuStatusRead: "read", cuStatusTpmEnable: "tpm-enable",
     cuStatusTpmDisable: "tpm-disable", cuStatusResetScreenSharing: "reset-screen-sharing" };
   for (const [n, ch] of Object.entries(map)) {
     calls.length = 0;
@@ -353,14 +372,14 @@ section("TPM row");
 {
   reset(); setDev("absent");
   let r = await read();
-  ok(r.ok && r.rows.tpm.status === "na" && r.rows.tpm.fact === "no TPM 2.0 resource manager" && r.actions.tpmEnable === null,
+  ok(r.ok && r.rows.tpm.status === "na" && r.rows.tpm.fact === "no TPM 2.0 resource manager" && r.actions.tpmEnable === null && r.actions.tpmDisable === null,
     "no device node: Not available, nothing offered", J(r.rows && r.rows.tpm));
   ok(STATUSES.indexOf(r.rows.desktop.status) >= 0 && typeof r.rows.cloud.note === "string" && r.rows.tpm.note.length > 20,
     "rows carry status, fact and note");
 
   reset(); setDev("ok");
   r = await read();
-  ok(r.rows.tpm.status === "ok" && /accessible$/.test(r.rows.tpm.fact) && r.actions.restart === false, "accessible, start unknown: OK, no restart", J(r.rows.tpm));
+  ok(r.rows.tpm.status === "ok" && /accessible through the \S+ group$/.test(r.rows.tpm.fact) && r.actions.restart === false, "accessible (in the device group), start unknown: OK, no restart", J(r.rows.tpm));
   globalThis.__cdbTpmAtStart = Object.freeze({ state: "ok", code: null });
   r = await read();
   ok(r.rows.tpm.status === "ok" && r.actions.restart === false, "accessible now and at start: OK");
@@ -373,40 +392,100 @@ section("TPM row");
   r = await read();
   ok(r.rows.tpm.status === "action" && /^present, no access for this user \(.+:.+ 40\)$/.test(r.rows.tpm.fact),
     "no access, no rule: owner:group mode in the fact line", r.rows.tpm.fact);
-  ok(J(r.actions.tpmEnable) === '{"kind":"pkexec"}' && r.actions.tpmDisable === null && r.actions.tssCommand === null,
-    "every gate holds: Enable by pkexec, no Disable", J(r.actions));
+  ok(J(r.actions.tpmEnable) === pkAct("enable") && J(r.actions.tpmDisable) === pkAct("disable", NOOP_DISABLE) && r.actions.tssCommand === null,
+    "every gate holds: Enable by pkexec, with its exact command, link, rule, udev reload and undo; Disable shown but disabled", J(r.actions));
+  ok(/^SUBSYSTEM=="tpmrm", .*TAG\+="uaccess"$/.test(RULE_LINE) && r.actions.tpmEnable.rule === RULE_LINE,
+    "the rule shown is the shipped rule's one active line", J(r.actions.tpmEnable && r.actions.tpmEnable.rule));
 
   setLink("ours");
   r = await read();
-  ok(r.rows.tpm.fact === "rule enabled, but this session got no access" && r.actions.tpmEnable === null &&
-    /^sudo usermod -aG \S+ "\$USER"$/.test(r.actions.tssCommand || "") && J(r.actions.tpmDisable) === '{"kind":"pkexec"}',
-    "our link, still no access: the tss command, and Disable", J(r.actions));
-  setLink("pkg");
-  r = await read();
-  ok(r.rows.tpm.fact === "rule link points at a removed install" && J(r.actions.tpmEnable) === '{"kind":"pkexec"}' &&
-    J(r.actions.tpmDisable) === '{"kind":"pkexec"}', "a link to the package path that is gone: stale, Enable re-points it", J(r));
+  ok(r.rows.tpm.fact === "rule enabled, but this session got no access" && J(r.actions.tpmEnable) === pkAct("enable", NOOP_ENABLE) &&
+    /^sudo usermod -aG \S+ "\$USER"$/.test(r.actions.tssCommand || "") && J(r.actions.tpmDisable) === pkAct("disable"),
+    "our link, still no access: the tss command, Disable live, Enable shown but disabled", J(r.actions));
+  // Only where the package is not installed: on a host that has it, that
+  // path exists and the link is not stale (the "ours" case above covers it).
+  if (existsSync("/usr/lib/claude-desktop/resources/linux-udev/70-claude-desktop-extra-tpm.rules")) {
+    console.log("  SKIP a link to the package path that is gone: this host has the package installed");
+  } else {
+    setLink("pkg");
+    r = await read();
+    ok(r.rows.tpm.fact === "rule link points at a removed install" && J(r.actions.tpmEnable) === pkAct("enable") &&
+      J(r.actions.tpmDisable) === pkAct("disable"), "a link to the package path that is gone: stale, Enable re-points it", J(r));
+  }
   setLink("stale");
   r = await read();
   ok(r.rows.tpm.fact === "rule link points at a removed install" && !!r.actions.tpmEnable, "a dangling Nix store link: stale");
   for (const st of ["nixbad", "tmp"]) {
     setLink(st);
     r = await read();
-    ok(/another file is installed at /.test(r.rows.tpm.fact) && r.actions.tpmEnable === null && r.actions.tpmDisable === null,
-      "a link to " + (st === "tmp" ? "a /tmp tree" : "a /nix/store path without the hash-name shape") + ": foreign, never Enable or Disable", J(r));
+    ok(/another file is installed at /.test(r.rows.tpm.fact) && r.actions.tpmEnable.disabled === NOOP_FOREIGN && r.actions.tpmDisable.disabled === NOOP_DISABLE,
+      "a link to " + (st === "tmp" ? "a /tmp tree" : "a /nix/store path without the hash-name shape") + ": foreign, Enable and Disable shown but both disabled", J(r));
   }
   setLink("foreign");
   r = await read();
   ok(/^present, no access for this user .* - another file is installed at /.test(r.rows.tpm.fact) &&
-    r.actions.tpmEnable === null && r.actions.tpmDisable === null && !!r.actions.tssCommand,
-    "a foreign symlink: never Enable or Disable by button, the tss command instead", J(r.actions));
+    r.actions.tpmEnable.disabled === NOOP_FOREIGN && r.actions.tpmDisable.disabled === NOOP_DISABLE && !!r.actions.tssCommand,
+    "a foreign symlink: both shown but disabled, the tss command too", J(r.actions));
   setLink("file");
   r = await read();
-  ok(r.rows.tpm.fact === "rule enabled, but this session got no access" && r.actions.tpmDisable === null && r.actions.tpmEnable === null,
-    "a regular file at the link path (outside an AppImage): no Disable", J(r.actions));
+  ok(r.rows.tpm.fact === "rule enabled, but this session got no access" && r.actions.tpmDisable.disabled === NOOP_DISABLE && r.actions.tpmEnable.disabled === NOOP_ENABLE,
+    "a regular file at the link path (outside an AppImage): both shown, both disabled", J(r.actions));
   process.env.CLAUDE_APPIMAGE_PATH = "/home/u/Claude.AppImage";
   r = await read();
   ok(r.actions.tpmDisable && r.actions.tpmDisable.kind === "command" && /^sudo rm -f /.test(r.actions.tpmDisable.text) &&
-    r.actions.tpmDisable.text.indexOf(LINK) >= 0, "AppImage with its own copied file: Disable is the sudo rm command", J(r.actions.tpmDisable));
+    r.actions.tpmDisable.text.indexOf(LINK) >= 0 && !r.actions.tpmDisable.disabled, "AppImage with its own copied file: Disable is the sudo rm command, live", J(r.actions.tpmDisable));
+}
+
+section("TPM row matrix: both actions always, a no-op one disabled with its reason");
+{
+  const realGroups = process.getgroups, realEgid = process.getegid;
+  const withGroups = async (gids, fn) => {
+    process.getgroups = () => gids; process.getegid = () => gids[0] === undefined ? -1 : gids[0];
+    try { return await fn(); } finally { process.getgroups = realGroups; process.getegid = realEgid; }
+  };
+  // state -> { dev, link, groups ("in" | "out"), fact regex, status, enOff, disOff }
+  const ACL = /^accessible for this session - no rule installed, access ends when you log out$/;
+  const states = [
+    { n: "denied, no link", dev: "denied", link: "absent", st: "action", fact: /^present, no access for this user/, en: null, dis: NOOP_DISABLE },
+    { n: "ok + link ours", dev: "ok", link: "ours", st: "ok", fact: /accessible - rule enabled$/, en: NOOP_ENABLE, dis: null },
+    { n: "ok + no link + not in group (ACL leftover)", dev: "ok", link: "absent", groups: "out", st: "action", fact: ACL, en: null, dis: NOOP_DISABLE },
+    { n: "ok + no link + in group", dev: "ok", link: "absent", groups: "in", st: "ok", fact: /accessible through the \S+ group$/, en: null, dis: NOOP_DISABLE },
+    { n: "ok + stale link", dev: "ok", link: "stale", groups: "out", st: "action", fact: ACL, en: null, dis: null },
+    { n: "ok + foreign file", dev: "ok", link: "foreign", groups: "out", st: "action", fact: ACL, en: NOOP_FOREIGN, dis: NOOP_DISABLE },
+    { n: "denied + stale link", dev: "denied", link: "stale", st: "action", fact: /^rule link points at a removed install$/, en: null, dis: null },
+    { n: "denied + foreign file", dev: "denied", link: "foreign", st: "action", fact: /another file is installed at /, en: NOOP_FOREIGN, dis: NOOP_DISABLE }
+  ];
+  const envs = [
+    { n: "pkexec button", prep() {}, kinds: ["pkexec", "pkexec"] },
+    { n: "command fallback (untrusted helper)", opts: { trusted: false }, prep() {}, kinds: ["command", "command"] },
+    { n: "NixOS", prep() { writeFileSync(NIXOS, ""); }, kinds: ["nixos", "command"] },
+    { n: "AppImage", prep() { process.env.CLAUDE_APPIMAGE_PATH = "/home/u/Claude.AppImage"; }, kinds: ["command", "command"] }
+  ];
+  for (const e of envs) {
+    const mod = e.opts ? load(e.opts) : m;
+    for (const c of states) {
+      reset(); setDev(c.dev); setLink(c.link); e.prep();
+      const r = await withGroups(c.groups === "in" ? [statSync(DEV).gid] : [4242424], () => mod.call("cdb-cu-status:read"));
+      const t = r.actions, tag = e.n + " / " + c.n + ": ";
+      ok(r.rows.tpm.status === c.st && c.fact.test(r.rows.tpm.fact), tag + "row " + c.st + " / " + r.rows.tpm.fact, J(r.rows.tpm));
+      ok(!!t.tpmEnable && !!t.tpmDisable && t.tpmEnable.kind === e.kinds[0] && t.tpmDisable.kind === e.kinds[1],
+        tag + "both actions present (" + e.kinds.join("+") + ")", J([t.tpmEnable && t.tpmEnable.kind, t.tpmDisable && t.tpmDisable.kind]));
+      const wantEn = c.en;
+      ok((t.tpmEnable.disabled || null) === wantEn, tag + "Enable " + (wantEn ? "disabled: " + wantEn : "active"), J(t.tpmEnable.disabled));
+      ok((t.tpmDisable.disabled || null) === c.dis, tag + "Disable " + (c.dis ? "disabled: " + c.dis : "active"), J(t.tpmDisable.disabled));
+      ok(typeof (t.tpmEnable.command || t.tpmEnable.text) === "string" && typeof (t.tpmDisable.command || t.tpmDisable.text) === "string",
+        tag + "both carry their command text");
+      // Main refuses the no-op without running anything (pkexec env only runs anything at all).
+      clearLog();
+      for (const [verb, off] of [["enable", c.en], ["disable", c.dis]]) {
+        if (!off) continue;
+        const x = await withGroups([4242424], () => mod.call("cdb-cu-status:tpm-" + verb));
+        ok(x.ok === false && x.code === "nothing-to-do" && x.error === off && x.command === null && log() === "" && DIALOG.calls.length === 0,
+          tag + verb + " refused as nothing-to-do, no dialog, no pkexec", J(x));
+      }
+    }
+  }
+  reset();
 }
 
 section("Enable gating: where pkexec is not offered");
@@ -437,7 +516,7 @@ section("Enable gating: where pkexec is not offered");
   ok(sudoCmd(a), "no pkexec at the fixed paths, a pkexec on PATH: PATH is never searched, sudo <helper> enable", J(a));
   reset(); process.env.PATH = binNoPk + ":/nonexistent";
   a = await enableOf();
-  ok(J(a) === '{"kind":"pkexec"}', "and the fixed path is used whatever PATH says", J(a));
+  ok(J(a) === pkAct("enable"), "and the fixed path is used whatever PATH says", J(a));
   reset();
   const pkPlain = join(binNoPk, "pkexec-plain");
   writeFileSync(pkPlain, readFileSync(PKEXEC_FAKE)); chmodSync(pkPlain, 0o755);
@@ -451,7 +530,7 @@ section("Enable gating: where pkexec is not offered");
   symlinkSync(PKEXEC_FAKE, pkLink);
   const viaLink = load({ pkexec: [join(base, "no-pkexec"), pkLink] });
   a = (await viaLink.call("cdb-cu-status:read")).actions.tpmEnable;
-  ok(J(a) === '{"kind":"pkexec"}', "first candidate missing, the second a link to a setuid root pkexec: the button", J(a));
+  ok(J(a) === pkAct("enable"), "first candidate missing, the second a link to a setuid root pkexec: the button, showing the resolved pkexec", J(a));
   clearLog();
   const lr = await viaLink.call("cdb-cu-status:tpm-enable");
   ok(lr.ok === true && log().split("\n").filter((l) => /^pkexec /.test(l)).join("|") === "pkexec " + HELPER_FAKE + " enable",
@@ -488,6 +567,8 @@ section("Enable / Disable: pkexec and exit mapping");
   ok(J(r) === J({ ok: true, changed: true, message: "cdb-tpm-access: enabled (" + LINK + " -> " + SRC + ")" }), "enable: ok, changed, the helper's line", J(r));
   ok(log().split("\n").filter(Boolean).join("|") === "pkexec " + HELPER_FAKE + " enable|helper enable",
     "pkexec ran the resolved helper with exactly [enable] - the page's arguments are dropped", log());
+  ok(JSON.parse(pkAct("enable")).command === PKEXEC_FAKE + " " + log().split("\n")[0].replace(/^pkexec /, ""),
+    "the command the page shows is the one that ran (the pkexec binary plus its argv)", log());
   ok(DIAGS.some((d) => /cu-status: tpm enable -> cdb-tpm-access: enabled/.test(d)), "logged through __cdbDiag");
   reset(); mode("helper", "already");
   r = await m.call("cdb-cu-status:tpm-enable");
@@ -525,29 +606,44 @@ section("Enable / Disable: pkexec and exit mapping");
   for (const st of ["absent", "foreign", "file"]) {
     reset(); setLink(st);
     r = await m.call("cdb-cu-status:tpm-disable");
-    ok(r.ok === false && r.code === "not-allowed" && log() === "", "disable with " + st + " at the link path: refused, nothing runs", J(r));
+    ok(r.ok === false && r.code === "nothing-to-do" && r.error === NOOP_DISABLE && r.command === null && log() === "",
+      "disable with " + st + " at the link path: refused as nothing to do, pkexec never runs", J(r));
   }
   reset(); process.env.CLAUDE_APPIMAGE_PATH = "/x.AppImage";
   r = await m.call("cdb-cu-status:tpm-enable");
   ok(r.ok === false && r.code === "not-allowed" && /sudo tee/.test(r.command || "") && log() === "",
     "enable inside an AppImage: refused with the command, pkexec never runs", J(r));
+  reset(); setDev("ok"); setLink("ours");
+  r = await m.call("cdb-cu-status:tpm-enable");
+  ok(r.ok === false && r.code === "nothing-to-do" && r.error === NOOP_ENABLE && r.command === null && log() === "",
+    "enable with our link installed: refused as nothing to do, pkexec never runs", J(r));
+  r = await m.call("cdb-cu-status:tpm-enable");
+  ok(r.code === "nothing-to-do", "and a repeat is again nothing-to-do, not the cooldown (a no-op never arms it)", J(r));
+  reset(); setDev("ok"); setLink("foreign");
+  r = await m.call("cdb-cu-status:tpm-enable");
+  ok(r.ok === false && r.code === "nothing-to-do" && log() === "", "enable over a foreign file: refused, nothing runs", J(r));
   reset(); setDev("ok");
   r = await m.call("cdb-cu-status:tpm-enable");
-  ok(r.ok === false && r.code === "not-allowed" && log() === "", "enable when the TPM is already accessible: refused", J(r));
+  ok(r.ok === true && /pkexec .* enable/.test(log()), "enable with the TPM accessible but no rule link (seat ACL leftover or group): allowed - it installs the rule", J(r));
 }
 
 section("Enable consent: main's confirmation dialog, then pkexec");
 {
   const pkLines = () => log().split("\n").filter((l) => /^pkexec /.test(l));
-  const mainRisk = JSON.parse((readFileSync(MAIN_JS, "utf8").match(/^ {2}var __cdbEx_CUS_TPM_RISK = (".*");$/m) || [])[1]);
+  const mainConfirm = JSON.parse((readFileSync(MAIN_JS, "utf8").match(/^ {2}var __cdbEx_CUS_TPM_CONFIRM = (".*");$/m) || ["", "null"])[1]);
+  ok(typeof mainConfirm === "string" && /udev rule/.test(mainConfirm) && /administrator password/.test(mainConfirm) &&
+    /every account that logs in at this computer's screen/.test(mainConfirm) &&
+    /Details and the exact command: Settings -> Extra -> Computer Use\.$/.test(mainConfirm) &&
+    (mainConfirm.match(/[.!?](\s|$)/g) || []).length <= 3 && !/\u2014/.test(mainConfirm),
+    "the dialog text is short (at most 3 sentences): the udev rule, the administrator password, every seat account, where the details are", mainConfirm);
   reset(); DIALOG.answer = 0;
   let r = await m.call("cdb-cu-status:tpm-enable");
   ok(r.ok === false && r.code === "declined" && r.command === null && pkLines().length === 0 && DIALOG.calls.length === 1,
     "Cancel in the dialog: declined, pkexec never runs", J([r, log()]));
   const [win, opts] = DIALOG.calls[0] || [];
   ok(win === FAKE_WIN && opts && opts.type === "warning" && J(opts.buttons) === J(["Cancel", "Enable TPM access"]) &&
-    opts.defaultId === 0 && opts.cancelId === 0 && opts.noLink === true && opts.detail === mainRisk && /TPM/.test(opts.message),
-    "the dialog: parented on the sender's window, warning, Cancel default and cancel, the risk text as detail", J(DIALOG.calls[0]));
+    opts.defaultId === 0 && opts.cancelId === 0 && opts.noLink === true && opts.detail === mainConfirm && /TPM/.test(opts.message),
+    "the dialog: parented on the sender's window, warning, Cancel default and cancel, the short consent text as detail", J(DIALOG.calls[0]));
   reset(); DIALOG.answer = 1;
   r = await m.call("cdb-cu-status:tpm-enable");
   ok(r.ok === true && DIALOG.calls.length === 1 && pkLines().join("|") === "pkexec " + HELPER_FAKE + " enable",
@@ -564,14 +660,14 @@ section("Enable consent: main's confirmation dialog, then pkexec");
   ok(r.code === "declined" && pkLines().length === 0, "no dialog API: declined, never an unconfirmed pkexec", J(r));
   reset();
   const winless = await m.callAs({ sender: { isDestroyed: () => false, getURL: () => "https://claude.ai/settings" }, senderFrame: { parent: null } }, "cdb-cu-status:tpm-enable");
-  ok(winless.ok === true && DIALOG.calls.length === 1 && DIALOG.calls[0].length === 1 && DIALOG.calls[0][0].detail === mainRisk,
+  ok(winless.ok === true && DIALOG.calls.length === 1 && DIALOG.calls[0].length === 1 && DIALOG.calls[0][0].detail === mainConfirm,
     "a sender with no window: the dialog still shows, unparented", J(DIALOG.calls));
   reset(); setLink("ours"); mode("helper", "disabled");
   r = await m.call("cdb-cu-status:tpm-disable");
   ok(r.ok === true && DIALOG.calls.length === 0 && /pkexec .* disable/.test(log()), "Disable: no dialog, pkexec directly", J(r));
-  reset(); setDev("ok");
+  reset(); setDev("ok"); setLink("ours");
   r = await m.call("cdb-cu-status:tpm-enable");
-  ok(r.code === "not-allowed" && DIALOG.calls.length === 0, "a refused state never shows the dialog", J(r));
+  ok(r.code === "nothing-to-do" && DIALOG.calls.length === 0, "a refused state never shows the dialog", J(r));
   reset(); mode("pkexec", "slow");
   const p1 = m.call("cdb-cu-status:tpm-enable");
   const p2 = await m.call("cdb-cu-status:tpm-enable");
@@ -608,11 +704,11 @@ section("Enable rate limit: 30 s after a declined or failed Enable");
   const r3 = await held3.call("cdb-cu-status:tpm-enable");
   ok(r.code === "helper-5" && r3.code === "cooldown", "so does a helper error", J([r, r3]));
   const held4 = load({ cooldownMs: 30000 });
-  reset(); setDev("ok");
+  reset(); setDev("ok"); setLink("ours");
   r = await held4.call("cdb-cu-status:tpm-enable");
   reset();
   const r4 = await held4.call("cdb-cu-status:tpm-enable");
-  ok(r.code === "not-allowed" && r4.ok === true, "a refused state (no prompt shown) does not", J([r, r4]));
+  ok(r.code === "nothing-to-do" && r4.ok === true, "a refused state (no prompt shown) does not", J([r, r4]));
   reset();
   const r5 = await held4.call("cdb-cu-status:tpm-enable");
   ok(r5.ok === true && DIALOG.calls.length === 1, "nor does a successful Enable", J(r5));
@@ -729,23 +825,6 @@ section("cloud row: this run's main.log lines (shared fixture)");
   ok(c.status === "unknown" && /rotated/.test(c.fact), "a log that starts after this run began: rotated, Unknown", J(c));
 }
 
-section("summary: no child process");
-{
-  reset();
-  let r = await m.call("cdb-cu-status:summary");
-  ok(r.ok && r.line === "This desktop: x11-bridge - Cloud Cowork and Dispatch: ready" && log() === "",
-    "summary line from the decision and the log, nothing spawned", J(r) + " " + log());
-  putLog(retimed(FIX).split("\n").slice(0, -4).join("\n"));
-  r = await m.call("cdb-cu-status:summary");
-  ok(/Cloud Cowork and Dispatch: needs TPM access$/.test(r.line), "keyless + no access: needs TPM access", r.line);
-  setDev("ok"); globalThis.__cdbTpmAtStart = Object.freeze({ state: "denied", code: "EACCES" });
-  r = await m.call("cdb-cu-status:summary");
-  ok(/restart Claude to use the TPM$/.test(r.line), "accessible since start: restart", r.line);
-  reset(); setDecision({ wayland: true, backend: "wlroots-bridge", bin: BRIDGE_FAKE, announceWayland: true }); rmSync(MAINLOG);
-  r = await m.call("cdb-cu-status:summary");
-  ok(r.line === "This desktop: wlroots-bridge - Cloud Cowork and Dispatch: not reported yet", "nothing in the log: not reported yet", r.line);
-}
-
 section("reset screen sharing");
 {
   reset(); process.env.CLAUDE_LAUNCHER = LAUNCHER;
@@ -764,7 +843,7 @@ section("reset screen sharing");
 section("win32 build (downstream): every channel refuses");
 {
   const w = load({ platform: "win32" });
-  const outs = await Promise.all(["summary", "read", "tpm-enable", "tpm-disable", "reset-screen-sharing"].map((c) => w.call("cdb-cu-status:" + c)));
+  const outs = await Promise.all(["read", "tpm-enable", "tpm-disable", "reset-screen-sharing"].map((c) => w.call("cdb-cu-status:" + c)));
   ok(outs.every((o) => J(o) === J({ ok: false, error: "Computer Use status is Linux only" })), "Linux only, from every channel", J(outs));
 }
 
@@ -854,9 +933,9 @@ section("single sources: rule text, risk text, container markers");
   reset();
   const page = readFileSync(PAGE_JS, "utf8");
   const pageRisk = (page.match(/^ {2}var CUS_RISK = (".*");$/m) || [])[1];
-  const mainRisk = (msrc.match(/^ {2}var __cdbEx_CUS_TPM_RISK = (".*");$/m) || [])[1];
-  ok(!!pageRisk && pageRisk === mainRisk, "the page's inline risk text is the confirmation dialog's");
-  const risk = mainRisk ? JSON.parse(mainRisk) : "";
+  ok(!!pageRisk && !/__cdbEx_CUS_TPM_RISK/.test(msrc),
+    "the full risk text has one home, the page (the dialog points there instead of repeating it)");
+  const risk = pageRisk ? JSON.parse(pageRisk) : "";
   ok(/every account that logs in at this computer's screen/.test(risk) && /\/dev\/tpmrm0, never \/dev\/tpm0/.test(risk) &&
     /clearing it/.test(risk) && /dictionary-attack lockout/.test(risk) && /tpm2_changeauth -c lockout/.test(risk) &&
     /tpm2_changeauth -c owner/.test(risk) && !/tss/.test(risk), "the risk text: every seat account, tpmrm0 only, clear/lockout/owner, changeauth, no tss comparison");

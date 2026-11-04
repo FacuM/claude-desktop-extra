@@ -3,7 +3,7 @@
 // and fail-closed gates in js/cu_linux_executor.js (+ the setting reader in
 // js/cu_mode_preamble.js and the gate in js/cu_handler_injection.js).
 //
-// Settings -> Extra -> Community -> "Computer Use on a background display"
+// Settings -> Extra -> Computer Use -> "Computer Use on a background display"
 // stores computerUseBackgroundDisplay = {enabled, kind: "x11"|"wlroots",
 // display, env?} in <userData>/claude-desktop-extra.jsonc (wins) or .json.
 // When it is on, Computer Use acts on that display only:
@@ -281,7 +281,7 @@ console.log("\n[wlroots target with env.DISPLAY keeps it]");
 }
 
 // ------------------------------------------------------- 3. refusal (fail closed)
-const DOWN = "Computer Use is set to the background display :99, which is not running. Start it, or turn off Settings -> Extra -> Community -> Computer Use on a background display.";
+const DOWN = "Computer Use is set to the background display :99, which is not running. Start it, or turn off Settings -> Extra -> Computer Use -> Computer Use on a background display.";
 for (const [label, files, screens, rx] of [
   ["display down (screens fails)", { "claude-desktop-extra.json": cfg({ enabled: true, kind: "x11", display: ":99" }) }, () => new Error("Command failed: x11-bridge screens\nError: cannot open display :99"), null],
   ["display answers no monitors", { "claude-desktop-extra.json": cfg({ enabled: true, kind: "x11", display: ":99" }) }, () => [], null],
@@ -477,6 +477,34 @@ console.log("\n[T5 off: geometry from Electron, unchanged]");
   check(ds.length === 1 && ds[0].width === 2048 && ds[0].scaleFactor === 1.25, "listDisplays = the desktop's (pin)", JSON.stringify(ds));
   const cp = await r.ex.getCursorPosition();
   check(cp.x === 7 && cp.y === 7, "cursor from getCursorScreenPoint (pin)", JSON.stringify(cp));
+}
+// Display auto-target (js/cu_display_target.js) on a background display: the
+// window list and the monitors are the TARGET's, so the pick can only ever be
+// one of the target's monitors - never the user's desktop.
+{
+  const nreq = (id) => ({ child_process: { execFileSync() { throw new Error("no"); } }, fs: { existsSync: () => false }, path, electron: { app: { getPath() { throw new Error("no"); } } } })[id];
+  if (!globalThis.__cdbCuWindowOwns) new Function("require", "process", readFileSync(path.join(ROOT, "js", "cu_ax_tools.js"), "utf8"))(nreq, process);
+  if (!globalThis.__cdbCuDisplayTarget) new Function("process", readFileSync(path.join(ROOT, "js", "cu_display_target.js"), "utf8"))(process);
+}
+const tgtWin = (x, y, w, h, extra = {}) => ({ id: "0x" + x, title: "Chrome", geometry: { x, y, width: w, height: h }, pid: 1, desktop_file_name: null, resource_class: "Google-chrome", resource_name: "google-chrome", is_dock: false, is_desktop: false, is_visible: true, is_minimized: false, output: null, stacking_order: 0, is_active: true, exclude_from_capture: false, ...extra });
+for (const [label, target, screens, wins, wantZoom, wantDiag] of [
+  ["x11 target, Chrome on its second monitor T2", { kind: "x11", display: ":99" }, T_SCREENS, [tgtWin(1300, 10, 600, 400)], "zoom --x 0 --y 0 --w 800 --h 600 --display T2", /display auto-target: apps=google-chrome -> T2 \(preferred T1\)/],
+  ["x11 target with one monitor: unchanged", { kind: "x11", display: ":99" }, SCREENS, [tgtWin(10, 10, 600, 400)], "zoom --x 0 --y 0 --w 1920 --h 1080 --display SCREEN", /kept SCREEN \(only one display\)/],
+  ["wlroots target (no window positions): unchanged", { kind: "wlroots", display: "wayland-9" }, T_SCREENS, [tgtWin(0, 0, 0, 0, { desktop_file_name: "google-chrome", resource_class: "google-chrome", resource_name: null })], "zoom --x 0 --y 0 --w 1280 --h 800 --display T1", /kept T1 \(wlroots-bridge reports no window positions\)/],
+]) {
+  console.log(`\n[T5 auto-target: ${label}]`);
+  // The user's desktop has two monitors; Chrome there must not matter.
+  const desk = [DISPLAYS[0], { ...DISPLAYS[0], id: 2, label: "two", bounds: { x: 1920, y: 0, width: 1920, height: 1080 }, nativeOrigin: { x: 1920, y: 0 } }];
+  const r = makeRig("x11", { "claude-desktop-extra.json": cfg({ enabled: true, ...target }) }, { displays: desk, screens: () => screens, windows: () => wins });
+  await r.ex.__setLockHeld(true);
+  if (r.ex.__targetCheck) await settle(r.ex.__targetCheck("screenshot"));
+  r.reset(); r.state.recordScreen = true;
+  const res = await settle(r.ex.resolvePrepareCapture({ allowedBundleIds: ["google-chrome"], autoResolve: true, doHide: false }));
+  check(!res.e && JSON.stringify(zoomArgs(r)) === JSON.stringify([wantZoom]), "captures " + wantZoom.split("--display ")[1], res.e ? res.e.message : JSON.stringify(zoomArgs(r)));
+  check(r.diag.some((m) => wantDiag.test(m)), "logs the resolution", JSON.stringify(r.diag.filter((m) => /auto-target/.test(m))));
+  check(r.screenCalls.length === 0, "Electron screen never used", JSON.stringify(r.screenCalls));
+  check(r.spawns.filter((x) => /^(windows|zoom)/.test(x.args)).every((x) => x.opts.env && (x.opts.env.DISPLAY === ":99" || x.opts.env.WAYLAND_DISPLAY === "wayland-9")), "window list and capture go to the background display", JSON.stringify(r.spawns.map((x) => [x.args, x.opts.env && (x.opts.env.DISPLAY || x.opts.env.WAYLAND_DISPLAY)])));
+  r.state.recordScreen = false;
 }
 console.log("\n[T5 hotplug on the target: monitors follow the re-enumeration]");
 {
@@ -740,7 +768,7 @@ for (const target of [{ kind: "x11", display: ":99" }, { kind: "wlroots", displa
     r.state.dead = true;
     r.reset();
     const o = await settle(r.ex.openApp("gedit"));
-    const DOWN_T = "Computer Use is set to the background display " + target.display + ", which is not running. Start it, or turn off Settings -> Extra -> Community -> Computer Use on a background display.";
+    const DOWN_T = "Computer Use is set to the background display " + target.display + ", which is not running. Start it, or turn off Settings -> Extra -> Computer Use -> Computer Use on a background display.";
     check(o.e && o.e.message === DOWN_T && !r.spawns.some((x) => x.kind === "spawn"), target.kind + ": openApp refuses and never spawns the app", JSON.stringify({ e: o.e && o.e.message, v: o.v, sp: r.spawns.filter((x) => x.kind === "spawn").map((x) => x.bin + " " + x.args) }));
     const c1 = r.ex.__targetAfterError ? await r.ex.__targetAfterError(new Error("x")) : null;
     const c2 = r.ex.__targetCheck ? await r.ex.__targetCheck("left_click") : null;
