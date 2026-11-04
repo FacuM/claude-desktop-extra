@@ -32,6 +32,10 @@
 //       from the patched chunk: dispatch, __cuLastShot mapping through the
 //       executor's root-pixel -> DIP map; switch off -> "Unknown tool", zero
 //       spawns.
+//   [6a] regular mode with "Ask before Computer Use controls an app" on
+//       (js/cu_consent.js loaded, the session's grants): positions, hints,
+//       the app_click fallback center and the multi-monitor pin are the same
+//       as with the switch off - the grants are not upstream's kwin context.
 //   [7] start: a state file left by a crash is restored at load (switch off);
 //       no state file and switch off -> nothing spawned.
 // Sections SKIP when the binary or the extract is missing. CDB_CU_PATCH_BIN
@@ -71,6 +75,7 @@ const BUILD_DIR = join(
 );
 const AX_JS = join(repo, "js", "cu_ax_tools.js");
 const HANDLER_JS = join(repo, "js", "cu_handler_injection.js");
+const CONSENT_JS = join(repo, "js", "cu_consent.js");
 const EXPECTED_PATCHES = Number(
   /const EXPECTED_PATCHES = (\d+)/.exec(readFileSync(PATCH_SRC, "utf8"))[1]
 );
@@ -103,7 +108,7 @@ function splitParts(blob) {
 function unpatch15(src) {
   return src
     .replace(/,\.\.\.\(process\.platform==="linux"&&globalThis\.__cdbAxTools\?\.\([\w$]+\)\|\|\[\]\)/g, "")
-    .replace(/\$\{process\.platform==="linux"&&globalThis\.__cdbAxKey\?\.\(\)\|\|""\}/g, "")
+    .replace(/\$\{process\.platform==="linux"&&\(globalThis\.__cdbAxKey\?\.\(\)\|\|""\)\+\(globalThis\.__cdbCuConsent\?\.key\?\.\(\)\|\|""\)\|\|""\}/g, "")
     .replace(/,__cdbAxSid:process\.platform==="linux"\?[\w$]+\.sessionId:void 0/g, "")
     .replace(/if\(process\.platform==="linux"&&globalThis\.__cdbAxHandles\?\.\([\w$]+\)\)return await globalThis\.__cdbAxCall\([^;]*?\}\);/g, "")
     .replace(/return!\(([\w$]+)\.has\(([\w$]+)\)\|\|process\.platform==="linux"&&\(\2==="app_ax_find"\|\|\2==="app_list_windows"\)\)\}/g, "return!$1.has($2)}");
@@ -229,17 +234,37 @@ const FIXTURE = {
 
 // --- vm rigs ----------------------------------------------------------------------
 // The builder chunk's only chunk dependency is the core chunk; a stub stands in
-// for it (grant normalization helpers, constants), node builtins are real.
+// for it (grant normalization helpers, constants), node builtins are real. The
+// core chunk's export names change every release, so bindCoreNames() reads
+// them from the builder chunk's own call sites before any chunk is loaded.
+const CORE = {};
+const CORE_SITES = {
+  // let o=e.jI(n),s=t=>{let n=e.EI(t.bundleId,t.displayName);
+  deniedFactory: [/let [\w$]+=([\w$]+)\.([\w$]+)\([\w$]+\),[\w$]+=[\w$]+=>\{let [\w$]+=\1\.[\w$]+\([\w$]+\.bundleId,[\w$]+\.displayName\)/, 2, () => () => false],
+  tierFor: [/let [\w$]+=([\w$]+)\.[\w$]+\([\w$]+\),[\w$]+=[\w$]+=>\{let [\w$]+=\1\.([\w$]+)\([\w$]+\.bundleId,[\w$]+\.displayName\)/, 2, () => "full"],
+  // ||e.AI(t.bundleId,t.displayName)))
+  policyDenied: [/\|\|([\w$]+)\.([\w$]+)\([\w$]+\.bundleId,[\w$]+\.displayName\)\)\)/, 2, () => false],
+  // {...e.MI,...r.getGrantFlags()}
+  defaultFlags: [/\{\.\.\.([\w$]+)\.([\w$]+),\.\.\.[\w$]+\.getGrantFlags\(\)\}/, 2, {}],
+  // deniedBundleIds:[...e.CI,
+  deniedIds: [/deniedBundleIds:\[\.\.\.([\w$]+)\.([\w$]+),/, 2, []],
+  // scale:{type:"number",description:e.TI}
+  scaleDesc: [/scale:\{type:"number",description:([\w$]+)\.([\w$]+)\}/, 2, "Scale factor."],
+};
+function bindCoreNames(src) {
+  const missing = [];
+  for (const [what, [re, g, value]] of Object.entries(CORE_SITES)) {
+    const m = re.exec(src);
+    if (m) CORE[m[g]] = value;
+    else missing.push(what);
+  }
+  return missing;
+}
 const coreStub = new Proxy(
   {},
   {
     get(_, k) {
-      if (k === "XN") return () => () => false;
-      if (k === "YN") return () => false;
-      if (k === "GN") return () => "full";
-      if (k === "ZN") return {};
-      if (k === "HN") return [];
-      if (k === "TN") return "Scale factor.";
+      if (typeof k === "string" && Object.hasOwn(CORE, k)) return CORE[k];
       if (k === "__esModule") return true;
       if (typeof k === "symbol") return undefined;
       return () => undefined;
@@ -359,6 +384,8 @@ if (patchMissing || !existsSync(stubPath)) {
     const roChunk = [...pristine.keys()].find((k) => /===(["`])computer_batch\1\)\{let [\w$]+=[\w$]+\.input\?\.actions;/.test(pristine.get(k)));
     const handlerChunk = [...pristine.keys()].find((k) => /handleToolCall:async\([\w$]+,[\w$]+,[\w$]+,[\w$]+\)=>\{let [\w$]+=[\w$]+\([\w$]+\);if\([\w$]+\([\w$]+\.sessionId,[\w$]+\.sessionType\)/.test(pristine.get(k)));
     const bsrc = builderChunk ? pristine.get(builderChunk) : "";
+    const coreMissing = bindCoreNames(bsrc);
+    check("core-chunk helpers located in the builder chunk", coreMissing.join(","), "");
     const builderFn = (/function ([\w$]+)\(([\w$]+),[\w$]+,[\w$]+\)\{let [\w$]+=\2\.hitTest===/.exec(bsrc) || [])[1];
     const bindFn = (/function ([\w$]+)\([\w$]+,[\w$]+,[\w$]+\)\{let\{logger:[\w$]+,serverName:[\w$]+\}=[\w$]+,[\w$]+,[\w$]+=[\w$]+\.skipFirstRequestWarnings/.exec(bsrc) || [])[1];
     const BKEY = builderFn && exportKeyFor(bsrc, builderFn);
@@ -448,22 +475,25 @@ if (patchMissing || !existsSync(stubPath)) {
 
     // ---------------------------------------------------------------- [3]
     console.log("\n[3] upstream's tools/list cache key");
+    // Cross-chunk export names (`t.wP()`, `t.zP`, ...) change every release:
+    // capture them instead of pinning them.
     const VA_RE =
-      /function ([\w$]+)\(\)\{let ([\w$]+)=`\$\{([\w$]+)\(\)\}:\$\{([\w$]+)\.sM\(\)\}:\$\{\4\.oM\(\)\.adaptiveResolution\}(?:\$\{process\.platform==="linux"&&globalThis\.__cdbAxKey\?\.\(\)\|\|""\})?`;\2!==([\w$]+)&&\(([\w$]+)=void 0,([\w$]+)=!1,\5=\2\)\}/;
+      /function (?<va>[\w$]+)\(\)\{let (?<loc>[\w$]+)=`\$\{(?<fa>[\w$]+)\(\)\}:\$\{(?<ns>[\w$]+)\.(?<teach>[\w$]+)\(\)\}:\$\{\k<ns>\.(?<adapt>[\w$]+)\(\)\.adaptiveResolution\}(?:\$\{process\.platform==="linux"&&\(globalThis\.__cdbAxKey\?\.\(\)\|\|""\)\+\(globalThis\.__cdbCuConsent\?\.key\?\.\(\)\|\|""\)\|\|""\})?`;\k<loc>!==(?<key>[\w$]+)&&\((?<ma>[\w$]+)=void 0,(?<ga>[\w$]+)=!1,\k<key>=\k<loc>\)\}/;
     const PA_RE =
-      /function ([\w$]+)\(([\w$]+)\)\{return ([\w$]+)=([\w$]+)\(\),([\w$]+)\.s\(\{\.\.\.([\w$]+)\.SM,teachMode:\6\.sM\(\),adaptiveResolution:\6\.oM\(\)\.adaptiveResolution,appScoped:\3\?\{supportsRawInput:!0\}:void 0\},\6\.nM\(\),\2\)\.map\(\(\2=>\(\{name:\2\.name,description:\2\.description\?\?"",inputSchema:\2\.inputSchema\}\)\)\)\}/;
+      /function (?<pa>[\w$]+)\((?<arg>[\w$]+)\)\{return (?<ha>[\w$]+)=[\w$]+\(\),(?<bns>[\w$]+)\.s\(\{\.\.\.(?<ns>[\w$]+)\.(?<caps>[\w$]+),teachMode:\k<ns>\.(?<teach>[\w$]+)\(\),adaptiveResolution:\k<ns>\.(?<adapt>[\w$]+)\(\)\.adaptiveResolution,appScoped:\k<ha>\?\{supportsRawInput:!0\}:void 0\},\k<ns>\.(?<mode>[\w$]+)\(\),\k<arg>\)\.map\(\(\k<arg>=>\(\{name:\k<arg>\.name,description:\k<arg>\.description\?\?"",inputSchema:\k<arg>\.inputSchema\}\)\)\)\}/;
     const keyRig = (src, ctx, builder) => {
       const va = VA_RE.exec(src);
       const pa = PA_RE.exec(src);
       if (!va || !pa) return null;
-      const [vaSrc, vaName, , fa, ns, keyVar, maVar, gaVar] = va;
-      const [paSrc, paName, , haVar, , bns] = pa;
+      const g = va.groups;
+      const h = pa.groups;
+      if (g.ns !== h.ns || g.teach !== h.teach || g.adapt !== h.adapt) return null;
       ctx.__keyBuilder = builder;
       return vm.runInContext(
-        `(function(){var ${keyVar},${maVar},${gaVar},${haVar};function ${fa}(){return!1}` +
-          `var ${ns}={sM:function(){return!1},oM:function(){return{adaptiveResolution:!0}},SM:${JSON.stringify(LINUX_CAPS)},nM:function(){return"pixels"}};` +
-          `var ${bns}={s:function(){return __keyBuilder.apply(null,arguments)}};${vaSrc}${paSrc}` +
-          `return{va:${vaName},pa:${paName},key:function(){return ${keyVar}},cached:function(){return ${maVar}},cache:function(v){${maVar}=v}}})()`,
+        `(function(){var ${g.key},${g.ma},${g.ga},${h.ha};function ${g.fa}(){return!1}` +
+          `var ${g.ns}={${g.teach}:function(){return!1},${g.adapt}:function(){return{adaptiveResolution:!0}},${h.caps}:${JSON.stringify(LINUX_CAPS)},${h.mode}:function(){return"pixels"}};` +
+          `var ${h.bns}={s:function(){return __keyBuilder.apply(null,arguments)}};${va[0]}${pa[0]}` +
+          `return{va:${g.va},pa:${h.pa},key:function(){return ${g.key}},cached:function(){return ${g.ma}},cache:function(v){${g.ma}=v}}})()`,
         ctx
       );
     };
@@ -1000,6 +1030,79 @@ if (patchMissing || !existsSync(stubPath)) {
       for (let i = 0; i < 50 && !calls().length; i++) await tick();
       await tick();
       check("regular: lock release restores through the executor's bridge", calls().map((c) => c.argv.join(" ")).join("|"), "ax-restore --holder-pid " + process.pid);
+    }
+
+    // ---------------------------------------------------------------- [6a]
+    console.log("\n[6a] regular mode, ask-before-control on: same coordinates as off");
+    if (injected) {
+      const [, sP, nP, iP, seP] = mQ;
+      const MONS = [
+        { displayId: 1, label: "eDP-1", originX: 0, originY: 0, width: 960, height: 600, isPrimary: true },
+        { displayId: 2, label: "DP-3-2", originX: 960, originY: 0, width: 1920, height: 1440 },
+      ];
+      const rule = (m) => {
+        const k = Math.min(1, 1568 / Math.max(m.width, m.height), Math.sqrt(1150000 / (m.width * m.height)));
+        return { w: Math.round(m.width * k), h: Math.round(m.height * k) };
+      };
+      const monAt = (x, y) => MONS.find((m) => x >= m.originX && x < m.originX + m.width && y >= m.originY && y < m.originY + m.height) || MONS[0];
+      // One run of the same calls; ask = load js/cu_consent.js with the switch on.
+      const scenario = async (ask) => {
+        const c = makeCtx({ userData });
+        const SHOT = { imgW: 1280, imgH: 800, dispW: 1920, dispH: 1200, originX: 0, originY: 0 };
+        const exr = {
+          capabilities: { screenshotFiltering: "none", platform: "linux" },
+          capabilitiesNow: () => ({ screenshotFiltering: "none", hitTest: "native", frontmost: "native", hostBundleId: "com.anthropic.Claude", backend: "x11-bridge" }),
+          __axBridge: () => ({ bin, name: "x11-bridge" }),
+          __axToDip: (x, y) => [x / 2, y / 2],
+          __axFrameFor: () => ({ ...SHOT, displayId: 0 }),
+          async __targetCheck() { return null; },
+          async __setLockHeld() {},
+          async __cuTaskBoundary() {},
+        };
+        c.__linuxExecutor = exr;
+        c.__cuKwinMode = false;
+        c.__cdbCuAxElements = () => true;
+        if (ask) {
+          c.__cdbCuAskBeforeControl = () => true;
+          vm.runInContext(readFileSync(CONSENT_JS, "utf8"), c);
+        }
+        loadAx(c);
+        const h = vm.runInContext(`(async function(${sP},${nP},${iP},${seP}){${injected}return{content:[{type:"text",text:"UPSTREAM"}]}})`, c);
+        const grants = [{ bundleId: "org.xfce.mousepad", displayName: "Mousepad" }, { bundleId: "org.kde.kate", displayName: "Kate" }];
+        const sess = { sessionId: "ask-" + ask, onComputerUsePermissionRequest: async () => ({}), getCuAllowedApps: () => grants, getCuGrantFlags: () => ({}) };
+        const out = [];
+        // before any screenshot (the predicted frame), then after one
+        out.push(textOf(await h({}, "app_ax_find", { app: "mousepad" }, sess)));
+        c.__cuLastShot = { ...SHOT };
+        out.push(textOf(await h({}, "app_ax_find", { app: "mousepad" }, sess)));
+        // app_click refused by the app: the fallback center in the screenshot
+        out.push(textOf(await h({}, "app_ax_find", { app: "org.kde.kate" }, sess)));
+        out.push(textOf(await h({}, "app_click", { app: "org.kde.kate", element_index: 8 }, sess)));
+        // two monitors: the window's display becomes current through opts.pin
+        exr.__axToDip = (x, y) => [x, y];
+        exr.__axFrameFor = (x, y) => {
+          const m = monAt(x, y), t = rule(m);
+          return { imgW: t.w, imgH: t.h, dispW: m.width, dispH: m.height, originX: m.originX, originY: m.originY, displayId: m.displayId, label: m.label, count: MONS.length };
+        };
+        exr.listDisplays = async () => MONS;
+        const d1 = rule(MONS[0]);
+        c.__cuPinnedDisplay = undefined;
+        c.__cuLastShot = { imgW: d1.w, imgH: d1.h, dispW: 960, dispH: 600, originX: 0, originY: 0 };
+        out.push(textOf(await h({}, "app_ax_find", { app: "mousepad" }, sess)));
+        out.push("pinned=" + c.__cuPinnedDisplay + " shot=" + JSON.stringify(c.__cuLastShot));
+        // and an app the session did not approve
+        const refused = await h({}, "app_ax_find", { app: "org.kde.dolphin" }, sess);
+        return { out, refused };
+      };
+      const off = await scenario(false);
+      const on = await scenario(true);
+      const labels = ["before a screenshot", "after a screenshot", "kate find", "app_click fallback center", "2 monitors: find", "2 monitors: pin + frame"];
+      for (let i = 0; i < labels.length; i++) check("R3: switch on = off: " + labels[i], on.out[i], off.out[i]);
+      check("R3: on: positions are reported (not 'unknown')", on.out[0].includes('"Open" at (640, 400)'), true);
+      check("R3: on: the app_click fallback names the center", /left_click there instead/.test(on.out[3]), true);
+      check("R3: on: the 2-monitor pin happened", /pinned=2 /.test(on.out[5]), true);
+      check("R3: on: an unapproved app is refused", on.refused.isError === true && /not in the allowed applications/.test(textOf(on.refused)), true);
+      check("R3: off: no grant check", off.refused.isError === true && /not in the allowed applications/.test(textOf(off.refused)), false);
     }
 
     // ---------------------------------------------------------------- [6b]
