@@ -2894,36 +2894,173 @@
     });
   }
 
-  // --- Code: wake Auto-fix sessions when a PR is ready to merge ------------
+  // Reuse existing row/form styles; no independent visual design or theme.
+  function renderAutoArchiveGraceRow(panel) {
+    var api = window.cdbExtra;
+    if (!api || typeof api.autoArchiveGraceRead !== "function" || typeof api.autoArchiveGraceSet !== "function") return;
+    var spec = { section: "Code", title: "Auto-archive delay after a PR merges or closes",
+      note: "Only applies when native PR auto-archive is enabled. The grace starts when the app first confirms " +
+        "the merged or closed PR and persists across restarts. Archives on the next native sweep after it expires " +
+        "(normally within 5 minutes), once all safety checks pass. The separate inactivity rule is unchanged. " +
+        "Changing the delay recalculates from the same start; disabling PR auto-archive cancels it. Applies live." };
+    var head = el("div", "cdbx-sec-h"); head.appendChild(el("span", "cdbx-sec-t", spec.section));
+    var host = el("div", "cdbx-list"), row = el("div", "cdbx-row"), main = el("div", "cdbx-row-main");
+    main.appendChild(el("div", "cdbx-id", spec.title)); main.appendChild(el("div", "cdbx-note", spec.note));
+    var label = el("label", "cdbx-note", "Delay after merged or closed PR confirmation");
+    label.htmlFor = "cdbx-archive-grace-preset";
+    var select = el("select", "cdbx-select"); select.id = label.htmlFor;
+    [["0", "Immediately (default)"], ["5", "5 minutes"], ["15", "15 minutes"], ["30", "30 minutes"],
+      ["60", "1 hour"], ["custom", "Custom minutes"]].forEach(function (pair) {
+      var option = el("option", "", pair[1]); option.value = pair[0]; select.appendChild(option);
+    });
+    var customLabel = el("label", "cdbx-note", "Custom delay (1-10080 whole minutes)");
+    customLabel.htmlFor = "cdbx-archive-grace-custom";
+    var custom = el("input", "cdbx-input"); custom.id = customLabel.htmlFor;
+    custom.type = "number"; custom.min = "1"; custom.max = "10080"; custom.step = "1";
+    var save = el("button", "cdbx-btn", "Save archive delay"); save.type = "button";
+    var state = el("div", "cdbx-state", "Loading..."); state.setAttribute("role", "status"); state.setAttribute("aria-live", "polite");
+    var busy = false, locked = true;
+    function controls() {
+      var isCustom = select.value === "custom";
+      custom.hidden = customLabel.hidden = !isCustom;
+      select.disabled = save.disabled = busy || locked; custom.disabled = busy || locked || !isCustom;
+    }
+    function show(res) {
+      if (failed(res)) { state.textContent = "Unavailable: " + reason(res); controls(); return; }
+      locked = !!res.lockedByJsonc;
+      select.value = [0, 5, 15, 30, 60].indexOf(res.minutes) >= 0 ? String(res.minutes) : "custom";
+      custom.value = String(res.minutes || 1); controls();
+      state.textContent = (res.warning ? res.warning + ". " : "") +
+        (res.minutes ? res.minutes + " minutes after confirmation" : "Immediate (native behavior)") +
+        (locked ? " - set in claude-desktop-extra.jsonc; edit that file to change this" : " - applies live");
+    }
+    select.addEventListener("change", controls);
+    save.addEventListener("click", function () {
+      if (busy || locked) return;
+      var minutes = select.value === "custom" ? Number(custom.value) : Number(select.value);
+      if (!Number.isInteger(minutes) || minutes < (select.value === "custom" ? 1 : 0) || minutes > 10080) {
+        state.textContent = "Enter a whole number from 1 to 10080 minutes."; custom.focus(); return;
+      }
+      busy = true; controls(); state.textContent = "Saving...";
+      api.autoArchiveGraceSet(minutes).then(function (res) {
+        busy = false;
+        if (failed(res)) { controls(); state.textContent = "Could not save delay: " + reason(res); return; }
+        show(res); toast("Archive delay saved");
+      }, function (error) { busy = false; controls(); state.textContent = "Could not save delay: " + String(error); });
+    });
+    [label, select, customLabel, custom, save, state].forEach(function (node) { main.appendChild(node); });
+    row.appendChild(main); host.appendChild(row); panel.appendChild(head); panel.appendChild(host); controls();
+    api.autoArchiveGraceRead().then(show, function (error) { state.textContent = "Unavailable: " + String(error); });
+    return { head: head, host: host, spec: spec };
+  }
+
+  // --- Code: Auto-fix notices (ready to merge, comments after merge) -------
   // Off by default. Main side: cdb-autofix-merge-ready:* in
-  // js/extra_settings_main.js; the sweep wrapper in
-  // patches/community/add_feature_autofix_merge_ready.nim reads it on every
-  // sweep, so it applies live.
+  // js/extra_settings_main.js; the wrappers in
+  // patches/community/add_feature_autofix_merge_ready.nim and
+  // add_feature_autofix_post_merge.nim read it on every sweep, so it applies live.
   function renderAutoFixMergeReadyRow(panel) {
     return renderToggleRow(panel, {
       section: "Code",
-      title: "Wake Auto-fix sessions when a PR is ready to merge",
+      title: "Auto-fix notices: ready to merge, comments after merge",
       note: "For a PR with Auto-fix on, the Code session gets a short notice when GitHub reports it " +
-        "ready to merge (open, checks green, reviews done, no conflicts); Claude reports it and waits for " +
-        "you - it never merges or turns on auto-merge. Costs one GitHub read per Auto-fix PR on each " +
-        "Auto-fix sweep (every minute while the app is focused) and one model turn per notice. Applies live.",
-      ariaLabel: "wake Auto-fix sessions when a PR is ready to merge",
+        "ready to merge (open, checks green, reviews done, no conflicts). After the PR is merged, new " +
+        "comments from the repository's owners, members, collaborators and bots are forwarded as quoted " +
+        "informational notices for up to 7 days. Claude reports them and waits for you - it never merges, " +
+        "turns on auto-merge or replies on GitHub. Costs one GitHub read per Auto-fix PR on each Auto-fix " +
+        "sweep (every minute while the app is focused) and one model turn per notice. Applies live.",
+      ariaLabel: "Auto-fix notices: ready to merge, comments after merge",
       read: "autoFixMergeReadyRead",
       write: "autoFixMergeReadySet",
       lockFile: "claude-desktop-extra.jsonc",
       // Opt-in: only an explicit true is on.
       isOn: function (res) { return res.enabled === true; },
       describe: function (on) {
-        return on ? "on - ready-to-merge notices for Auto-fix PRs" : "off - Auto-fix as shipped";
+        return on
+          ? "on - ready-to-merge and post-merge comment notices for Auto-fix PRs"
+          : "off - Auto-fix as shipped";
       },
       writeArg: function (next) { return next; },
       toast: function (next) {
         return next
-          ? "Auto-fix sessions are told when their PR is ready to merge"
-          : "Auto-fix no longer sends ready-to-merge notices";
+          ? "Auto-fix sessions are told when their PR is ready to merge and about comments after merge"
+          : "Auto-fix no longer sends ready-to-merge or post-merge notices";
       },
       errorPrefix: "Could not change the setting: "
     });
+  }
+
+  // --- Code: native dialog with "Allow always" for starting other sessions --
+  // Off by default. Main side: cdb-session-start:* in js/extra_settings_main.js;
+  // the broker hook in patches/community/add_feature_session_start_always_allow.nim
+  // reads the switch and the remembered approvals on every ask, so it applies
+  // live. Approvals are only ever added by the native dialog; this row can show
+  // how many are remembered and forget them, never add one.
+  function renderSessionStartAlwaysAllowRow(panel) {
+    var row = renderToggleRow(panel, {
+      section: "Code",
+      title: "Native dialog with 'Allow always' for starting other sessions",
+      note: "When Claude asks to start another Code session, a native dialog replaces the in-chat card and " +
+        "offers Deny, Allow once and Allow always (Deny is the default; Escape denies). Allow always " +
+        "remembers the approval for that project and its default destination only: a request for another " +
+        "folder, host, environment, preset, the cloud or a higher permission mode still asks. Sessions started " +
+        "this way run in this session's permission mode or lower from a prompt Claude wrote; nothing inside " +
+        "them is approved by this. When the app window is hidden or minimized the in-chat card asks instead. " +
+        "Off (the default) leaves Anthropic's in-chat card as shipped; turning it off also forgets every " +
+        "remembered approval. Applies live.",
+      ariaLabel: "use a native dialog with Allow always for starting other sessions",
+      read: "sessionStartAlwaysAllowRead",
+      write: "sessionStartAlwaysAllowSet",
+      lockFile: "claude-desktop-extra.jsonc",
+      // Opt-in: only an explicit true is on.
+      isOn: function (res) { return res.enabled === true; },
+      describe: function (on) {
+        return on ? "on - native dialog with Allow always" : "off - Anthropic's in-chat card";
+      },
+      writeArg: function (next) { return next; },
+      toast: function (next) {
+        return next
+          ? "Starting other sessions now asks in a native dialog"
+          : "Starting other sessions asks in the chat again; remembered approvals were forgotten";
+      },
+      errorPrefix: "Could not change the setting: "
+    });
+    if (!row || typeof api.sessionStartAlwaysAllowForget !== "function") return row;
+    var rowNode = row.host.querySelector(".cdbx-row");
+    var main = rowNode && rowNode.querySelector(".cdbx-row-main");
+    var aside = rowNode && rowNode.querySelector(".cdbx-row-aside");
+    if (!main || !aside) return row;
+    var count = el("div", "cdbx-note", "");
+    count.setAttribute("role", "status");
+    main.appendChild(count);
+    var forget = el("button", "cdbx-btn", "Forget remembered approvals");
+    forget.type = "button";
+    forget.disabled = true;
+    aside.insertBefore(forget, aside.firstChild);
+    function show(res) {
+      if (failed(res)) { count.textContent = ""; forget.disabled = true; return; }
+      var n = typeof res.grants === "number" ? res.grants : 0;
+      count.textContent = n === 0 ? "No remembered approvals."
+        : n === 1 ? "1 project has a remembered approval." : n + " projects have a remembered approval.";
+      forget.disabled = n === 0;
+    }
+    function refresh() { api.sessionStartAlwaysAllowRead().then(show, function () { show({ ok: false }); }); }
+    refresh();
+    // The switch's own click handler writes; re-read the count after it settles.
+    var toggle = aside.querySelector(".cdbx-switch");
+    if (toggle) toggle.addEventListener("click", function () { setTimeout(refresh, 300); });
+    forget.addEventListener("click", function () {
+      forget.disabled = true;
+      api.sessionStartAlwaysAllowForget().then(function (res) {
+        if (failed(res)) { toast("Could not forget the approvals: " + reason(res), true); refresh(); return; }
+        show(res);
+        toast("Remembered session-start approvals forgotten");
+      }, function (err) {
+        toast("Could not forget the approvals: " + (err && err.message ? err.message : String(err)), true);
+        refresh();
+      });
+    });
+    return row;
   }
 
   // --- Computer Use: ask before controlling an app --------------------------
@@ -3320,6 +3457,8 @@
     renderAllowNonAnthropicModelsRow,
     renderAutoFixAuthorRow,
     renderAutoFixMergeReadyRow,
+    renderAutoArchiveGraceRow,
+    renderSessionStartAlwaysAllowRow,
     renderTranscriptLimitsRow,
     renderWindowControlsRow,
     renderNativeTitlebarRow,

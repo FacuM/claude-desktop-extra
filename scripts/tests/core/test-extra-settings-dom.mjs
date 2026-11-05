@@ -478,22 +478,25 @@ async function featuresPanel(featuresItem) {
        "...and so does its toast, from the main side's pendingRestart: " + tlToast());
   }
 
-  // --- Wake Auto-fix sessions when a PR is ready to merge: opt-in, live, says its cost
+  // --- Auto-fix notices (ready to merge, comments after merge): opt-in, live, says its cost
   {
-    const afSel = '.cdbx-switch[aria-label="wake Auto-fix sessions when a PR is ready to merge"]';
+    const afSel = '.cdbx-switch[aria-label="Auto-fix notices: ready to merge, comments after merge"]';
     const af = panel.querySelector(afSel);
-    ok(!!af, "renders the Auto-fix ready-to-merge switch");
+    ok(!!af, "renders the Auto-fix notices switch");
     if (af) {
       const afRow = af.closest(".cdbx-row");
       const afNote = afRow.querySelector(".cdbx-note").textContent;
-      ok(afRow.querySelector(".cdbx-id").textContent === "Wake Auto-fix sessions when a PR is ready to merge",
-         "titled Wake Auto-fix sessions when a PR is ready to merge");
+      ok(afRow.querySelector(".cdbx-id").textContent === "Auto-fix notices: ready to merge, comments after merge",
+         "titled Auto-fix notices: ready to merge, comments after merge");
       ok(afRow.previousElementSibling === null && afRow.parentElement.previousElementSibling.textContent === "Code",
          "under its own Code heading");
       ok(af.getAttribute("aria-checked") === "false" && !af.disabled, "off by default (opt-in), not locked");
       ok(/one GitHub read per Auto-fix PR/.test(afNote) && /one model turn per notice/.test(afNote),
          "the note says what it costs: " + afNote);
       ok(/never merges/.test(afNote) && /Applies live/.test(afNote), "the note says it never merges and applies live");
+      ok(/After the PR is merged/.test(afNote) && /owners, members, collaborators and bots/.test(afNote) &&
+         /up to 7 days/.test(afNote) && /replies on GitHub/.test(afNote),
+         "the note covers post-merge comments, who is trusted, the 7-day window and no GitHub replies: " + afNote);
       af.click();
       await sleep(60);
       ok((window.__afmrCalls || []).length === 1 && window.__afmrCalls[0] === true,
@@ -502,6 +505,64 @@ async function featuresPanel(featuresItem) {
       af.click();
       await sleep(60);
       ok(af.getAttribute("aria-checked") === "false", "and flips back");
+    }
+  }
+
+  // --- Native merged-PR auto-archive grace: presets/custom and validation.
+  {
+    const preset = panel.querySelector('#cdbx-archive-grace-preset');
+    const custom = panel.querySelector('#cdbx-archive-grace-custom');
+    ok(!!preset && !!custom, "archive grace renders labeled preset/custom controls");
+    if (preset && custom) {
+      const row = preset.closest('.cdbx-row');
+      const save = row.querySelector('button');
+      ok(preset.value === '0' && custom.hidden, "archive delay defaults to native immediate behavior");
+      ok(preset.labels.length === 1 && custom.labels.length === 1, "both grace fields have accessible labels");
+      ok([...preset.options].map(o => o.value).join(',') === '0,5,15,30,60,custom', "conventional presets and custom are available");
+      preset.value = '15'; preset.dispatchEvent(new Event('change')); save.click(); await sleep(60);
+      ok(window.__archiveGraceCalls.join(',') === '15', "preset saves minutes once");
+      preset.value = 'custom'; preset.dispatchEvent(new Event('change'));
+      ok(!custom.hidden && !custom.disabled, "custom field is shown and enabled");
+      custom.value = '1.5'; save.click(); await sleep(30);
+      ok(window.__archiveGraceCalls.length === 1 && /whole number/.test(row.querySelector('.cdbx-state').textContent), "fractional minutes rejected without IPC");
+      custom.value = '10081'; save.click(); await sleep(30);
+      ok(window.__archiveGraceCalls.length === 1, "custom bound enforced");
+      custom.value = '42'; save.click(); await sleep(60);
+      ok(window.__archiveGraceCalls.join(',') === '15,42' && preset.value === 'custom' && custom.value === '42', "custom minutes save and remain visible");
+      preset.value = '0'; preset.dispatchEvent(new Event('change')); save.click(); await sleep(60);
+      ok(window.__archiveGraceCalls.join(',') === '15,42,0' && custom.hidden, "immediate preset clears delay");
+    }
+  }
+
+  // --- Code: native dialog with "Allow always" for starting other sessions.
+  // Opt-in switch plus a forget button; the page can never add an approval.
+  {
+    const ssSel = '.cdbx-switch[aria-label="use a native dialog with Allow always for starting other sessions"]';
+    const ss = panel.querySelector(ssSel);
+    ok(!!ss, "renders the session-start dialog switch");
+    if (ss) {
+      const ssRow = ss.closest(".cdbx-row");
+      const ssNote = ssRow.querySelector(".cdbx-note").textContent;
+      ok(ssRow.querySelector(".cdbx-id").textContent === "Native dialog with 'Allow always' for starting other sessions",
+         "titled Native dialog with 'Allow always' for starting other sessions");
+      ok(ssRow.parentElement.previousElementSibling.textContent === "Code", "under a Code heading");
+      ok(ss.getAttribute("aria-checked") === "false" && !ss.disabled, "off by default (opt-in), not locked");
+      ok(/project and its default destination only/.test(ssNote) && /nothing inside/.test(ssNote) &&
+         /Off \(the default\)/.test(ssNote) && /forgets every/.test(ssNote) && /Applies live/.test(ssNote),
+         "the note states scope, default, switch-off forgets and live: " + ssNote);
+      const forget = Array.from(ssRow.querySelectorAll("button")).find(function (b) { return b.textContent === "Forget remembered approvals"; });
+      ok(!!forget && !forget.disabled, "two remembered approvals -> an enabled forget button");
+      ok(/2 projects have a remembered approval/.test(ssRow.textContent), "the row shows the count");
+      if (forget) {
+        forget.click();
+        await sleep(60);
+        ok(window.__ssForgets === 1 && forget.disabled && /No remembered approvals/.test(ssRow.textContent),
+           "forget uses its own bridge call and the row reflects it live");
+      }
+      ss.click();
+      await sleep(60);
+      ok(JSON.stringify(window.__ssCalls || []) === "[true]", "clicking calls sessionStartAlwaysAllowSet(true) once: " + JSON.stringify(window.__ssCalls));
+      ok(ss.getAttribute("aria-checked") === "true", "the switch reflects the write");
     }
   }
 
@@ -949,9 +1010,22 @@ async function featuresPanel(featuresItem) {
   await sleep(30);
   window.__panelTabsState = { ok: true, enabled: true, lockedByJsonc: true, source: "jsonc-locked" };
   window.__pickerState = { ok: true, enabled: false, lockedByJsonc: true };
+  window.__archiveGraceState = { ok: true, minutes: 30, lockedByJsonc: true, warning: null };
   featuresItem.click();
   await sleep(120);
   const panel2 = document.querySelector(".cdbx-panel");
+  {
+    const preset2 = panel2 && panel2.querySelector('#cdbx-archive-grace-preset');
+    ok(!!preset2, "the archive delay row renders again after remounting the panel");
+    if (preset2) {
+      const row2 = preset2.closest('.cdbx-row'), line = row2.querySelector('.cdbx-state').textContent;
+      ok(preset2.value === '30' && preset2.disabled && row2.querySelector('button').disabled,
+         "a .jsonc-locked archive delay shows its value with the preset and Save disabled");
+      ok(line === "30 minutes after confirmation - set in claude-desktop-extra.jsonc; edit that file to change this",
+         "and the state line names the file to edit: " + line);
+    }
+    window.__archiveGraceState = null;
+  }
   const tabs2 = panel2 && panel2.querySelector(tabsSel);
   ok(!!tabs2, "the panel tabs switch renders again after remounting the panel");
   if (tabs2) {
@@ -3183,6 +3257,9 @@ window.cdbExtra = {
   // Load large sessions in full. Without these two the row is silently skipped
   // (renderToggleRow answers nothing when its bridge half is missing), so a
   // harness that omits them would pass while never rendering the row.
+  sessionStartAlwaysAllowRead: function () { return Promise.resolve({ ok: true, enabled: window.__ssOn === true, lockedByJsonc: null, grants: window.__ssGrants === undefined ? 2 : window.__ssGrants }); },
+  sessionStartAlwaysAllowSet: function (enabled) { window.__ssCalls = (window.__ssCalls || []).concat([enabled]); window.__ssOn = enabled; return Promise.resolve({ ok: true, enabled: enabled }); },
+  sessionStartAlwaysAllowForget: function () { window.__ssGrants = 0; window.__ssForgets = (window.__ssForgets || 0) + 1; return Promise.resolve({ ok: true, enabled: window.__ssOn === true, grants: 0 }); },
   autoFixAuthorRead: function () { return Promise.resolve({ ok: true, entries: [], lockedByJsonc: false }); },
   autoFixAuthorSet: function (entries) {
     (window.__authorCalls || (window.__authorCalls = [])).push(entries);
@@ -3219,6 +3296,8 @@ window.cdbExtra = {
     window.__diffViewsCalls.push(enabled);
     return Promise.resolve({ ok: true, enabled: enabled, path: "/tmp/diff-views.json", nudged: true });
   },
+  autoArchiveGraceRead: function () { return Promise.resolve(window.__archiveGraceState || { ok: true, minutes: 0, lockedByJsonc: null }); },
+  autoArchiveGraceSet: function (minutes) { window.__archiveGraceCalls = (window.__archiveGraceCalls || []).concat([minutes]); return Promise.resolve({ ok: true, minutes: minutes }); },
   // Wake Auto-fix sessions when a PR is ready to merge: opt-in, live.
   autoFixMergeReadyRead: function () { return Promise.resolve(window.__afmrState || { ok: true, enabled: false, lockedByJsonc: null }); },
   autoFixMergeReadySet: function (enabled) { window.__afmrCalls = (window.__afmrCalls || []).concat([enabled]); return Promise.resolve({ ok: true, enabled: enabled, path: "/tmp/afmr.json" }); },

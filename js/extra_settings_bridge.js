@@ -96,6 +96,16 @@
       return ipcRenderer.invoke("cdb-tray:set", enabled === true);
     },
 
+    sessionStartAlwaysAllowRead: function () {
+      return ipcRenderer.invoke("cdb-session-start:read");
+    },
+    sessionStartAlwaysAllowSet: function (enabled) {
+      return ipcRenderer.invoke("cdb-session-start:set", enabled === true);
+    },
+    sessionStartAlwaysAllowForget: function () {
+      return ipcRenderer.invoke("cdb-session-start:revoke");
+    },
+
     autoFixAuthorRead: function () {
       return ipcRenderer.invoke("cdb-autofix-author:read");
     },
@@ -103,7 +113,10 @@
       return ipcRenderer.invoke("cdb-autofix-author:set", Array.isArray(entries) ? entries.slice(0, 51) : null);
     },
 
-    // Wake Auto-fix sessions when a PR is ready to merge. Fixed channels,
+    autoArchiveGraceRead: function () { return ipcRenderer.invoke("cdb-archive-grace:read"); },
+    autoArchiveGraceSet: function (minutes) { return ipcRenderer.invoke("cdb-archive-grace:set", minutes); },
+
+    // Auto-fix notices (ready to merge, comments after merge). Fixed channels,
     // boolean only; the main side re-validates the type.
     autoFixMergeReadyRead: function () {
       return ipcRenderer.invoke("cdb-autofix-merge-ready:read");

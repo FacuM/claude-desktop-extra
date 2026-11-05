@@ -91,6 +91,78 @@
     return out;
   }
 
+  // --- Native dialog with "Allow always" for starting other sessions -----
+  // Opt-in (sessionStartAlwaysAllow, off by default, .jsonc wins and locks it
+  // like the switches below). patches/community/add_feature_session_start_always_allow.nim
+  // asks globalThis.__cdbSessionStartDialogEnabled() on every eligible
+  // start_session ask; false leaves upstream's in-chat card alone.
+  // Remembered approvals ("Allow always") live under sessionStartGrants in the
+  // .json only: { "<project folder>": { grantedAt } }, capped. Only the
+  // main-process dialog adds one; the remote settings page can read the count,
+  // forget them all, or flip the switch (off also forgets them). A stored grant
+  // is ignored while the switch is off.
+  var __cdbEx_SSA_KEY = "sessionStartAlwaysAllow";
+  var __cdbEx_SSA_GRANTS = "sessionStartGrants";
+  var __cdbEx_SSA_MAX = 50;
+  var __cdbEx_ssaRevision = 0;
+  function __cdbEx_ssaPref() {
+    var p = __cdbEx_paths();
+    var jsonc = __cdbEx_readFileKey(p.jsonc, __cdbEx_SSA_KEY);
+    if (typeof jsonc === "boolean") return { value: jsonc, locked: true };
+    return { value: __cdbEx_readFileKey(p.json, __cdbEx_SSA_KEY) === true, locked: false };
+  }
+  function __cdbEx_ssaEnabled() {
+    try { return __cdbEx_ssaPref().value === true; } catch (e) { return false; }
+  }
+  // Valid entries only: an absolute project folder -> { grantedAt: number }.
+  function __cdbEx_ssaClean(raw) {
+    var out = {};
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+    Object.keys(raw).forEach(function (k) {
+      var v = raw[k];
+      if (typeof k === "string" && k.charAt(0) === "/" && k.length <= 4096 && v && typeof v === "object" &&
+          !Array.isArray(v) && typeof v.grantedAt === "number" && isFinite(v.grantedAt)) {
+        out[k] = { grantedAt: v.grantedAt };
+      }
+    });
+    return out;
+  }
+  function __cdbEx_ssaGrants() {
+    try { return __cdbEx_ssaClean(__cdbEx_readFileKey(__cdbEx_paths().json, __cdbEx_SSA_GRANTS)); } catch (e) { return {}; }
+  }
+  function __cdbEx_ssaForget() {
+    var res = __cdbEx_writeCfg(function (cfg) { delete cfg[__cdbEx_SSA_GRANTS]; });
+    __cdbEx_ssaRevision++;
+    return res;
+  }
+  if (process.platform === "linux") {
+    globalThis.__cdbSessionStartDialogEnabled = __cdbEx_ssaEnabled;
+    globalThis.__cdbSessionStartPermission = {
+      get revision() { return __cdbEx_ssaRevision; },
+      has: function (key) {
+        if (typeof key !== "string" || !__cdbEx_ssaEnabled()) return false;
+        return Object.prototype.hasOwnProperty.call(__cdbEx_ssaGrants(), key);
+      },
+      count: function () { return Object.keys(__cdbEx_ssaGrants()).length; },
+      grant: function (key) {
+        if (typeof key !== "string" || key.charAt(0) !== "/" || key.length > 4096) return { ok: false, error: "invalid project key" };
+        if (!__cdbEx_ssaEnabled()) return { ok: false, error: __cdbEx_SSA_KEY + " is off" };
+        var res = __cdbEx_writeCfg(function (cfg) {
+          var grants = __cdbEx_ssaClean(cfg[__cdbEx_SSA_GRANTS]);
+          grants[key] = { grantedAt: Date.now() };
+          var keys = Object.keys(grants).sort(function (a, b) { return grants[b].grantedAt - grants[a].grantedAt; });
+          var kept = {};
+          keys.slice(0, __cdbEx_SSA_MAX).forEach(function (k) { kept[k] = grants[k]; });
+          if (!Object.prototype.hasOwnProperty.call(kept, key)) kept[key] = grants[key];
+          cfg[__cdbEx_SSA_GRANTS] = kept;
+        });
+        if (res.ok) __cdbEx_ssaRevision++;
+        return res;
+      },
+      forget: __cdbEx_ssaForget
+    };
+  }
+
   // --- theme swatches -------------------------------------------------------
   // Five tokens per variant, each with fallbacks, reduced to CSS colors here so
   // the ~90 full token maps never cross into the remote page.
@@ -329,12 +401,13 @@
     };
   }
 
-  // --- Auto-fix: wake the session when its PR is ready to merge ------------
-  // Same shape as the tray switch above. The wrapper that
-  // patches/community/add_feature_autofix_merge_ready.nim puts around
-  // AutoFixEngine.checkSession asks globalThis.__cdbAutoFixMergeReadyEnabled()
-  // on every sweep (60 s focused, 5 min unfocused, per Auto-fix PR); only true
-  // runs the readiness check. Off is the default and the absence of the key.
+  // --- Auto-fix notices: ready to merge, comments after merge --------------
+  // Same shape as the tray switch above. One switch for two patches: the
+  // wrapper patches/community/add_feature_autofix_merge_ready.nim puts around
+  // AutoFixEngine.checkSession and the one add_feature_autofix_post_merge.nim
+  // puts around AutoFixEngine.sweep both ask
+  // globalThis.__cdbAutoFixMergeReadyEnabled() on every sweep (60 s focused,
+  // 5 min unfocused); only true runs the readiness check / post-merge reads. Off is the default and the absence of the key.
   // No cache: each call reads the two small settings files, so a flip applies
   // from the next sweep.
   var __cdbEx_AFMR_KEY = "autoFixMergeReady";
@@ -348,6 +421,30 @@
     globalThis.__cdbAutoFixMergeReadyEnabled = function () {
       try { return __cdbEx_afmrPref().value === true; } catch (e) { return false; }
     };
+  }
+
+  // --- Code: auto-archive delay after a PR merges or closes -----------------
+  // patches/community/add_feature_auto_archive_grace.nim asks
+  // globalThis.__cdbAutoArchiveMergeDelayMinutes() once per auto-archive sweep
+  // (every 5 min plus upstream's kicks). 0 = immediate = upstream, the default
+  // and the absence of the key. Same shape as the tray switch above: a valid
+  // value in the .jsonc locks the row; an invalid one is reported as a warning
+  // and ignored, so the row and claude-desktop-extra.json stay in charge.
+  var __cdbEx_AAG_KEY = "autoArchiveMergeDelayMinutes";
+  function __cdbEx_aagValid(value) {
+    return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 10080;
+  }
+  function __cdbEx_aagPref() {
+    var p = __cdbEx_paths();
+    var jsonc = __cdbEx_readFileKey(p.jsonc, __cdbEx_AAG_KEY);
+    if (__cdbEx_aagValid(jsonc)) return { value: jsonc, locked: true };
+    var warning = jsonc === undefined ? null :
+      "Ignoring " + __cdbEx_AAG_KEY + " in claude-desktop-extra.jsonc: expected a whole number from 0 to 10080";
+    var value = __cdbEx_readFileKey(p.json, __cdbEx_AAG_KEY);
+    return { value: __cdbEx_aagValid(value) ? value : 0, locked: false, warning: warning };
+  }
+  if (process.platform === "linux") {
+    globalThis.__cdbAutoArchiveMergeDelayMinutes = function () { return __cdbEx_aagPref().value; };
   }
 
   // --- Computer Use: read app controls through AT-SPI (issue #306) ---------
@@ -3023,6 +3120,35 @@
       return { ok: true, paths: __cdbEx_paths() };
     },
 
+    // Native dialog with "Allow always" for starting other sessions. Pref,
+    // grants and the predicate above; the broker hook reads them live.
+    "cdb-session-start:read": function () {
+      var s = __cdbEx_ssaPref();
+      return { ok: true, enabled: s.value, lockedByJsonc: s.locked ? true : null,
+        grants: Object.keys(__cdbEx_ssaGrants()).length };
+    },
+    "cdb-session-start:set": function (enabled) {
+      if (typeof enabled !== "boolean") return { ok: false, error: "enabled must be a boolean" };
+      if (__cdbEx_ssaPref().locked) {
+        return { ok: false, lockedByJsonc: true,
+          error: __cdbEx_SSA_KEY + " is set in claude-desktop-extra.jsonc - edit that file to change it" };
+      }
+      // Off forgets every remembered approval in the same write.
+      var res = __cdbEx_writeCfg(function (cfg) {
+        if (enabled) cfg[__cdbEx_SSA_KEY] = true;
+        else { delete cfg[__cdbEx_SSA_KEY]; delete cfg[__cdbEx_SSA_GRANTS]; }
+      });
+      __cdbEx_ssaRevision++;
+      if (!res.ok) return res;
+      return { ok: true, enabled: enabled, path: res.path, grants: Object.keys(__cdbEx_ssaGrants()).length };
+    },
+    "cdb-session-start:revoke": function () {
+      var res = __cdbEx_ssaForget();
+      if (!res.ok) return res;
+      var s = __cdbEx_ssaPref();
+      return { ok: true, enabled: s.value, lockedByJsonc: s.locked ? true : null, grants: 0 };
+    },
+
     // Theme picker (Ctrl+Shift+T). The window and the hotkey live in
     // patches/community/add_feature_theme_picker.nim, which reads this same key
     // itself on every press - persistence is ours because this file is the
@@ -3103,8 +3229,8 @@
       return { ok: true, enabled: enabled, path: res.path, refreshed: refreshed };
     },
 
-    // Wake Auto-fix sessions when a PR is ready to merge. Pref and reader
-    // above; the sweep wrapper reads it live, so there is nothing to refresh.
+    // Auto-fix notices (ready to merge, comments after merge). Pref and reader
+    // above; both sweep wrappers read it live, so there is nothing to refresh.
     "cdb-autofix-merge-ready:read": function () {
       var s = __cdbEx_afmrPref();
       return { ok: true, enabled: s.value, lockedByJsonc: s.locked ? true : null };
@@ -3123,6 +3249,22 @@
       });
       if (!res.ok) return res;
       return { ok: true, enabled: enabled, path: res.path };
+    },
+
+    "cdb-archive-grace:read": function () {
+      var s = __cdbEx_aagPref();
+      return { ok: true, minutes: s.value, lockedByJsonc: s.locked ? true : null, warning: s.warning || null };
+    },
+    "cdb-archive-grace:set": function (minutes) {
+      if (!__cdbEx_aagValid(minutes)) return { ok: false, error: "minutes must be a whole number from 0 to 10080" };
+      if (__cdbEx_aagPref().locked) return { ok: false, lockedByJsonc: true,
+        error: __cdbEx_AAG_KEY + " is set in claude-desktop-extra.jsonc - edit that file to change it" };
+      var res = __cdbEx_writeCfg(function (cfg) {
+        if (minutes === 0) delete cfg[__cdbEx_AAG_KEY];
+        else cfg[__cdbEx_AAG_KEY] = minutes;
+        return minutes;
+      });
+      return res.ok ? { ok: true, minutes: minutes, path: res.path, warning: __cdbEx_aagPref().warning || null } : res;
     },
 
     // Computer Use: read app controls (accessibility). Pref and reader above.
@@ -3686,7 +3828,8 @@
   // The background-display channels are Linux-only: on the downstream Windows
   // build they answer a plain refusal instead of touching /proc or X sockets.
   // The tray switch too: the glyph it picks is a Linux icon.
-  // And the Auto-fix ready-to-merge wake: its patch only runs on Linux.
+  // And the Auto-fix ready-to-merge wake and the session-start dialog: their
+  // patches only run on Linux.
   if (process.platform !== "linux") {
     Object.keys(__cdbEx_handlers).forEach(function (ch) {
       if (ch.indexOf("cdb-cubg:") === 0) {
@@ -3701,8 +3844,12 @@
         __cdbEx_handlers[ch] = function () { return { ok: false, error: "the Auto-fix author option is Linux only" }; };
       } else if (ch.indexOf("cdb-tray:") === 0) {
         __cdbEx_handlers[ch] = function () { return { ok: false, error: "the tray icon switch is Linux only" }; };
+      } else if (ch.indexOf("cdb-archive-grace:") === 0) {
+        __cdbEx_handlers[ch] = function () { return { ok: false, error: "the PR archive delay is Linux only" }; };
       } else if (ch.indexOf("cdb-autofix-merge-ready:") === 0) {
         __cdbEx_handlers[ch] = function () { return { ok: false, error: "the Auto-fix ready-to-merge wake is Linux only" }; };
+      } else if (ch.indexOf("cdb-session-start:") === 0) {
+        __cdbEx_handlers[ch] = function () { return { ok: false, error: "the session-start dialog is Linux only" }; };
       }
     });
   }
