@@ -1,6 +1,6 @@
 /*
  * extra_settings_main.js - main-process half of the "Extra" settings area.
- * Injected into .vite/build/index.js by patches/add_feature_extra_settings.nim.
+ * Injected into .vite/build/index.js by patches/core/add_feature_extra_settings.nim.
  *
  * Three jobs:
  *   1. Register the ipcMain handlers the page's cdbExtra bridge talks to.
@@ -421,7 +421,8 @@
   // globalThis.__cdbAutoFixMergeReadyEnabled() on every sweep (60 s focused,
   // 5 min unfocused); only true runs the readiness check / post-merge reads. Off is the default and the absence of the key.
   // No cache: each call reads the two small settings files, so a flip applies
-  // from the next sweep.
+  // from the next sweep. The same predicate also gates additional batched-turn
+  // completion receipts at the healthy emitter; it is read at completion time.
   var __cdbEx_AFMR_KEY = "autoFixMergeReady";
   function __cdbEx_afmrPref() {
     var p = __cdbEx_paths();
@@ -3263,7 +3264,13 @@
       return { ok: true, enabled: enabled, path: res.path };
     },
 
-    "cdb-archive-grace:read": function () {
+    "cdb-archive-grace:read": function (sessionId) {
+      if (sessionId !== undefined) {
+        if (typeof sessionId !== "string" || sessionId.length < 1 || sessionId.length > 256)
+          return { ok: false, error: "invalid session id" };
+        if (__cdbEx_aagPref().value === 0) return { ok: true, active: false };
+        return globalThis.__cdbArchiveGraceStatus?.(sessionId) || { ok: true, active: true, ready: false };
+      }
       var s = __cdbEx_aagPref();
       return { ok: true, minutes: s.value, lockedByJsonc: s.locked ? true : null, warning: s.warning || null };
     },
