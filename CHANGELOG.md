@@ -4,6 +4,14 @@ All notable changes to the claude-desktop-extra packages will be documented in t
 
 ## 2026-11-05
 
+### Auto-fix notices are confirmed in batched turns (thanks @alexx-ftw, #314)
+
+- With Settings -> Extra -> Community Features -> "Auto-fix notices: ready to merge, comments after merge" on, a ready-to-merge or post-merge notice that Claude reads later in a turn covering several queued messages is now confirmed when that turn completes, instead of staying pending (upstream confirms only the turn's first message). Unread, withdrawn and next-cycle messages are not confirmed.
+
+### Session-start dialog for explicit local folders (thanks @alexx-ftw, #313)
+
+- **The opt-in native session-start dialog now also covers an explicit local folder**, showing its resolved directory; the first-use folder consent is answered there too. Approvals are kept per asking project and folder, but upstream tracks first use in memory, so a new asking session or an app restart asks again for that folder; the default destination stays remembered as before. A PreToolUse ask hook may be answered in the dialog instead of the card (the person is still asked); user ask rules and managed policy keep the card. Manual-mode asks for a new folder (upstream's ordinary card, without the folder sentence) now reach the dialog too, and an ask that keeps the card logs `[session-start-always-allow] card kept: <reason>` to `claude-patches.log`.
+
 ### Auto-fix forwards comments that arrive after a merge (thanks @alexx-ftw, #310)
 
 - **After an Auto-fix PR is merged, new comments, inline review comments and reviews from the repository's owners, members, collaborators and bots reach its Code session as quoted informational notices for 7 days after the merge** (mentions defanged, each text capped at 1200 characters; upstream stops reading a PR once it is merged). Claude reports them and waits for you: it never changes code, replies on GitHub or merges. Archived sessions are not read or woken. Same switch as the ready-to-merge notice, now titled Settings -> Extra -> Community Features -> "Auto-fix notices: ready to merge, comments after merge" (off by default, applies live).
