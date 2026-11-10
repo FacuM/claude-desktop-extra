@@ -336,6 +336,98 @@ index 6c70201..cc483c3 100644
 +
  clean:
  	@rm -rf $(BINS) .nimcache
+diff --git a/patches/community/add_feature_allow_non_anthropic_models.nim b/patches/community/add_feature_allow_non_anthropic_models.nim
+index f16abb7..941110f 100644
+--- a/patches/community/add_feature_allow_non_anthropic_models.nim
++++ b/patches/community/add_feature_allow_non_anthropic_models.nim
+@@ -86,6 +86,16 @@ const EXPECTED_PATCHES = 5
+   # A module, B validator, C discovery, D tier pin, E setup-window signal
+ const GUARD_SITES = 4 # B, C, D, E
+ 
++# Windows 5.1231.0: the discovery rows are no longer filtered - every row with
++# a parsable id is kept, Anthropic or not, so site C has nothing to guard. This
++# is the positive shape of that unfiltered flatMap (it returns the row list
++# straight after the tier lookup); a guarded or filtered site never matches it.
++const C_UNFILTERED =
++  re2"""Gateway /v1/models returned an unexpected body\..{0,100}?.{0,100}?.{0,100}?\.data\.flatMap\(\([\w$]+=>[{]let [\w$]+=[\w$]+\?[\w$]+\([\w$]+\.id\):void 0;if\(![\w$]+\|\|![\w$]+\)return\[\];let [\w$]+=[\w$]+\([\w$]+\.anthropic_family_tier\);return\[[{]"""
++
++proc discoveryUnfiltered(s: string): bool =
++  findAll(s, C_UNFILTERED).len == 1
++
+ proc endState(s: string): array[5, int] =
+   [
+     s.count(MARKER),
+@@ -95,6 +105,13 @@ proc endState(s: string): array[5, int] =
+     s.count(MARK_E & "(" & GUARD & "?{..."),
+   ]
+ 
++# The patched end state: site C's guard only where upstream still filters.
++proc wantState(s: string): array[5, int] =
++  if discoveryUnfiltered(s): [1, 1, 0, 1, 1] else: [1, 1, 1, 1, 1]
++
++proc wantGuards(s: string): int =
++  if discoveryUnfiltered(s): GUARD_SITES - 1 else: GUARD_SITES
++
+ proc apply*(input: string): string =
+   result = input
+ 
+@@ -103,9 +120,9 @@ proc apply*(input: string): string =
+   # text must appear nowhere else (AGENTS.md Rule 6).
+   let have = endState(result)
+   let guardTotal = result.count(GUARD)
+-  if have == [1, 1, 1, 1, 1] and guardTotal == GUARD_SITES and
++  if have == wantState(result) and guardTotal == wantGuards(result) and
+       result.count(ION_FLAG) == 1:
+-    echo "  [OK] allow-non-anthropic-models: module and all 4 guards already present (idempotent)"
++    echo &"  [OK] allow-non-anthropic-models: module and all {guardTotal} guards already present (idempotent)"
+     return
+   if have != [0, 0, 0, 0, 0] or guardTotal != 0 or result.count(ION_FLAG) != 0:
+     echo &"  [FAIL] allow-non-anthropic-models: half-patched bundle (module x{have[0]}, validator x{have[1]}, discovery x{have[2]}, tier-pin x{have[3]}, setup-window x{have[4]}, guard text x{guardTotal}) - re-audit"
+@@ -135,15 +152,20 @@ proc apply*(input: string): string =
+       inc n
+       s[m.group(0)] & "!(" & MARK_C & GUARD & "||" & s[m.group(1)] & ")" & s[m.group(2)],
+   )
+-  if n != 1:
++  if n == 0 and discoveryUnfiltered(result):
++    echo "  [OK] C gateway /v1/models discovery: upstream keeps non-Anthropic rows (no filter left), nothing to guard"
++  elif n != 1:
+     echo &"  [FAIL] allow-non-anthropic-models: C gateway /v1/models discovery filter matched {n}/1 - re-audit"
+     quit(1)
+-  echo "  [OK] C gateway /v1/models discovery: guard added"
++  else:
++    echo "  [OK] C gateway /v1/models discovery: guard added"
+ 
+   # D. [custom-3p] tier-pin sanitizer, gateway branch, pinned by its warning.
++  # The warning goes out as `P.warn(...)` (4.23118) or through the sanitizer's
++  # reporter callback `r(...)` (Windows 5.1231.0); the guarded test is the same.
+   n = 0
+   result = result.replace(
+-    re2"""(if\(![\w$]+\)[{]if\()([\w$]+\([\w$]+\)&&![\w$]+\([\w$]+\)\)[{][\w$]+\.warn\(["`]\[custom-3p\] \$[{][\w$]+[}]: value matches a known non-Anthropic model fragment; ignoring\.)""",
++    re2"""(if\(![\w$]+\)[{]if\()([\w$]+\([\w$]+\)&&![\w$]+\([\w$]+\)\)[{][\w$]+(?:\.warn)?\(["`]\[custom-3p\] \$[{][\w$]+[}]: value matches a known non-Anthropic model fragment; ignoring\.)""",
+     proc(m: RegexMatch2, s: string): string =
+       inc n
+       s[m.group(0)] & "!" & MARK_D & GUARD & "&&" & s[m.group(1)],
+@@ -195,9 +217,9 @@ proc apply*(input: string): string =
+   for c in after:
+     if c == 1:
+       inc applied
+-  if applied < EXPECTED_PATCHES or result.count(GUARD) != GUARD_SITES or
++  if after != wantState(result) or result.count(GUARD) != wantGuards(result) or
+       result.count(ION_FLAG) != 1:
+-    echo &"  [FAIL] Only {applied}/{EXPECTED_PATCHES} allow-non-anthropic-models parts present exactly once after patching (guard text x{result.count(GUARD)}, want {GUARD_SITES})"
++    echo &"  [FAIL] Only {applied}/{EXPECTED_PATCHES} allow-non-anthropic-models parts present exactly once after patching (guard text x{result.count(GUARD)}, want {wantGuards(result)})"
+     quit(1)
+ 
+ when isMainModule:
+@@ -216,7 +238,7 @@ when isMainModule:
+     writeFile(filePath, output)
+     echo &"  [PASS] allow non-Anthropic models applied ({EXPECTED_PATCHES}/{EXPECTED_PATCHES} parts)"
+   else:
+-    if endState(output) != [1, 1, 1, 1, 1]:
++    if endState(output) != wantState(output):
+       echo "  [FAIL] No changes made and the patched end-state is absent"
+       quit(1)
+     echo "  [OK] Already applied (no changes needed)"
 diff --git a/patches/community/add_feature_theme_picker.nim b/patches/community/add_feature_theme_picker.nim
 index daeb9f4..34ee2ea 100644
 --- a/patches/community/add_feature_theme_picker.nim
@@ -398,6 +490,25 @@ index ede612a..38a4dbf 100644
  var __cdb_parseFailed=false;
  var __cdb_readCfg=function(p){var r=__cdb_readRaw(p);if(r===null)return null;try{return JSON.parse(__cdb_stripJsonc(r))}catch(e){__cdb_parseFailed=true;__cdb_log("Error parsing "+p+": "+e.message);return null}};
  // One theme per file from themes.d/. A file is either the theme object itself (name =
+diff --git a/patches/core/add_feature_extra_settings.nim b/patches/core/add_feature_extra_settings.nim
+index f03ea70..0c45304 100644
+--- a/patches/core/add_feature_extra_settings.nim
++++ b/patches/core/add_feature_extra_settings.nim
+@@ -305,6 +305,14 @@ proc apply*(input: string): string =
+     elif landed.len > 1:
+       echo "  [FAIL] VM probe capture: " & $landed.len & " end-state hits (expected 1)"
+       quit(1)
++    elif findAll(result, re2"""[{,]qemuPath:[\w$]+[,}]""").len == 0 and
++        findAll(result, re2"""[{,]virtiofsdPath:[\w$]+[,}]""").len == 0:
++      # The Windows package (5.1231.0) has no QEMU backend: no minified object
++      # carries a qemu or virtiofsd path at all (sub-patch A's module names
++      # them only with spaces or in calls). Its only consumer, the Linux
++      # Computer Use status page, answers "Linux only" on win32.
++      echo "  [OK] VM probe capture: no QEMU/virtiofsd probe in this bundle (Windows package), nothing to publish"
++      patchesApplied.inc
+     else:
+       # Groups: 0 the cache assigned, 1 the cache the IIFE returns, 2 the memo,
+       # 3 the getter, 4 the cache the getter returns. 0, 1 and 4 must agree.
 diff --git a/scripts/apply_patches.py b/scripts/apply_patches.py
 index e6126bd..a3f8ab6 100644
 --- a/scripts/apply_patches.py
