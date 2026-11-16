@@ -5,14 +5,14 @@ A portable Windows build of Anthropic's official Claude Desktop with this projec
 - **Profiles**: several separate Claude instances side by side, each with its own sign-in, settings and Claude Code configuration.
 - **Settings → Extra**, with these panels:
   - **Themes**: the [theme engine](themes.md), its bundled palettes and the <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd> picker.
-  - **Community**: the opt-in features. They are diff view modes, panel tabs and files quick open (<kbd>Ctrl</kbd>+<kbd>P</kbd>) in the [Code tab](code-tab.md); load large sessions in full; allow non-Anthropic models (3P gateways); the theme picker; and developer tools.
+  - **Community**: the opt-in features. They are diff view modes, panel tabs and files quick open (<kbd>Ctrl</kbd>+<kbd>P</kbd>) in the [Code tab](code-tab.md); load large sessions in full; allow non-Anthropic models (3P gateways); the theme picker; developer tools; the [Jira issue tracker](jira-tracker.md) (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>J</kbd>); and the [auto-archive delay](auto-archive-grace.md) after a PR merges or closes.
   - **Models**: [custom models](custom-models.md) from other providers in the Code tab's picker.
   - **Anthropic**: [feature flag overrides](feature-flags.md).
 
 Everything else is Anthropic's Windows app as shipped. Left out because Windows has its own, or they are Linux plumbing:
 
 - the Linux fixes;
-- Computer Use bridges;
+- Computer Use bridges, and with them Escape stops Computer Use (it runs a Linux bridge watcher in place of the X11 Escape grab);
 - window controls, native titlebar and transparent window;
 - the Quick Entry socket and `--toggle`/`--reload-theme` (Windows has its own Quick Entry shortcut; theme files are re-read when they change);
 - the Deployment panel (Windows takes managed settings from the registry, `SOFTWARE\Policies\Claude`).
@@ -113,6 +113,7 @@ This fork follows [patrickjaja/claude-desktop-extra](https://github.com/patrickj
   - Windows fixes:
     - git resolved from PATH only, with no console window, in diff views;
     - native path joins in files quick open;
+    - drive-letter project folders (`C:\work`, `C:/work`) in the Jira tracker;
     - the theme caption colors, BOM-tolerant config reads, and no app menu in the theme picker;
     - the Windows 3P folder;
   - `apply_patches.py --windows`, the `windows` category of `scripts/run-feature-tests.sh` and the `patches/windows` Makefile rule;

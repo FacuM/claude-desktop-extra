@@ -181,6 +181,8 @@ jobs:
             '[files-quick-open] installed (main)',
             '[panel-tabs] installed (main)',
             '[transcript-limits] installed (main)',
+            '[cdb-jira] installed; switch',
+            '[archive-grace] installed (main)',
             '[win-update] armed'
           )
           do {

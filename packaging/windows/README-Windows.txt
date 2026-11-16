@@ -10,7 +10,9 @@ claude-desktop-extra to add:
       Themes     - bundled color themes, Ctrl+Shift+T picker
       Community  - opt-in extras: Code tab diff view modes, panel tabs, files
                    quick open (Ctrl+P), load large sessions in full, allow
-                   non-Anthropic models (3P gateways), developer tools
+                   non-Anthropic models (3P gateways), developer tools,
+                   the Jira issue tracker (Ctrl+Shift+J), and a delay
+                   before a session is archived after its PR merges
       Models     - custom models from other providers (DeepSeek, OpenRouter,
                    a LiteLLM gateway, Anthropic's API on your API credit...)
                    in the Code tab's model picker

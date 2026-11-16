@@ -54,7 +54,9 @@ const MODULES = [
   ["transcript_limits_main.js", "__cdbTranscriptLimitsMain"],
   ["diff_views_main.js", "__cdbDiffViewsMain"],
   ["custom_models_main.js", "__cdbCustomModels"],
-  ["dev_tools_toggle_main.js", "__cdbDevToolsToggle"]
+  ["dev_tools_toggle_main.js", "__cdbDevToolsToggle"],
+  ["jira_tracker_main.js", "__cdbJiraTrackerMain"],
+  ["auto_archive_grace_web_main.js", "__cdbArchiveGraceWebMain"]
 ];
 
 for (const [file, marker] of MODULES) {
@@ -102,6 +104,20 @@ for (const nim of ["patches/core/add_feature_custom_themes.nim", "patches/commun
   const s = readFileSync(join(ROOT, nim), "utf8");
   ok(s.includes('if(process.platform!=="linux"&&process.platform!=="win32")return;') &&
      !s.includes('if(process.platform!=="linux")return;'), nim + ": gate allows win32");
+}
+
+// The PR archive delay: the main patch's injected gates (six sites, each
+// parenthesised so the || cannot rebind the && chain around it), and the
+// delay getter the engine reads, defined on win32 too.
+{
+  const s = readFileSync(join(ROOT, "patches/community/add_feature_auto_archive_grace.nim"), "utf8");
+  const wide = '(process.platform===\\"linux\\"||process.platform===\\"win32\\")';
+  const bare = s.split('process.platform===\\"linux\\"').length - 1;
+  ok(s.split(wide).length - 1 === 6 && bare === 6, "add_feature_auto_archive_grace.nim: all six gates allow win32");
+  const m = readFileSync(join(ROOT, "js/extra_settings_main.js"), "utf8");
+  ok(m.includes('if (process.platform === "linux" || process.platform === "win32") {\n    globalThis.__cdbAutoArchiveMergeDelayMinutes'),
+     "extra_settings_main.js: the archive delay getter exists on win32");
+  ok(!m.includes('"the PR archive delay is Linux only"'), "extra_settings_main.js: the archive delay channels are not refused on win32");
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
