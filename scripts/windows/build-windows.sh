@@ -158,7 +158,7 @@ else
 fi
 [ -f "$ION_DIR/index.html" ] && [ -d "$ION_DIR/assets/v1" ] ||
     die "the staged ion-dist ($ION_FORMAT) has no index.html or assets/v1/ - the setup window's layout moved"
-WINDOWS_ION_PATCHES=(community/add_feature_allow_non_anthropic_models_ion)
+WINDOWS_ION_PATCHES=(community/add_feature_allow_non_anthropic_models_ion community/add_feature_auto_archive_grace_ion)
 
 # Upstream absorption probe (AGENTS.md Rule 4) on the Windows set: a shared
 # patch that changes nothing in the pristine Windows bundle means Anthropic now
