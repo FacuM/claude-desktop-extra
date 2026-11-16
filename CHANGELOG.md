@@ -2,6 +2,367 @@
 
 All notable changes to the claude-desktop-extra packages will be documented in this file.
 
+## 2026-11-16
+
+### Custom models: adaptive thinking for Claude 4.6+, Fable 5.x and Mythos 5.x behind a compatible endpoint (thanks @aliveoutside, #342)
+
+- Adaptive Claude models (Opus/Sonnet 4.6+, Haiku 5+, Fable 5.x and Mythos, bare or gateway-prefixed/dotted like `anthropic/claude-fable-5-2` or `anthropic/claude-opus-5.5`) served through an Anthropic-compatible endpoint now receive `thinking: {type: "adaptive"}` and unmapped effort (`low..max`, capping `xhigh -> max` on 4.6 / Mythos preview unless the provider configures its own `effort` list or `effortMap`) instead of `budget_tokens`, while light requests without thinking keep both omitted (`js/custom_models_preload.js`).
+- On the always-thinking models that reject `{type: "disabled"}` (Fable 5.x, Mythos 5+, Haiku 5+, Opus/Sonnet 5.5+), mode Off omits `thinking` and keeps effort (`thinking: false` omits both); on 4.6..5.0 models it sends `{type: "disabled"}` without `output_config`. Settings -> Extra -> Models **detect** (`cdb-cm:effort-probe`) probes adaptive Claude models with `{type: "adaptive"}` (`js/custom_models_main.js`), and `claude-mythos-*` joins `ANTHROPIC_FAMILY_RE` so custom aliases never shadow subscription Mythos sessions.
+
+## 2026-11-15
+
+### Cloud Cowork device key: explain `row_pk_no_row` and `row_pk_directory` when TPM is accessible (#341)
+
+- Settings -> Extra -> Cowork (Linux), `claude-desktop --diagnose` and the Computer Use docs now explain that `claude.ai` registers a newly created TPM device key only when the **Cowork** tab (or Connected devices on `claude.ai`) loads (`row_pk_no_row` while still on Chat), and distinguish transient network/TLS lookup failures (`row_pk_directory`) from unaccessible TPM state (`js/extra_settings_main.js`, `scripts/claude-desktop-launcher.sh`, `docs/computer-use.md`, `docs/troubleshooting.md`).
+
+### Transparent window: clear sub-2x sidebar and transcript scroll-layer backings (#340)
+
+- Clears the opaque `local` scroll-layer backgrounds (`[data-own-scroll-layers]` on `.dframe-nav-scroll`, `.own-scroll-layer`, `.own-scroll-layer-in-host` and `.epitaxy-own-scroll-layer`) that `claude.ai` paints on `< 2x` displays when no frosted-glass backdrop is active, keeping the sidebar and conversation panes see-through while dialogs, menus, popovers, elevated cards and collapsed-sidebar peek popovers stay solid (`js/window_transparency.js`).
+- Maps `--df-web-sidebar-bg` and `--cds-fizzy-lake-color-sidebar` onto `--bg-200` (`--bg-300` under `[data-darker]`) so custom themes without an animated backdrop keep their sidebar palette inside `.dframe-nav-scroll` when **Transparent window** is off (`patches/core/add_feature_custom_themes.nim`).
+
+### Message input appearance: opt-in frosted Chat composer switches (thanks @Reymarch995, #339)
+
+- New **Frosted message input** (`transparentChatComposer`) and **Frost only the input field** (`frostedReplyField`) switches under Settings -> Extra -> Themes -> Message input appearance and Settings -> Extra -> Community Features -> App and window (both off by default, live-applied across active themes or stock, locked when set in `claude-desktop-extra.jsonc`).
+- **Frosted message input** replaces Chat's opaque footer/side backings with a translucent, blurred outer composer panel matching the input field's native corner radius while keeping approval cards, borders and editor controls intact; **Frost only the input field** keeps the outer wrapper clear and confines frost to the inner rounded field.
+
+### Animated backdrops: clear Chat input backing and glass bounds (thanks @Reymarch995, #338)
+
+- Clears Chat's opaque bottom/side backing strips, pseudo-element shadows and outer square composer blur while an animated backdrop is active (`data-engine-backdrop-on`), keeping the frosted-glass surface on the rounded input field and restoring the original solid backing when backdrops are turned off (#337).
+
+### Custom themes: live animated SVG backdrops, frosted glass, GTA I-VI series and 20 scene themes (#336)
+
+- **Animated SVG backdrops and frosted-glass panels across Chat, Cowork and Code:** brings the animated SVG backdrop and frosted-glass surface engine from Anthropic's [Claude Code interface mods](https://code.claude.com/docs/en/plugins/mods/interface#put-a-backdrop-behind-the-conversation) (`data-engine-backdrop`, `data-engine-glass`, `--engine-glass-*`) to the entire desktop app - Chat, Cowork, Code and pop-out windows - with no plugin required (`js/backdrop_scenes.js`, `js/backdrop_injector.js`). Animations pause automatically when the window is hidden or `prefers-reduced-motion` is active.
+- **6 new GTA themes (`gta-i` through `gta-vi`) + authentic Gaming & Shows HUDs & backdrops:** adds `gta-i`, `gta-ii`, `gta-iii`, `gta-iv`, `gta-v` and `gta-vi` (Vice City pink-cyan neon) to the **Gaming & Shows** section with dual light/dark palettes, custom SVG spinners and official game HUDs/sprites (`js/gaming_themes.json`, `js/backdrop_scenes.js`):
+  - **GTA I:** authentic top-down 1997 city blocks with tiled sidewalks, yellow curbs, green park, navigation arrow, Yellow Motorola Pager (`GTA` LCD), top-right peaked-cap cop-head wanted bar + green pixel `$34240` cash + `x1*5` + 4 pixel hearts, and a looping blue-and-white Police Cruiser chasing a checkered yellow Taxi (plus a matching 2-frame Police Cruiser flip spinner).
+  - **GTA II-VI:** GTA II `¥`/`Z`/smiley Respect-o-Meter, cop heads, `$58420` + Z-Type/police cruiser chase; GTA III Uzi/clock/cash/6-star corner HUD + north-marked radar; GTA IV/V GPS routes, `VINEWOOD` ridge & dollar counters; GTA VI Ocean Drive hotel marquee & flamingo neon.
+  - **Classic & Fantasy Gaming:** Super Mario NES `MARIO`/`WORLD`/`TIME` pixel HUD, PlayStation 2 translucent crystal towers, Game Boy DMG-01 Tetris `SCORE`/`LEVEL`/`LINES`/`NEXT` panel, Final Fantasy royal-blue ATB menu window, Zelda ruby heart containers + magic meter + Rupee counter, Warcraft portrait unit frames + Hearthstone rune, and Bulma's Dragon Radar with HP/KI gauges.
+- **Battle for Dream Island (`bfdi`) theme & Gaming & Shows section (#334, thanks @kuznix-code):** adds `bfdi` with dual light/dark palettes (Goiky sunlit meadows & Golden Gates by day; starry purple Yoyleland, Yoyleberries & Yoyle Mountain by night), a dual-mode animated SVG backdrop featuring Lollipop (BFB) and upright Pin, and a two-frame `flip` Lollipop & Pin duo spinner (`124` bundled palettes, `34` animated backdrops). Renames the **Gaming** section/scene group to **Gaming & Shows** (`Gaming & Show Scenes`) and matches both `"gaming"` and `"shows"` when filtering or bucketing themes.
+- **20 new Animated Scene themes (`js/scene_themes.json`):** bundles all 20 scenes from Anthropic's `theme-examples` (`honu-lagoon`, `koi-mosaic`, `halftone-dawn`, `halftone-dusk`, `plotter-tide`, `plotter-tide-night`, `dither-dunes`, `dither-dunes-night`, `paper-garden`, `paper-garden-kraft`, `night-reef`, `snow-pines`, `braille-stars`, `teletext-clouds`, `vector-range`, `departure-board`, `blueprint`, `deep-water`, `aurora`, `ember`) as full dual light/dark themes, each with its own unique centered monochrome spinner, `honu-lagoon` <-> `night-reef` light/dark twin pairing, and fitting default scenes for all 84 community themes.
+- **Responsive sidebar-aware backdrops & GTA/community spinner polish:** adds viewport/sidebar layout tracking (`js/backdrop_injector.js` `.cdb-flank-l`/`.cdb-flank-r`/`.cdb-flank-lt`/`.cdb-flank-rt`, `width="3200"` full-bleed bands, window-control HUD clearance `y >= 62`, reduced center veil opacity `0.48`), eliminates SVG `transform` / CSS keyframe collisions across all gaming scenes, anchors palm/tree pivots, upgrades `gta-iii`..`gta-vi` spinners to two-frame `flip` sprites with >= 2.6:1 dark-mode rim contrast (also brightening `warcraft`/`gta-i`/`gta-ii`), and re-centers four community spinners (`hexa34c`, `vesper`, `zenbones`, `tokyo-night-moon`).
+- **Live Backdrop selector in `Ctrl+Shift+T` and Settings -> Extra -> Themes:** a new **Backdrop** bar (`activeBackdrop` in `claude-desktop-extra.jsonc`) lets you follow the active theme's scene (`""`), turn backdrops off (`"off"`) while keeping your color palette, or mix and match any of the 33 animated scenes over any theme live.
+- **Works together with Transparent window:** when both an animated backdrop and the **Transparent window** Community switch are active, `[data-engine-backdrop]` carries the window alpha (`1 - windowTransparencyLevel`, updating live with the Transparency slider) while `.dframe-root`, `.dframe-sidebar` and header grounds stay clear so alpha layers never stack (`js/window_transparency.js`).
+- **Community contributions welcome:** these animated backdrops are our first pass and we will keep polishing them over upcoming releases - feel free to build your own themes (dual light/dark palettes, animated SVG backdrops, custom SVG spinners) and open a PR!
+
+## 2026-11-14
+
+### Upstream 5.11492.5
+
+- **Validated against 5.11492.5** (Electron 45.2.1, `@anthropic-ai/claude-agent-sdk` 0.3.325): all 74 main-bundle patches and 3 `ion-dist` patches apply cleanly; nothing was absorbed upstream.
+- **Settings -> Extra -> Deployment** lists the four new managed keys (217 total): `autoModeClassifierModel`, `builtinBrowserClientCertificateHosts`, `deploymentLogo`, and, locked (`internal-only`), `enforceConsoleSignInOrgList`.
+- The GrowthBook flag catalogue in `claude-desktop-extra.jsonc` covers 5.11492.5 (879 flags: 26 new across 5.11492.0–5.11492.5, 1 removed `4185841952`).
+- Refusal-string baseline refreshed for the expanded `failIfUnavailable` schema description; platform-gate, feature-flag, and `ion-dist` baselines updated.
+
+## 2026-11-13
+
+### Upstream 5.11492.0
+
+- Re-fitted for the re-minified build: allow non-Anthropic models, custom models, auto-archive grace, own-release update check and the Linux Computer Use patch. Nothing was absorbed upstream.
+- Refusal-string baseline refreshed (reworded keychain connector error, which names the Linux keyring requirement).
+
+### Computer Use: read app controls (accessibility) - stable numbers, waiting, more actions
+
+- **Element numbers stay put.** With the experimental accessibility switch on, a control keeps its `[N]` across listings of its window for the whole task. Before acting, the control is checked to still be the one that was listed; a re-created control is found again only when that is unambiguous (same accessible id and name, or a unique role and name), otherwise the tool says so and sends nothing.
+- **Results say whether anything was sent:** refused before sending (safe to retry), or sent but not confirmed.
+- **`app_ax_find` can wait** (at most 15 s) for a control to appear, go or change state, and can look inside one container, limit depth, list only containers (outline) or include plain text.
+- **More actions:** `app_click` can bring a control into a state (checked, unchecked, expanded, collapsed, selected) and reports when it already was; new `app_focus` and `app_scroll` (scroll into view); `app_type` sets a slider's or spin button's value from a number. A bridge without these features keeps the four earlier tools. See [Computer Use](docs/computer-use.md#read-app-controls-through-accessibility-experimental).
+
+### Jira issue tracker in the main window, opt-in (thanks @dels07, #333)
+
+- New Community switch **Jira issue tracker** (Settings -> Extra -> Community Features -> Code, off by default). A **Jira** row in the sidebar, or Ctrl+Shift+J, opens a page over the content area: your Jira Cloud tickets (Assigned to me / Reported by me, a project filter, free JQL and named saved queries), a read-only detail panel (description, inline images and video with a zoomable viewer, attachments with **Save to Downloads**, the last five comments and a Details card), status changes from a menu, subtasks as expandable rows under their parent, Board / Backlog sections and moves from the project's Jira board, a **Board** view with drag-and-drop between the board's columns, and **Send to agent**, which starts a new Code session in a folder you pick (its own worktree in a git repository) with the ticket in the first message. Untrusted folders ask first in a native dialog.
+- Needs your Jira Cloud site, Atlassian email and an API token (classic or scoped), stored encrypted with the system keyring per profile; requests go only to your site and `api.atlassian.com`. Setup and limits: [docs/jira-tracker.md](docs/jira-tracker.md) (new patch `add_feature_jira_tracker`).
+- **Board** view: the columns of the project's Jira board; drag a card to change its status (one fitting transition runs, several ask which, none or only ones that need fields send the card back with the reason). Board and Backlog moves read Jira's backlog again until the ticket shows in its new place.
+- The page follows the claude.ai theme, custom themes included, while it is open. In light themes, secondary text is clamped to a readable lightness and opacity; dark themes keep their colours.
+- Token scopes in Settings: an **i** beside the token field lists the scopes a scoped token needs, and **Test connection** names the token type and checks tickets, Board and Backlog, board columns and (Scrum) sprints, with the scopes each failed check probably lacks.
+- Send to agent asks before every send: a native dialog shows the folder, the permission mode and the exact first message (ticket text is untrusted), Cancel is the default. Changing the Jira site clears the saved token so it is only ever sent to the site it was saved for; switching the tracker off or saving new credentials drops the cached board and attachment data; and a pending sidebar scan no longer brings the Jira row back after the switch is turned off.
+- Known gaps: fixed 260 px board columns; the shared Extra settings styles of the Jira row can fall below AA contrast in light themes (separate fix); the native folder picker and trust dialog follow the system theme.
+
+## 2026-11-12
+
+### Computer Use: the glow and the drawn cursor on KDE Plasma and GNOME Wayland
+
+- **KDE Plasma 6.6+ (Wayland)** gets the same "Claude is using your computer" glow as sway, Hyprland and niri, with Anthropic's drawn cursor when that is on: a click-through layer-shell overlay drawn by `kwin-portal-bridge overlay`, on the monitor Computer Use works on. It needs the `kwin-portal-bridge` build that carries the overlay (its `doctor` reports `capabilities.overlay` and `capabilities.session_overlay_opt_out`); the screen-sharing session then starts without the bridge's own glow, so there is never more than one. The bridge keeps the overlay out of every screenshot. An older or custom `KWIN_PORTAL_BRIDGE_BIN` keeps drawing its own glow, as before.
+- **The "Claude is using your computer" badge** is drawn on the sway, Hyprland, niri and KDE Wayland overlay like on Anthropic's glow: it flashes in the centre of the screen and slides to the top-right corner over 6 seconds each time Claude takes Computer Use (not with reduced motion), when the bridge build draws it. A screenshot taken while it is up is captured with the whole overlay hidden, so the badge is never in what Claude receives.
+- **Show the glow while Claude uses the computer** now also turns the glow off on KDE Plasma and GNOME Wayland with those bridges. See [Computer Use](docs/computer-use.md).
+- **Screenshots from a `COWORK_SCREENSHOT_CMD`, from spectacle (KDE) or from Electron's screen capture no longer contain the drawn arrow or its press ring** (they are hidden for the capture like for the bundled bridges). On X11 the monitor list the captures use is refreshed when a monitor is plugged in, removed or changed, instead of staying stale for the session.
+- **GNOME Wayland** gets the glow, Anthropic's drawn cursor and the badge too, drawn by `gnome-portal-bridge overlay` as click-through XWayland windows (GNOME Shell has no layer-shell), on the monitor Computer Use works on. It needs the `gnome-portal-bridge` build that carries the overlay (its `doctor` reports `capabilities.overlay`) and XWayland. The glow is static there, hidden in the Activities overview and below GNOME Shell's dialogs and notifications. GNOME cannot leave the overlay out of a screen capture, so all of it is hidden for each screenshot (up to 150 ms wait, normally 50 to 65 ms) and Claude's screenshots contain none of it; the glow blinks briefly at each screenshot.
+- **The first screenshot of a Computer Use lock no longer shows the glow or the badge on the sway, Hyprland and niri overlay.** A screenshot taken before the overlay had come up now holds its appearance back until the capture is done (no added wait), and a screenshot taken between the overlay's show and its answer hides it as usual.
+
+### Computer Use: emoji typed on sway, Hyprland and niri
+
+- **Characters outside the Basic Multilingual Plane (emoji, U+1D11E) arrive intact in Chromium and Electron apps on sway, Hyprland and niri.** Those apps keep a typed key's character in 16 bits on native Wayland, so the bridge's key-by-key typing cut U+1F600 to U+F600. Such characters are now pasted through the clipboard (Ctrl+V, clipboard restored afterwards) while the rest of the text is still typed; a terminal in front, or a front window Claude cannot name, keeps the old typing. Other desktops are unchanged. See [Computer Use](docs/computer-use.md).
+
+### Computer Use: clicks after an app restart land where Claude aimed
+
+- **After the app restarts in the middle of a session**, Claude's clicks, scrolls, drags and moves before its next screenshot are read in the size its screenshots of that monitor have (for example 1430x804 for a 1920x1080 monitor at scale 1.6), on every session type and on KDE Plasma Wayland. They were taken as screen positions (Code sessions and local Cowork) or divided by the scale factor (KDE Plasma Wayland, cloud sessions, teach mode), so they landed short and towards the top left on every monitor whose screenshots are scaled down. The same applies right after `switch_display`, on the newly chosen monitor. A point outside that size is refused with "Take a screenshot first", as is a click whose screenshot size cannot be told yet; Claude then takes a screenshot and goes on. `claude-patches.log` has a `no screenshot yet in this app run` line for each such click.
+- **The same in cloud sessions and teach mode:** a click whose screenshot size cannot be told yet (KDE X11 with spectacle before the bundled `x11-bridge` said whether it masks) is refused with "Take a screenshot first" there too, instead of being divided by the scale factor. `app_ax_find` before any screenshot reports positions in the size the next screenshot will have also where screenshots keep the full size (`COWORK_SCREENSHOT_CMD`, spectacle on KDE X11).
+
+### Computer Use: monitors with the same name
+
+- **Code sessions and local Cowork on X11, sway, Hyprland, niri and GNOME Wayland:** two monitors with the same name (both "Unknown Display" in a VM, two identical monitors) are told apart as "Unknown Display" and "Unknown Display (2)", as Anthropic's own code names them; the second one was unreachable by name with `switch_display`. With two or more monitors each screenshot now names the monitor it shows and the others, the note the `switch_display` description tells Claude to read. Monitors with unique names read as before.
+
+### Profiles: a named profile no longer overwrites the default profile's OS entry points state
+
+- **Multiple profiles:** each profile keeps its own `os-entry-points.json` (whether the OS entry points are on, and the account and organization the GNOME search provider shows). Upstream wrote it to `~/.config/Claude` from every profile, so a named profile replaced the default profile's account and organization, or switched its search results off. The default profile and 3P mode write where they did. See [Profiles](docs/profiles.md).
+
+### Computer Use: long texts on X11, GNOME screenshots after a session restart
+
+- **X11:** typing allows time in proportion to the text instead of a flat 15 seconds, and when the bundled `x11-bridge` is stopped part-way (the time ran out, or the keyboard layout changed mid-text) only the rest is typed, never the whole text again. An `x11-bridge` without that report behaves as before.
+- **GNOME Wayland:** when a screenshot has to start the screen-sharing session first, it starts it before hiding the glow, so the glow is not hidden while GNOME's consent dialog is open and the capture follows the hide at once.
+
+### Custom themes apply to pop-out windows (#331)
+
+- **"Open in new window" now shows your theme.** A popped-out Code session, chat or project (any window the app pops out of the main window) uses the active theme in the matching light or dark variant and follows live theme switches, config reloads, light/dark flips and clearing the theme; its window background and, where the pop-out has app-drawn caption buttons, their overlay follow the theme; the themed loading spinner shows there too. Content from other sites inside a pop-out, artifact pop-ups opened by an artifact itself, and the in-app browser's pop-ups stay as they are.
+- After clearing a theme the caption symbols return to the stock colors.
+
+### Transparent window, title bar modes and profile names in pop-out windows
+
+- **Transparent window: pop-out windows follow the main window.** With the Transparent window switch on, a popped-out Code session, chat, project or artifact window is see-through like the main window, also where it has an OS frame (native Wayland), and the Transparency slider changes it live. Pop-outs stay opaque whenever the main window is (switch off, native titlebar). A transparent pop-out opens with the window manager's frame, so it keeps its close and minimize buttons.
+- **The Code tab's session view is see-through too.** Transcript, composer and the new-session page share the one see-through layer with the rest of the window instead of staying solid, in the main window and in pop-outs.
+- **Session rail and floating cards:** the docked session rail and the side panes are part of the see-through layer instead of a solid box, while cards that float over the transcript (the session rail in a narrow window, notices above the composer) keep a solid ground so nothing shows through them. A pop-out's header follows the Transparency slider.
+- **Embedded pages stay readable.** Pages embedded in the app, such as artifacts, previews and other sites, keep an opaque backing in a transparent window, so their text never sits directly over the desktop.
+- **Native and bare title bar modes apply to pop-out windows:** they open with the window manager's frame instead of drawn caption buttons.
+- **Named profiles:** pop-out windows carry the profile name in their title (`Claude (work)`), like the main window.
+
+## 2026-11-11
+
+### Transparent window: no empty strip in the header
+
+- **Transparent window:** a transparent window has no window buttons, and the header no longer keeps the empty strip reserved for them.
+
+### Computer Use: no screen-share dialog after a failed capture, Stop sharing on Ubuntu, the dock of a maximized window, X11 title bars
+
+- **sway, Hyprland, niri, river and GNOME Wayland:** a screenshot whose bridge capture fails tells Claude it failed and that taking it again once is reasonable; a second failure in a row in the same turn tells it to stop and tell you (naming `claude-patches.log` and `COWORK_SCREENSHOT_CMD`), and a GNOME portal session that could not start is reported with its own advice. It no longer falls back to Electron's own capture, which on Wayland raised the desktop's screen-share picker (GNOME's "share your screen" dialog) and blocked the tool call until someone answered it. On GNOME a screen-cast frame that does not arrive in time is waited for once more first. X11 keeps that silent fallback, and `COWORK_SCREENSHOT_CMD` still overrides. A capture still running when the turn ends is stopped with it, on X11 too (no image after the turn).
+- **Stop sharing is noticed at once on Ubuntu.** Its GNOME session runs with umask 0002, so the bridge's folder in `$XDG_RUNTIME_DIR` was group-writable and was not watched; the stop was noticed only at the next action. Inside your own private runtime folder the app now sets it to 0700 and watches it. A folder another account could write to is still not watched.
+- **Docking a maximized Claude window:** when the window manager applies the un-maximize only after the dock (GNOME Wayland, about 1 in 14 turns) and the window comes back large over the app Claude works in, the dock size is asked for once more, by the window manager's own late resize when it comes; a dock that still does not hold is logged as a `[claude-cu] dock:` line.
+- **X11 with a reparenting window manager (xfwm4 and others):** a click on an approved app's title bar, its buttons or its border is allowed like a click in the window; it was refused as landing on a bare window number. The bundled `x11-bridge` resolves a frame point to the window's app, also for window managers that nest the client deeper; the invisible shadow margin of client-side-decorated windows no longer counts as the window, and it looks through windows that do not take clicks (Claude's "Claude is using your computer" glow), so panels, docks and the desktop behind the glow are judged as themselves. A window that names no app is still refused, now with the explicit "no grant can cover it" message. Claude's own title bar is still recognised as Claude's. See [Computer Use](docs/computer-use.md).
+
+### Upstream 5.1231.2
+
+- **Re-fitted to the new release** (Electron 45.2.1, Claude Code 2.1.321; fitted against 5.1231.0, released as 5.1231.2, which passes unchanged): the Computer Use enable gates and glow setter, the renderer recovery pair (upstream's reason filter now returns a verdict; the SIGKILL fallback sits in upstream's shared kill helper, so it also ends a stalled renderer behind the "reload limit reached" error card, and after our kill upstream reloads at once), the updater idle state (now carries a "held on low data" variant), the Quick Entry command-line toggle (the shortcut registration gained a screen-locked callback, which is passed through) and the tier-pin check of the non-Anthropic models switch.
+- **Computer Use follows the new `computerUseEnabled` policy key**: a managed `computerUseEnabled: false` turns Computer Use off on Linux as it does on upstream's platforms; unset or `true` leaves it available.
+- **The drawn cursor in the Computer Use glow works on X11.** When upstream turns it on (server flag `1916550538`), the glow on X11 with a compositing manager becomes a thin rim and an arrow glides to each target before the real pointer follows and a press ring plays, as with upstream's own Linux X11 backend. The real pointer stays visible. With the flag off, and on every other session, the glow and all input are unchanged. To try it now, switch on **Drawn cursor in the glow** on Settings -> Extra -> Cowork (Linux) and restart.
+- **Non-Anthropic gateway models**: upstream's `/v1/models` discovery now filters through the gateway validator the switch already guards, so the separate discovery guard is gone. The build fails if discovery stops going through that validator.
+- **Trusted Auto-fix PR authors**: upstream now also requires the signed-in `gh` account to have push access to the repository before Auto-fix arms; this applies to PRs from listed authors too (they report `no_push` otherwise).
+- **Settings -> Extra -> Deployment** lists the new managed keys (213): `computerUseEnabled`, `remoteFileDownloads`, `organizationAnnouncement`, `allowStandardUserUpdates` (macOS only), and, locked, three more reserved Docs/Slides/Designs keys and the browser-extension policy keys (`ExtensionSettings`, `NativeMessagingAllowlist`, `NativeMessagingBlocklist`, `NativeMessagingUserLevelHosts`). `entraScope` is retired upstream and removed.
+- The GrowthBook flag catalogue in `claude-desktop-extra.jsonc` covers 5.1231.0 (854 flags: 79 new, 2 removed).
+- New upstream, behind server flags and without a platform restriction: Chrome Web Store extensions in the built-in browser, with Linux native-messaging host folders (`/etc/claude-desktop/native-messaging-hosts`, Chrome's own). Upstream keeps them off while the app runs with `--no-sandbox`, which AppImage launches and `CLAUDE_DISABLE_SANDBOX=1` do.
+
+### The GitHub connector binary is shipped where the app runs it (5.1231.x)
+
+- Upstream 5.1231 ships `github-mcp-server` in `resources/app.asar.unpacked/` and starts it from there. The repack now keeps every file upstream ships unpacked, with its file mode, and the build fails if one is lost.
+
+### Computer Use in cloud sessions on GNOME Wayland, niri and river, screenshots inside action batches (#326)
+
+- Cloud Cowork, Dispatch and chats linked to this computer work on desktops that cannot tell which window is in front or under the pointer (GNOME Wayland, and niri and river where the compositor gives no window positions). Clicks were refused as landing "on the desktop shell" and typing as "no app is frontmost". These sessions now follow the whole-screen rules Anthropic's own Wayland code uses: once at least one app is approved, clicks and keystrokes go to whatever is on screen, except Claude's own windows: a click aimed at one is discarded by Anthropic's own input guard, which the Linux backends arm around every input they send on GNOME Wayland, niri, river and the fallback Wayland paths (where that guard does not exist, an X11 session without the bundled x11-bridge, the click is refused). A read-only approval still blocks input, nothing is allowed before an app is approved, typing is refused while Claude's own window has keyboard focus, and input is refused while one of Claude's dialogs is open. `list_granted_applications` lists "Entire screen" there. X11, sway, Hyprland and KDE Plasma Wayland keep the per-app check, and on niri and river input is still refused while an unapproved app is in front.
+- A screenshot taken inside a batch of actions reports its monitor and size, so with two or more monitors it is no longer rejected as taken on monitor "display undefined", and the click after it no longer fails with "coordinate could not be scaled" (every backend except KDE). A screenshot without a chosen monitor uses the default monitor, on GNOME the shared one.
+- What Claude is told about access on GNOME says the session cannot tell which window is in front or under a point. `claude-patches.log` gets one `[claude-cu] no window info: <backend> (<reason>)` line per task when a backend answers without window info. See [Computer Use](docs/computer-use.md).
+
+### Computer Use screenshots on X11 show the approved apps under the glow (#327)
+
+- Cloud Cowork, Dispatch and chats linked to this computer: masked screenshots on X11 no longer come back as one solid colour while the "Claude is using your computer" glow is up. The bundled `x11-bridge` looks through Claude's own glow and teach overlay (new `--ignore-window`, honoured only for Claude's own click-through overlay windows), so the approved apps show with the glow's rim over them as on screen; other apps stay masked.
+- On X11 without a compositing manager (i3, openbox, xfwm4 with its compositor off) the glow is no longer shown: Electron drew it as an opaque black screen there. `x11-bridge doctor` reports `capabilities.compositing`; the glow stays off while it is false or unknown, a compositor stopped between tasks is noticed when the next task starts (a glow already shown is closed at once), and `claude-patches.log` says so once. Teach mode on X11 still needs a compositing manager. See [Computer Use](docs/computer-use.md).
+- Builds fail when the bundled `x11-bridge` lacks these `doctor` capabilities (`scripts/check-bridge-contract.sh`, run by local builds and CI).
+
+### Computer Use in Code sessions and local Cowork takes the Computer Use lock
+
+- On X11, sway, Hyprland, niri and GNOME Wayland, Code sessions and local Cowork tasks take Anthropic's Computer Use lock like every other session type: at the first Computer Use action of a turn, released when the turn ends, also on Stop and errors. Not taken by the access tools (`request_access`, `list_granted_applications`, `list_apps`), `wait`, `switch_display`, a batch of only `wait` / `switch_display`, and the app-scoped accessibility tools. A call that arrives after its turn ended (for example from a background subagent) is answered "<tool> aborted (user interrupt)." and takes nothing. KDE Plasma Wayland already worked this way.
+- While Claude works in those sessions the Claude window un-maximizes, docks at the top right and stays above other windows, and takes focus back at the end of the turn (tiling window managers may ignore the move); the "Claude is using your computer" glow shows (X11 with a compositing manager). Escape (Anthropic's X11 grab, or with **Escape stops Computer Use** on the watcher) and **Stop sharing** stop the session's running turn the way Stop does: the session's Claude Code process is restarted with the next message. The "screenshots are not filtered" note of **Ask before Computer Use controls an app** now comes once per turn. On GNOME Wayland the screen-sharing session starts and ends with each turn.
+- One session at a time: while another session holds the lock, a Code session or local Cowork task is told "Another Claude session is currently using the computer" and its action does not run; before, it could drive the desktop while a cloud session held the lock. A cloud Cowork or Dispatch task releases the lock when the Claude app sees its turn end; where the app does not (for example a task whose page is not open in the app), Anthropic's idle sweep releases it after 12 minutes without Computer Use.
+- X11: the Claude window stays clickable while Claude works (Stop in the docked panel), and Claude's own clicks on it are refused instead; after the turn the whole restored window takes clicks again on xfwm4 (before, clicks outside the docked size went to the window behind it). Claude's own Escape reaches the app while Anthropic's Escape grab is registered (the switch off). The first screenshot of a turn waits for the dock, so Claude's own window no longer covers the app in it (also cloud sessions). A batch of actions stops when the turn is stopped, as Anthropic's does. See [Computer Use](docs/computer-use.md) and [Escape stops Computer Use](docs/cu-escape-abort.md).
+- In those sessions the glow and the teach overlay follow the monitor Claude works on (each screenshot on another monitor and each `switch_display` move them, as in cloud sessions), Anthropic's drawn arrow glides to a click target before the click instead of jumping, the check of the first click target waits for the dock, and a turn that ended with the mouse button held no longer makes the next turn's arrow jump.
+
+### Computer Use screenshots on Hyprland, web-app approvals, `--diagnose` without KWallet (#329, #330)
+
+- Hyprland: masked screenshots (cloud Cowork, Dispatch, and Code sessions with "Ask before Computer Use controls an app" on) capture each approved window on its own, so a notification, launcher or other layer-shell surface neither hides an approved window nor shows in the image; before, a full-output overlay such as Omarchy's notification host could leave one solid grey image. A window another window sits over is shown whole, with a note naming what is in front. Needs the new wlroots-bridge; sway and other compositors keep the output capture.
+- When no approved window can be shown (another workspace, minimized, not open, or covered on sway and X11), Claude gets a text with the reason per approved app instead of a grey image; an image that shows some apps can carry a short note about covered or missing apps. See [Computer Use](docs/computer-use.md).
+- On Wayland sessions a web app installed as its own desktop entry (a Chromium-family `--app=<url>` window) is an app of its own: approving it covers only its window, and a browser approval does not include it. On X11 and XWayland its window counts as the browser. A terminal app started from a desktop entry shows up under its terminal, and the text tells Claude which app to request access to.
+- `claude-desktop --diagnose` no longer starts KWallet on desktops that do not use it (#330), and shows each bridge's screenshot filter (how screenshots are filtered and what the filter cannot cover).
+- The build fails when the bundled wlroots-bridge predates the per-window mask report (`scripts/check-bridge-contract.sh --wlroots-caps`).
+
+### Release pipeline: package installs when the runner cannot resolve Ubuntu's mirrors
+
+- Release jobs that install packages check the runner's resolver first; when it cannot resolve Ubuntu's package mirrors, the job uses public DNS resolvers for its remaining steps (`scripts/ci-dns-fallback.sh`). Nothing changes while the runner's own resolver answers.
+
+### Computer Use: the glow and Anthropic's drawn cursor on sway, Hyprland and niri, kept out of screenshots
+
+- **sway, Hyprland and niri:** the "Claude is using your computer" glow shows while Claude uses the computer, as on X11 and KDE Plasma, drawn by the bundled `wlroots-bridge` in a click-through overlay on the monitor Claude works on. With Anthropic's drawn cursor on (server flag `1916550538`) it becomes the thin rim and Claude's arrow, which glides to each target before the click exactly as on X11 and rings on each press; the real pointer stays visible. Also with Claude on XWayland. GNOME Wayland has no glow yet; KDE Plasma keeps the glow its own bridge draws, without the drawn cursor.
+- **Settings -> Extra -> Cowork (Linux) -> Computer Use** has two new rows: **Show the glow while Claude uses the computer** (on by default; off removes the glow, the rim and the drawn cursor on X11 and on the sessions above from the next task, Computer Use itself works the same; KDE Plasma keeps its bridge's glow), and **Drawn cursor in the glow** for flag `1916550538`, marked as an Anthropic flag: it follows Anthropic unless you force it on or off, and it is the same override as on the Anthropic page. On both pages a switch now shows the saved override and the status line says when it only applies after a restart; before, a page you came back to showed the running value, so a click could save the same value again.
+- **The screenshots Claude receives no longer contain the drawn cursor, its press ring or the glow's badge** (X11 and the overlay above): they are hidden for the instant of each capture, so the arrow no longer covers the spot Claude just clicked. The rim or glow stays up and may show at the screen edges.
+- **sway, Hyprland and niri:** screenshots work on a monitor plugged in while the app runs; they failed with "zoom region does not intersect the captured output" until a restart.
+- `CDB_CU_DEBUG=1` adds `[claude-cu] wl-glow: trace:` lines with a timestamp per overlay command and per real pointer command, and `[claude-cu] glow trace:` lines for the X11 capture hide. See [Computer Use](docs/computer-use.md) and [Environment variables](docs/environment-variables.md).
+
+## 2026-11-10
+
+### Computer Use from cloud Cowork and Dispatch on Wayland, truthful access descriptions, an opt-in Escape stop key (#323)
+
+- Computer Use over the device bridge (cloud Cowork, chats linked to this computer, Dispatch) works on a Wayland session with a bundled bridge: the computer tools are announced, calls are no longer refused with "needs an Xorg session", and the approval card shows app icons. If you turn the background display off while the app runs and no bundled bridge remains usable, Computer Use calls from cloud Cowork and Dispatch are refused on that session until the app restarts (the tool list may still show the tools until Anthropic's code next refreshes it).
+- What Claude is told about access now follows the active backend: the local Cowork system-prompt note, the per-app access capability (Settings -> Computer use and the enable dialog), the enable-prompt approval card and the "Entire screen" choice. Per-app access is reported on KDE Plasma, X11, sway and Hyprland (masking; popups and layer-shell surfaces can still show) and the background display, and not on GNOME, niri, river or the fallback tools, nor when **Ask before Computer Use controls an app** is off (KDE Plasma excepted). See [Computer Use](docs/computer-use.md).
+- Teach mode works on KDE Plasma Wayland and follows the account's teach-mode setting; X11 is unchanged.
+- New opt-in switch **Escape stops Computer Use** (Settings -> Extra -> Community Features and the Extra -> Computer Use page, off by default): Escape stops Computer Use while Claude is working on X11 and Hyprland (Escape still reaches your apps), sway and KDE Plasma Wayland (Escape is taken while Claude is working); GNOME and niri have no stop key. Off keeps Anthropic's own Escape handling. The bundled `x11-bridge`, `wlroots-bridge` and `kwin-portal-bridge` gain an `abort-watch` subcommand; `claude-desktop --diagnose` prints an `abortWatch` line per bridge. See [Escape stops Computer Use](docs/cu-escape-abort.md). `claude-desktop --diagnose` shows the switch, the bridge that would watch for Escape on this session, whether Escape still reaches your apps, and a leftover binding from an earlier run.
+- **Stop sharing** on the GNOME or KDE screen-share indicator now stops the running Computer Use turn at once; so does the desktop ending the share itself (for example a portal restart). An Escape that Claude itself presses is no longer taken for yours by Anthropic's X11 Escape handler.
+- KDE Plasma Wayland: after a long Escape that Claude itself presses, the Escape stop key works again even when the stopped watcher takes more than a few seconds to finish its cleanup; before, Escape stopped nothing until the next turn (#324). An Escape reported by a watcher that is already stopping is no longer taken for yours. Thanks to @FacuM for the report and the fix (#324, #325).
+- `wlroots-bridge` sends Escape, modifiers and US-layout keys at their standard key codes, so compositors that match bindings by key code (Hyprland) no longer see every injected key on one code, and Shift combos deliver the shifted symbol (`shift+a` types `A`, `shift+tab` is back-tab).
+- Cowork's "install QEMU" hint names your distro's own packages: `dnf` on Fedora and the RHEL family, `pacman` on Arch, `zypper` on openSUSE, a NixOS hint; Debian, Ubuntu and image-based Fedora variants (Silverblue, Kinoite, Bazzite) keep Anthropic's text (new patch `fix_cowork_install_hint_linux`). In Settings -> Extra -> Deployment, `claudeInChromeEnabled` notes that Anthropic's Linux build reports it as not supported.
+- The Computer Use access patch no longer touches the OS-permission step: upstream reports it granted on Linux itself.
+- New build gates: a predicate census and a refusal-string census run after patching (local builds and CI), so an upstream release that adds a Linux/Wayland decision or a refusal string on a strong topic our patches do not cover fails the build instead of shipping; weaker findings are warnings that the update workflow turns into failures with `--strict`. See [Census gates](docs/census-gates.md).
+
+### Computer Use: keyboard actions in cloud sessions and on KDE, the glow on the right monitor
+
+- Key presses, typing, paste and clicks with modifier keys work again in cloud Cowork, Dispatch and chats linked to this computer, in teach mode, and in every session on KDE Plasma Wayland. They failed with "getKeyFocusApp is not a function" since 4.16336.0.
+- On X11 the "Claude is using your computer" glow and the teach overlay appear on the monitor Claude is working on and follow it when Claude switches monitor; before a monitor is chosen they use the monitor of the Claude window. They were always placed on the primary monitor.
+- No glow on your desktop while Computer Use runs on a background display.
+- The build fails when upstream starts calling a Computer Use executor method the Linux executors do not define.
+
+### Follow-ups: tools installed while the app runs, local-build bridges, release pipeline
+
+- Computer Use picks up a tool installed, or `ydotoold` started, while Claude Desktop is running: a "not found" is re-checked after 5 seconds instead of lasting until restart.
+- Local builds (`build-local.sh`) check every bundled Computer Use bridge against its glibc floor. A pre-built gnome or kwin bridge above glibc 2.39 (built on a rolling distro) is rebuilt in an `ubuntu:24.04` container as CI does, cached per checkout state; without docker the build warns and bundles the host binary, or fails with `--strict-bridges`. The build log names each bridge's source and glibc requirement.
+- The launcher no longer expands glob characters in `XDG_DATA_DIRS` / `FONTCONFIG_PATH` entries.
+- Release pipeline: the Pages deployment gets a longer timeout and one automatic second attempt, and the package test containers retry `apt-get` when a mirror is briefly out of step.
+
+### Tools the app runs itself are found again under upstream's PATH narrowing (4.23118+)
+
+- Claude Desktop 4.23118 narrows its own `PATH` to system folders at startup. A new shared lookup (`add_tool_path_resolver`) lets our patches find the tools they run in those system folders plus the root-owned read-only folders of the `PATH` Claude Desktop was started with, by absolute path; a copy in a folder your user can write to is never used and is named in `claude-patches.log`.
+- RHEL 9 / Rocky / Alma: local Cowork finds `qemu-kvm` through the package's qemu-shim again instead of reporting "Cowork requires QEMU".
+- Where `xdg-open` is not installed in a system folder but comes from a root-managed one (as with the Nix package's own `xdg-utils`), links, "Open in ..." and sign-in open again (`fix_open_external_tool_path`); where `xdg-open` is in a system folder nothing changes. "Open in VS Code / Cursor / ..." and the Chrome DevTools opener find `xdg-mime` / `xdg-open` the same way.
+- Quick Entry placement (`hyprctl`), Chrome cookie import (`secret-tool`, `kwallet-query`) and local Cowork's QEMU also use tools from root-managed folders such as `/etc/profiles/per-user/<you>/bin`. Diff views find `git` on the `PATH` Claude Desktop was started with, as the app's own Code sessions do.
+- The background-display setup page checks the clipboard tools where Computer Use looks for them. `claude-desktop --diagnose` prints the folders tools are taken from and names a tool found only in a user-writable folder. See [Troubleshooting](docs/troubleshooting.md).
+- Upstream 4.23118.1 audited against 4.23118.0: a point fix (Windows program lookup, an NFS rename retry on Linux), no flag, gate or IPC change; baselines re-stamped, and flag `1358805273` is documented as the PATH-narrowing kill switch.
+
+### Named profiles get their own window identity (#319)
+
+- A named profile's windows now carry Wayland app_id / X11 WM_CLASS `com.anthropic.Claude-<name>` when the profile's `com.anthropic.Claude-<name>.desktop` exists in the XDG applications directories, so desktops that match windows to `.desktop` entries can show each profile as its own entry (`Claude (work)`); give the profile's `.desktop` its own `Icon=` to tell them apart at a glance (new patch `fix_profile_app_identity`). A profile without that file (`--profile=NAME` without `--create-profile`) keeps the shared `com.anthropic.Claude` identity. The default profile is unchanged; window rules written for `com.anthropic.Claude` do not match a named profile's windows, notifications are still attributed to the default app entry, and the `claude://` handler stays with the default profile. On KDE Plasma a named profile now registers the Quick Entry shortcut under its own entry (`Claude (work)`), so Plasma asks once per profile to confirm the shortcut on the first launch after the update.
+- Quick Entry swaps its own app id in only around its window's construction and restores the previous value right after, so windows opened later always carry the main identity, also when Quick Entry was built but not yet shown.
+- Per-profile `.desktop` files written by `--create-profile` now set `StartupWMClass=com.anthropic.Claude-<name>`, and existing launcher-written profile files are updated on the next launch. The AppImage's named-profile entry starts that profile and no longer claims the `claude://` handler (an entry from an older version hands it back to the default entry). `claude-desktop --diagnose` states which window identity a profile uses.
+- In a named profile, Computer Use treats only that profile's own windows as the Claude host; other profiles' Claude windows are ordinary apps to it.
+
+### Computer Use: apps installed per user launch again (thanks @aenriii, #321)
+
+- Claude Desktop 4.23118 narrows its own `PATH` to system folders at startup, so an app whose launcher names a program in a per-user folder (`~/.local/bin`, a home-manager or Nix profile) read as "command not found" when Computer Use opened it. Apps are now found and started with the `PATH` Claude Desktop was launched with, on the background display and on your desktop.
+- The tools Computer Use runs itself (`setsid`, clipboard tools, desktop launcher tools, `ydotool`, `spectacle`) are taken from the system folders and from root-managed read-only folders on that `PATH` only, by absolute path; a copy in a folder your user can write to is ignored and named in `claude-patches.log`. On NixOS this finds the tools the package wrapper and the system or per-user profile provide. URLs and files open through the system `xdg-open`. See [Computer Use](docs/computer-use.md).
+
+### NixOS: a background display for Claude (thanks @aenriii, #322)
+
+- New option `programs.claude-desktop-extra.backgroundDisplay` in `nixosModules.default`: a headless sway for one user as a systemd user service (`claude-extra-display`), started at boot through lingering, on a private D-Bus and under a stable socket name (`wayland-claude-extra`) for [Computer Use on a background display](docs/computer-use.md#computer-use-on-a-background-display). It can also run a Chromium-family browser with its own profile and the Claude in Chrome native-messaging manifest, with a gnome-keyring unlocked by a password sealed with `systemd-creds`. Viewing it over VNC is opt-in (`vnc.enable`, or `vnc.unixSocket` for a socket only your user can reach). Everything is off unless `enable = true`. See [docs/nixos-background-display.md](docs/nixos-background-display.md).
+- Settings -> Extra -> Cowork (Linux) -> **Computer Use on a background display** lists a stable-name link to a compositor socket, so `wayland-claude-extra` can be picked there.
+
+## 2026-11-06
+
+### Cowork on Linux: two backends, Enable KVM access, a "Cowork (Linux)" page and a device icon in every chat
+
+- Cowork has two backends. **Cloud Cowork** (claude.ai accounts) needs no KVM; for desktop tools (Computer Use, files) this computer must be a keyed device, which needs TPM access. The **local Cowork VM** (optional with a claude.ai account, the only Cowork in 3P) needs `/dev/kvm`, `/dev/vhost-vsock`, QEMU, OVMF and virtiofsd. README, landing page, [docs/cowork.md](docs/cowork.md), Computer Use docs, troubleshooting, `--diagnose` (sections "Cloud Cowork device key" and "Local Cowork VM") and the pacman install note now say which needs what.
+- **Enable KVM access** (opt-in, one administrator prompt): a udev rule gives the logged-in desktop user access to `/dev/kvm` and `/dev/vhost-vsock`, and `vhost_vsock` loads at boot. No relogin; restart the app so it probes again. **Disable KVM access** removes it. NixOS: `programs.claude-desktop-extra.kvmAccess.enable = true;`. The `.deb`, `.rpm`, pacman, AppImage and Nix packages ship the helper; the VM tools stay soft dependencies.
+- Settings -> Extra -> **Cowork (Linux)** (was "Computer Use") shows Cloud Cowork (device key), Local Cowork VM (KVM, vsock, tools, VM state) and Computer Use, with the Enable actions, plus a collapsible "How Cowork chooses where a task runs" block (cloud vs local, how to switch, the admin settings; also in [docs/cowork.md](docs/cowork.md#how-cowork-chooses-cloud-or-local)).
+- Every claude.ai chat and Cowork session header (`/chat/...`, `/cowork/...`) now has a device icon on Linux: the upstream icon plus a "Linux details" row when the chat is linked to this computer or runs locally, a laptop with an X when this desktop has no device key ("No device key": cloud tasks get no Computer Use here, files and commands still work), an amber dot when it is keyed but the chat is not linked, a plain laptop while the key state is not known. Each popover says where the chat runs (cloud; for a linked chat, files and commands run in the linked computer's local Cowork VM, with its state; or the local VM), and each opens the matching section of the Cowork (Linux) page. It replaces `fix_ion_dist_linux` sub-patch C (the keyless hint in the 3P SPA header), which is retired: that SPA serves only 3P, where cloud Cowork does not exist, so the hint never rendered for claude.ai accounts (new patch `fix_cowork_device_icon_web`).
+
+### Settings -> Extra -> Models works in 3P mode (#318)
+
+- In Community Features, the **Custom models** row's "Settings > Extra > Models" is now a link that opens the Models page in the same dialog, in the note and in the "no model configured yet" state line. Keyboard-reachable; the search box still finds the row.
+- **Landing page:** a searchable patch catalogue - every one of the 66 patches with its tier (core: Linux fix or plumbing; community) and the description from [docs/patches.md](docs/patches.md), filterable by name or description, so the whole catalogue can be read before installing. The block is generated from that file (`scripts/gen-site-patch-catalog.py --write`) and CI fails when the two drift.
+- **Landing page** ([patrickjaja.github.io/claude-desktop-extra](https://patrickjaja.github.io/claude-desktop-extra/)) now follows the README: every feature section (Extra settings, the Code tab as an IDE, custom models, Computer Use per session type, 3P inference), a filterable list of the 16 community features in the app's own groups, the patch counts with the two tiers (core: where Anthropic lacks compatibility; community: improvements and features), an "Add your use case" block, install commands and notes matching the README, and the page works without JavaScript. The Extra settings screenshot in the README is re-shot from the current page.
+- **Docs:** the [Opper gateway cookbook](docs/cookbook/opper-gateway.md) starts with a "Which route?" chooser and covers the 1P route (Models page, Opper (EU) preset, Fetch models) next to the 3P route; it names the current location of the **Allow non-Anthropic models** switch (Community Features, group *Models and 3P*) and carries a fresh screenshot of it. [docs/custom-models.md](docs/custom-models.md) states that custom models reach the Code picker only with a claude.ai login: in 3P mode the picker is the gateway's model list, while the Models page and the routing files still work there.
+- The Models page now loads in 3P (managed / gateway) deployments, where the main window is served from `app://localhost`; before, it showed an error instead of the provider list. The sender check that every page script of ours applies to its IPC calls is now one shared implementation (`js/sender_guard.js`), so all of them accept the same senders.
+
+### PR auto-archive delay: remaining time and keep button also with a claude.ai login
+
+- With a nonzero PR auto-archive delay, the line with the time left below upstream's auto-archive hold notice and the **Keep this session** button in the session rail now also appear in 1P mode, where the Code tab is claude.ai's page. Upstream's notice text is unchanged; with the delay at Immediately the page only reads the setting once. If claude.ai's markup moves, `[archive-grace-ui]` lines in `claude.ai-web.log` say which part was not found and upstream's UI stays as it is.
+
+## 2026-11-05
+
+### Claude Desktop 4.23118.0
+
+- Updated to upstream 4.23118.0 (Electron 44.9.3). Re-fitted four patches to the new minified bundle: Computer Use's executor injection (upstream's macOS executor now takes an options object), the session-start dialog, the auto-archive delay and the renderer-gone log. The session-start and auto-archive patches now take upstream's function names from upstream's own call sites, so a rename no longer breaks them.
+- Extra -> Deployment lists the new managed setting `allowManagedHooksOnly`; `organizationPluginsUrl` is gone upstream and was removed from the list. The GrowthBook override catalog covers the 777 flags of this version.
+
+### Community Features grouped by where they apply
+
+- Settings -> Extra -> Community Features now groups its rows under **Code** (with a **Pull requests** subgroup), **App and window** and **Models and 3P**. Each row starts with one sentence on what it does; search still matches every detail. Section headlines on every Extra page are in the theme's accent color with an accent bar and an occasional light sheen (replayed on hover and click), and the **Extra** headline in the settings sidebar has a slowly moving rainbow (both still when the system asks for reduced motion).
+
+### PR auto-archive delay: remaining time and keep button in 3P mode (thanks @alexx-ftw, #316)
+
+- In 3P mode, with a nonzero PR auto-archive delay, a line below upstream's auto-archive hold notice shows the time left on a merged or closed PR's delay, and the session rail offers **Keep this session**, which turns off upstream's per-session "Auto-archive on merge or close". The delay itself works in both 1P and 3P mode. With the delay at Immediately, upstream's UI is unchanged.
+
+### Clearer patch placement guidance and corrected Auto-fix notice docs (thanks @alexx-ftw, #315)
+
+- AGENTS.md and docs/patches.md now say where a patch belongs: `core/` only for shared plumbing, a fix serving an optional feature stays in that feature's patch behind its switch, tested with the switch on and off. The Auto-fix notice docs now match the shipped behavior (REST read spacing and backoff, direct vs queued delivery, budget-skip handling, text normalization), and docs/patches.md no longer claims a byte-identical install tree or that a green build proves runtime behavior.
+
+### Auto-fix notices are confirmed in batched turns (thanks @alexx-ftw, #314)
+
+- With Settings -> Extra -> Community Features -> "Auto-fix notices: ready to merge, comments after merge" on, a ready-to-merge or post-merge notice that Claude reads later in a turn covering several queued messages is now confirmed when that turn completes, instead of staying pending (upstream confirms only the turn's first message). Unread, withdrawn and next-cycle messages are not confirmed.
+
+### Session-start dialog for explicit local folders (thanks @alexx-ftw, #313)
+
+- **The opt-in native session-start dialog now also covers an explicit local folder**, showing its resolved directory; the first-use folder consent is answered there too. Approvals are kept per asking project and folder, but upstream tracks first use in memory, so a new asking session or an app restart asks again for that folder; the default destination stays remembered as before. A PreToolUse ask hook may be answered in the dialog instead of the card (the person is still asked); user ask rules and managed policy keep the card. Manual-mode asks for a new folder (upstream's ordinary card, without the folder sentence) now reach the dialog too, and an ask that keeps the card logs `[session-start-always-allow] card kept: <reason>` to `claude-patches.log`.
+
+### Auto-fix forwards comments that arrive after a merge (thanks @alexx-ftw, #310)
+
+- **After an Auto-fix PR is merged, new comments, inline review comments and reviews from the repository's owners, members, collaborators and bots reach its Code session as quoted informational notices for 7 days after the merge** (mentions defanged, each text capped at 1200 characters; upstream stops reading a PR once it is merged). Claude reports them and waits for you: it never changes code, replies on GitHub or merges. Archived sessions are not read or woken. Same switch as the ready-to-merge notice, now titled Settings -> Extra -> Community Features -> "Auto-fix notices: ready to merge, comments after merge" (off by default, applies live).
+- Cost: per Auto-fix PR inside its window, one round of ETag-conditional GitHub REST reads per sweep (the PR and its three comment lists), none while fewer than 1000 REST requests remain or a rate-limit window is open; one model turn per notice. Details: [docs/autofix-post-merge.md](docs/autofix-post-merge.md).
+
+### Auto-archive delay after a PR merges or closes (thanks @alexx-ftw, #311)
+
+- **New row Settings -> Extra -> Community Features -> "Auto-archive delay after a PR merges or closes"**: Immediately (the default, upstream's behavior), 5, 15, 30 or 60 minutes, or a custom 1-10080 minutes. After upstream confirms a session's PR merged or closed, its auto-archive waits that long. The deadline survives restarts, and a confirmed reopen cancels it. It does not turn auto-archive on, and the inactivity rule is unchanged.
+- Expiry is checked on upstream's 5-minute archive sweep, so the archive lands within about 5 minutes of the deadline. During the delay the session skips upstream's GitHub re-reads and worktree checks (a close upstream could not confirm yet is still confirmed first); when it ends, every upstream check and hold still applies. Details: [docs/auto-archive-grace.md](docs/auto-archive-grace.md).
+
+### A native dialog with "Allow always" for starting other sessions (thanks @alexx-ftw, #312)
+
+- **New switch Settings -> Extra -> Community Features -> "Native dialog with 'Allow always' for starting other sessions"** (off by default = upstream's in-chat card, applies live). When Claude asks to start another Code session, a dialog on the app window offers Deny (the default), Allow once and Allow always, and shows the session title, project, destination, permission mode, model and the start of the prompt Claude wrote.
+- **Allow always is remembered for that project and its default destination only**: another folder, host, environment, preset, the cloud or a higher permission mode still asks, and nothing inside the new session is approved by it. The row shows how many projects are remembered and forgets them; switching it off forgets them too. [Details](docs/session-start-permission.md)
+
+## 2026-11-04
+
+### Auto-fix wakes the session when its PR is ready to merge (thanks @alexx-ftw, #309)
+
+- **New switch Settings -> Extra -> Community Features -> "Wake Auto-fix sessions when a PR is ready to merge"** (off by default, applies live). For a PR with Auto-fix on, the Code session gets a short informational notice once GitHub reports the PR open, not draft, clean, mergeable, reviewed and with its checks green (a skipped check that GitHub marks as not required does not block), seen on two consecutive Auto-fix sweeps at the same head. It never merges, enables auto-merge or deploys; Claude reports readiness and waits for you. A notice you delete or stop is not sent again for that head.
+- Cost: one GitHub read per Auto-fix PR per sweep, a notified PR re-read at most every 10 minutes, no read while the app's GraphQL budget is low or rate-limited, failed sends back off; one model turn per notice. Details: [docs/autofix-merge-ready.md](docs/autofix-merge-ready.md).
+
+### Upstream 4.16336.0
+
+- **Re-fitted to the new release** (Electron 44.9.3): the native-frame overlay color gate, the tray left-click toggle (the "Show App" item now calls a wrapper), the hidden-launch show hook for tray-less desktops, the "Update available" link hook (the updater init now waits for the managed settings first) and the profile window title (upstream keeps the main window's OS title at "Claude" and shows the conversation title in its own title bar; named profiles still get `Claude (work)`). No patch removed.
+- **The .deb now also ships `resources/ion-dist/` with one static "Claude was updated" page** for older versions still running after an upgrade. The app never loads it; the build ships it unchanged and keeps patching only `ion-dist.asar`.
+- **Settings -> Extra -> Deployment follows the new `deploymentMode` policy key** (`any` / `3p` / `1p`): a managed `1p` keeps third-party mode off, `3p` pins it, ahead of `disableDeploymentModeChooser`. The panel lists it and `inferenceGatewayAutoModeServerChecks` (203 keys). A configuration with only a self-hosted server (`selfHostedUrl` / `selfHostedToken`) now counts as third-party there too, as it does in upstream's own mode decision, so the panel no longer refuses to switch it to 3P.
+
+### Auto-fix
+
+- **Trusted Auto-fix PR authors** (thanks @alexx-ftw, #308) in Settings -> Extra -> Community Features recognizes explicitly listed users and GitHub App bots in addition to the authenticated `gh` user. Entries are exact server/login pairs (for example `github.com/my-app[bot]`); the list is empty by default, with no blanket bypass or implicit migration from the earlier local preview. PRs from a listed author are also bound as the session's own PRs (and found on the session's branch), so the switch takes effect end to end. Authentication, origin/age, confirmation, consent and concurrent-write protection stay unchanged. Applies live to future activation attempts; does not enable Auto-fix itself or revoke already-enabled PRs.
+
+### Faster builds
+
+- **Local builds compress the tarball with pigz when it is installed** (`--reproducible` keeps `gzip -n -9`; CI is unchanged), and the post-patch JavaScript syntax check runs in parallel.
+
+### Computer Use
+
+- **Computer Use asks before it controls an app.** New switch Settings -> Extra -> Computer Use -> "Ask before Computer Use controls an app" (on by default). Code sessions show the approval card for the apps Claude names; approved apps get full control (clicks and typing). Clipboard access and system key combos need their checkbox in the card; clicks and typing on other apps are refused where the session can tell which app is under the pointer or in front (X11, Sway, Hyprland: both; GNOME, niri, river: the app in front only). Turn it off to get the old behavior in Code sessions (every app accessible without asking); cloud Cowork, Dispatch and teach mode keep upstream's own approval either way. Details: [docs/computer-use.md](docs/computer-use.md#approving-apps).
+- **Screenshots show only approved apps where the session allows it** (X11, X11 background display, Sway / Hyprland; there popup menus and panels can still show); on GNOME Wayland, niri, river and other sessions without window filtering they show the whole screen and Claude is told so. A screenshot is refused rather than taken unmasked when masking fails. The Computer Use page shows which case applies to your session.
+- Computer Use names an app the same way everywhere (approval, running apps, frontmost window, monitor lookup), using the .desktop id with its WM_CLASS, Exec and Name as aliases, so an approved "Google Chrome" matches its windows.
+- Settings -> Extra -> Computer Use always shows the Enable and Disable TPM access commands; the row warns when TPM access only lasts until logout.
+- Computer Use on several monitors: screenshots now go to the monitor where the approved app's windows are, as on macOS.
+- KDE Plasma (Wayland): windows left out of Computer Use screenshots are always restored when a task ends, also after a crash.
+
+## 2026-11-03
+
+### Computer Use in cloud Cowork and Dispatch
+
+- **Keyless registration is detected and fixable.** Cloud Cowork and Dispatch reach this computer's Computer Use only when the desktop has a TPM-backed device key, which needs access to `/dev/tpmrm0`. Settings -> Extra -> Computer Use (its own page, together with the Computer Use switches that were in Community Features) shows this desktop, the device key and the cloud state, and **Enable TPM access** (administrator prompt; the page shows the exact command, the udev rule link it creates and how to undo it) grants the active seat user access through an opt-in udev rule; **Disable TPM access** removes it. NixOS: `programs.claude-desktop-extra.tpmAccess.enable = true;`. `claude-desktop --diagnose` reports the TPM, the rule and the last device connect. Restart Claude and start a new Cowork task afterwards. Details and security note: [docs/computer-use.md](docs/computer-use.md#computer-use-in-cloud-cowork-and-dispatch).
+- **Wayland sessions with a bundled bridge (KWin, GNOME, wlroots) now offer the computer tools to cloud Cowork and Dispatch too** (`fix_computer_use_linux` sub-patch 4g).
+- **The Cowork task header tells a keyless desktop why Computer Use is missing.** A cloud task on a keyless desktop is never linked to this computer, so upstream shows no device icon at all. The header now shows the laptop icon with a warning dot, and its popover says "This desktop has no device key, so Computer Use is not available in Cowork." and points at Settings -> Extra -> Computer Use (`fix_ion_dist_linux` sub-patch C). It follows the device link live and disappears once the desktop connects with a key. Keyed desktops and linked tasks see the upstream header.
+
+### Computer Use screen-sharing session diagnostics (#293)
+
+- **Computer Use on Wayland now logs every lock take and release with its holder, and why the screen-sharing session check did or did not start.** `CDB_CU_DEBUG=1` adds one `[claude-cu] session check:` line per check to `claude-patches.log`.
+
+## 2026-11-02
+
+### Computer Use can read and press app controls through accessibility (#306)
+
+- **New Community switch "Computer Use: read app controls (accessibility)"** (Settings -> Extra -> Community Features, key `computerUseAxElements`, `Experimental`, off by default). It adds the app-scoped tools `app_list_windows`, `app_ax_find`, `app_click` and `app_type`: Claude lists a window's controls (role, name, states, position) from the desktop accessibility bus and presses a control or sets a text field by its `[N]` index, instead of locating everything by screenshot. With the switch off the tools do not exist and the accessibility bus is never touched.
+- **Safe by construction.** The desktop accessibility service is switched on only while a Computer Use session needs it and restored afterwards; a running screen reader is never touched; password and terminal text is never read. Every missing piece returns a plain "unavailable" result and normal Computer Use is unaffected.
+- **Coverage.** All four bundled bridges (X11, wlroots, KDE, GNOME) carry the new `ax-enable`, `ax-restore`, `ax-find` and `ax-action` commands (optional additions to the bridge contract, still v1). GTK, Qt, Firefox and LibreOffice apps expose their controls; Electron and Chromium apps need `--force-renderer-accessibility`.
+
+### Screen sharing ends with the cloud Cowork task (#293)
+
+- **On GNOME and KDE Wayland the Computer Use screen-sharing session now ends when the task ends.** The app checks the session's state every 10 seconds while screen sharing is up and ends it within about 10 seconds of the turn end; the page's release and Claude's `computer_release_lock` still end it immediately, and 2 minutes without Computer Use actions stays the fallback.
+
 ## 2026-10-30
 
 ### Tray icon follows the theme again, with an "always white" switch (#305)

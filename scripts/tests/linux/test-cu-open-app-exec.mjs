@@ -21,8 +21,9 @@
 //      the fallback for no-Exec / Terminal=true / malformed / a missing binary
 //      (spawn error event), each probed on PATH, and all absent is a clear error;
 //   4. TryExec that does not resolve hides the entry;
-//   5. listInstalledApps names a launcher after its real argv0 and never emits a
-//      wrapper name; _resolveApp prefers a name/desktop-id match over a basename.
+//   5. listInstalledApps lists each app under its desktop-file id (the canonical
+//      app id, test-cu-app-ids.mjs), with its real argv0 as an alias row and never
+//      a wrapper name; _resolveApp prefers a name/desktop-id match over a basename.
 //
 // Exit codes follow the repo convention: 0 = PASS, 3 = SKIP, other = FAIL.
 
@@ -35,7 +36,7 @@ import os from "node:os";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(HERE, "..", "..", "..");
-const EXECUTOR = path.join(ROOT, "js", "cu_linux_executor.js");
+const EXECUTOR = process.env.CU_EXECUTOR || path.join(ROOT, "js", "cu_linux_executor.js");
 
 let pass = 0;
 const failures = [];
@@ -96,7 +97,7 @@ function load(env, behave) {
       setImmediate(() => {
         if (b.error) { const e = new Error("spawn " + cmd + " ENOENT"); e.code = "ENOENT"; child.emit("error", e); return; }
         child.emit("spawn");
-        if (TOOLS.has(cmd)) setImmediate(() => child.emit("exit", b.exit || 0, null));
+        if (TOOLS.has(path.basename(cmd))) setImmediate(() => child.emit("exit", b.exit || 0, null));
       });
       return child;
     }
@@ -317,7 +318,7 @@ async function testResolveOrder() {
 }
 
 async function testListNoWrappers() {
-  console.log("\n[8] listInstalledApps: real argv0, no wrapper bundleIds");
+  console.log("\n[8] listInstalledApps: desktop-file id, real argv0 alias, no wrapper names");
   await withApps({
     "org.gnome.Calculator": HDR + "Name=Calculator\nIcon=org.gnome.Calculator\nExec=flatpak run --branch=stable --arch=x86_64 --command=gnome-calculator org.gnome.Calculator @@u %U @@\n",
     "firefox_firefox": HDR + "Name=Firefox Web Browser\nExec=env BAMF_DESKTOP_FILE_HINT=/var/lib/snapd/desktop/applications/firefox_firefox.desktop @OPT@/snapbin/firefox %u\n",
@@ -331,11 +332,14 @@ async function testListNoWrappers() {
     const ids = apps.map((a) => a.bundleId);
     const WRAP = ["env", "flatpak", "sh", "bash", "gio", "gtk-launch", "snap", "xdg-open"];
     ok(!ids.some((i) => WRAP.includes(i)), "no wrapper name is a bundleId: " + J([...new Set(ids)]));
+    ok(!apps.some((a) => WRAP.includes(a.displayName)), "no wrapper name is an alias row either");
     const find = (id, dn) => apps.find((a) => a.bundleId === id && a.displayName === dn);
     ok(find("org.gnome.Calculator", "Calculator"), "flatpak run ... <app.id> -> bundleId is the app id");
-    ok(find("firefox", "Firefox Web Browser"), "Snap env BAMF ... firefox -> bundleId firefox");
-    ok(find("firefox", "Firefox"), "and its first-word alias hangs off firefox (same alias scheme as before)");
-    ok(find("run", "Quoted Thing"), "env FOO=bar -u BAZ \"/opt/My App/run\" -> bundleId run");
+    ok(find("firefox_firefox", "Firefox Web Browser"), "Snap env BAMF ... firefox -> bundleId firefox_firefox (the desktop-file id)");
+    ok(find("firefox_firefox", "firefox"), "and its real argv0 firefox is an alias row of the same id");
+    const ffRows = apps.filter((a) => a.bundleId === "firefox_firefox");
+    ok(ffRows[ffRows.length - 1].displayName === "Firefox Web Browser", "the Name row comes last (upstream's maps keep the last row): " + J(ffRows));
+    ok(find("envq", "Quoted Thing") && find("envq", "run"), "env FOO=bar -u BAZ \"/opt/My App/run\" -> bundleId envq, alias row run");
     ok(find("shwrap", "Shell Wrapped") && find("gtkl", "Via GtkLaunch") && find("snaprun", "Snap Run"),
       "sh/gtk-launch/snap wrappers fall back to the desktop-file id");
     ok(find("dbus", "Dbus Bare"), "a D-Bus activatable entry without Exec is listed under its desktop-file id");
@@ -385,7 +389,7 @@ Exec=@OPT@/My\ App/run --x
     ct: HDR + "Name=Ctor App\nExec=flatpak run --command=x constructor\n"
   }, BASE_TOOLS, async (r) => {
     const apps = await r.ex.listInstalledApps();
-    ok(apps.some((a) => a.bundleId === "toString" && a.displayName === "ToString App"), "C: argv0 `toString` is a plain name, not a wrapper");
+    ok(apps.some((a) => a.bundleId === "ts" && a.displayName === "toString"), "C: argv0 `toString` is a plain name (an alias row of ts), not a wrapper");
     ok(apps.some((a) => a.bundleId === "ct" && a.displayName === "Ctor App"), "C: `flatpak run --command=x constructor` (no dot) falls back to the desktop-file id");
     ok(!apps.some((a) => a.bundleId === "constructor"), "C: `constructor` never becomes a bundleId");
   });
@@ -449,6 +453,47 @@ Exec=@OPT@/My\ App/run --x
     "F: with no launcher tool the error says the working directory is not usable: " + (l.err && l.err.message));
 }
 
+// Upstream (v4.23118) narrows PATH to system dirs and keeps the started PATH in
+// CLAUDE_DESKTOP_STARTED_PATH. On the desktop the app's bare Exec= is looked up
+// on, and spawned with, the started PATH (APP PATH); setsid and the launcher
+// tools are ours: taken from the narrowed dirs (TOOL PATH) and spawned by
+// absolute path, never from a user-writable dir on the started PATH - here a
+// temp dir, owned by us. The launcher tool gets the APP PATH in its env: it
+// resolves Exec= itself.
+async function testStartedPath() {
+  console.log("\n[S] desktop mode under upstream's PATH narrowing");
+  const sys = makeBin(["setsid", "gio"]);
+  const user = makeBin(["setsid", "gio", "cdbapp"]);
+  const dd = dataDir({ app: HDR + "Name=Probe App\nExec=cdbapp --x %U\n", dbus: HDR + "Name=Bus Only\nDBusActivatable=true\n", gone: HDR + "Name=Gone App\nExec=gone-app\n" }, sys);
+  const env = { PATH: sys, CLAUDE_DESKTOP_NARROWED_PATH: sys, CLAUDE_DESKTOP_STARTED_PATH: user + ":rel:" + sys, XDG_DATA_HOME: dd.data };
+  const APP = user + ":" + sys;
+  const r = load(env);
+  try {
+    await r.ex.openApp("Probe App");
+    eq(r.calls.spawn.map((c) => [c.argv, c.opts.env && c.opts.env.PATH]), [[[path.join(sys, "setsid"), "cdbapp", "--x"], APP]],
+      "S: per-user app: /<narrowed>/setsid by absolute path, the app found on and spawned with the APP PATH");
+    ok(r.diag.some((d) => d === "[claude-cu] openApp: cdbapp -> " + path.join(user, "cdbapp") + " (found on the PATH Claude Desktop was started with, not on the narrowed one)"), "S: one line names the started PATH");
+    r.calls.spawn.length = 0;
+    await r.ex.openApp("Bus Only");
+    eq(r.calls.spawn.map((c) => [c.argv, c.opts.env && c.opts.env.PATH]), [[[path.join(sys, "gio"), "launch", dd.file("dbus")], APP]],
+      "S: no Exec -> gio from the narrowed dir, with the APP PATH in its env");
+    r.calls.spawn.length = 0;
+    await r.ex.openApp("Gone App");
+    eq(r.calls.spawn.map((c) => c.argv[0]), [path.join(sys, "gio")], "S: an app on neither PATH falls to gio (system copy)");
+    ok(process.env.PATH === sys, "S: process.env.PATH untouched");
+  } finally { r.restore(); }
+  // Without a system setsid the planted one is still not used: the app is
+  // spawned directly (APP PATH in its env).
+  const sys2 = makeBin(["gio"]);
+  const r2 = load({ ...env, PATH: sys2, CLAUDE_DESKTOP_NARROWED_PATH: sys2, CLAUDE_DESKTOP_STARTED_PATH: user + ":" + sys2 });
+  try {
+    await r2.ex.openApp("Probe App");
+    eq(r2.calls.spawn.map((c) => [c.argv, c.opts.env && c.opts.env.PATH]), [[["cdbapp", "--x"], user + ":" + sys2]],
+      "S: setsid only in a user-writable dir: ignored, the app spawned directly");
+    ok(r2.diag.some((d) => d.includes("tools: setsid found only in " + user + ", a user-writable folder - ignored")), "S: the ignored copy is logged");
+  } finally { r2.restore(); }
+}
+
 async function main() {
   try {
     await testArgvShapes();
@@ -461,6 +506,7 @@ async function main() {
     await testListNoWrappers();
     await testDirs();
     await testReviewFixes();
+    await testStartedPath();
   } catch (e) {
     console.error("\nHARNESS ERROR: " + (e && e.stack ? e.stack : e));
     process.exitCode = 1;

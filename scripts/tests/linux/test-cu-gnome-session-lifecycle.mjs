@@ -30,6 +30,7 @@ import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 
+process.setMaxListeners(50);                         // one exit hook per loaded executor
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const EXECUTOR = path.join(ROOT, "js", "cu_linux_executor.js");
 
@@ -47,6 +48,8 @@ const EXECUTOR = path.join(ROOT, "js", "cu_linux_executor.js");
 // clock (optional, see makeClock) replaces the executor's setTimeout /
 // clearTimeout, so the 120 s idle timer runs on a fake clock (cases [27]+).
 const rigSocket = { present: true, pid: null, stopped: false };
+// Electron's BrowserWindow.getAllWindows() for the dock check (case [55]).
+const rigWindows = { list: [] };
 function makeRig(consentMs, reply, displays, delays, clock) {
   const log = [], argv = [];
   const cp = {
@@ -79,7 +82,8 @@ function makeRig(consentMs, reply, displays, delays, clock) {
     screen: { getAllDisplays: () => displays || [], getPrimaryDisplay: () => (displays && displays[displays.primaryIdx || 0]) || ({ id: 1, bounds: {x:0,y:0,width:1,height:1}, workArea:{x:0,y:0,width:1,height:1}, scaleFactor:1, label:"e" }), getCursorScreenPoint: () => ({x:0,y:0}) },
     desktopCapturer: { getSources: async () => { log.push("CAPTURER"); return []; } },
     clipboard: { readText: () => "", writeText: () => {} },
-    nativeImage: {}
+    nativeImage: {},
+    BrowserWindow: { getAllWindows: () => rigWindows.list }
   };
   const requireStub = (id) => {
     if (id === "child_process") return cp;
@@ -321,7 +325,7 @@ console.log("\n[8] no display selected: the monitor shared in the portal dialog 
   rig.ex.__setLockHeld(true);
   await sleep(60);
   const r = await handler("screenshot", {});
-  ok(r && r.content && r.content[0] && r.content[0].type === "image", "the screenshot returns an image", JSON.stringify(r).slice(0, 120));
+  ok(r && r.content && r.content.some((b) => b.type === "image"), "the screenshot returns an image", JSON.stringify(r).slice(0, 120));
   ok(rig.screensCalls() === 2, "session-start refreshed the cached screens list", String(rig.screensCalls()));
   const seq = calls(rig.log);
   ok(seq.lastIndexOf("CALL screens") > seq.indexOf("DONE session-start"),
@@ -504,7 +508,7 @@ console.log("\n[17] COWORK_SCREENSHOT_CMD: a screenshot outside a lock does not 
   process.env.COWORK_SCREENSHOT_CMD = "true {FILE}";
   try {
     const r = await handler("screenshot", {});
-    ok(r && r.content && r.content[0] && r.content[0].type === "image", "the screenshot is served by the command");
+    ok(r && r.content && r.content.some((b) => b.type === "image"), "the screenshot is served by the command");
     ok(countCalls(rig, "session-start") === 0, "no session-start (no consent dialog)", rig.log.filter(l => l.startsWith("CALL")).join(" ") || "(none)");
   } finally { delete process.env.COWORK_SCREENSHOT_CMD; rig.restore(); }
 }
@@ -647,7 +651,7 @@ console.log("\n[22] GNOME: a session daemon ended by --reset-screen-sharing is r
   rigSocket.present = false;                       // forget-session ended the daemon
   try {
     const r = await handler("screenshot", {});
-    ok(r && r.content && r.content[0] && r.content[0].type === "image", "the next screenshot still captures");
+    ok(r && r.content && r.content.some((b) => b.type === "image"), "the next screenshot still captures");
     ok(countCalls(rig, "session-start") === 2, "after a fresh session-start", String(countCalls(rig, "session-start")));
     ok(rig.log.some(l => l.includes("session daemon is gone")), "and the restart is logged");
   } finally { rigSocket.present = true; rig.restore(); }
@@ -757,7 +761,7 @@ console.log("\n[22e] GNOME: session-start answering \"already active\" is that s
   rig.ex.__setLockHeld(true);
   await sleep(60);
   const r = await handler("screenshot", {});
-  ok(r && r.content && r.content[0] && r.content[0].type === "image", "the screenshot captures on the existing session", JSON.stringify(r).slice(0, 120));
+  ok(r && r.content && r.content.some((b) => b.type === "image"), "the screenshot captures on the existing session", JSON.stringify(r).slice(0, 120));
   ok(countCalls(rig, "session-start") === 1, "no second start", String(countCalls(rig, "session-start")));
   ok(!rig.log.some(l => l.includes("session-start failed")), "no failure logged, no portal-down latch");
   rig.restore();
@@ -842,7 +846,7 @@ console.log("\n[24] GNOME: exit 5 -> the model is told to stop; no new session w
   rig.ex.__setLockHeld(true);
   await sleep(60);
   let r = await handler("screenshot", {});
-  ok(r && r.content && r.content[0] && r.content[0].type === "image", "a live session captures");
+  ok(r && r.content && r.content.some((b) => b.type === "image"), "a live session captures");
   rig.stop.on = true;                              // the user clicked "Stop sharing"
   const capBefore = rig.log.filter(l => l === "CAPTURER").length;
   let text = await shotText({});
@@ -879,7 +883,7 @@ console.log("\n[24] GNOME: exit 5 -> the model is told to stop; no new session w
     ok(countCalls(rig, "session-start") === 2, "the next lock starts a session", String(countCalls(rig, "session-start")));
     resetShot();
     r = await handler("screenshot", {});
-    ok(r && r.content && r.content[0] && r.content[0].type === "image", "and captures on it");
+    ok(r && r.content && r.content.some((b) => b.type === "image"), "and captures on it");
     await rig.ex.moveMouse(5, 5);
     ok(rig.sync.join(" ") === "pointer-move", "sync input runs again", rig.sync.join(" "));
   } finally { rigSocket.present = true; rig.restore(); }
@@ -941,7 +945,7 @@ console.log("\n[25] GNOME: the stopped-by-user marker is a stop, not a vanished 
     rigSocket.stopped = false;                     // session-start removed it
     await sleep(60);
     const r = await handler("screenshot", {});
-    ok(r && r.content && r.content[0] && r.content[0].type === "image" && countCalls(rig, "session-start") === 1,
+    ok(r && r.content && r.content.some((b) => b.type === "image") && countCalls(rig, "session-start") === 1,
        "a stale marker before session-start: the lock still works", JSON.stringify(r).slice(0, 120));
   } finally { rigSocket.stopped = false; rig.restore(); }
 }
@@ -983,7 +987,7 @@ console.log("\n[25b] GNOME: session-start exit 5 (closed before ready) latches; 
   rig.ex.__setLockHeld(true);
   await sleep(60);
   const r = await handler("screenshot", {});
-  ok(countCalls(rig, "session-start") === 2 && r && r.content && r.content[0] && r.content[0].type === "image",
+  ok(countCalls(rig, "session-start") === 2 && r && r.content && r.content.some((b) => b.type === "image"),
      "next lock: a new session, and it captures", String(countCalls(rig, "session-start")));
   rig.restore();
 }
@@ -1190,9 +1194,14 @@ const IDLE_MS = 120000;
 function makeClock() {
   let now = 0, seq = 0;
   const timers = new Map();
-  return {
+  const clock = {
+    // hold(): any delay on the virtual clock (the session check's 10 s timers).
+    hold(fn, ms, ...a) { return clock.setTimeout(fn, ms, ...a, { __hold: true }); },
+    now() { return now; },
     setTimeout(fn, ms, ...a) {
-      if (!(ms >= 60000)) return setTimeout(fn, ms, ...a);
+      const held = a.length && a[a.length - 1] && a[a.length - 1].__hold;
+      if (held) a = a.slice(0, -1);
+      if (!held && !(ms >= 60000)) return setTimeout(fn, ms, ...a);
       const t = { __fake: true, id: ++seq, ms, due: now + ms, fn, a, unrefd: false,
                   unref() { this.unrefd = true; return this; }, ref() { this.unrefd = false; return this; }, hasRef() { return !this.unrefd; } };
       timers.set(t.id, t);
@@ -1211,6 +1220,7 @@ function makeClock() {
       now = end;
     }
   };
+  return clock;
 }
 const PORTAL_SUBS = new Set(["zoom", "screenshot", "pointer-move", "pointer-click", "pointer-scroll", "pointer-drag",
                              "left-mouse-down", "left-mouse-up", "key-sequence", "type", "hold-key"]);
@@ -1561,7 +1571,7 @@ console.log("\n[33] idle: the next command after an idle end restarts the sessio
     await sleep(30);
     ok(countCalls(rig, "session-end") === 1, "idle end", String(countCalls(rig, "session-end")));
     const shot = await handler("screenshot", {});
-    ok(shot && shot.content && shot.content[0] && shot.content[0].type === "image" && countCalls(rig, "session-start") === 2,
+    ok(shot && shot.content && shot.content.some((b) => b.type === "image") && countCalls(rig, "session-start") === 2,
        "a screenshot: the lazy (async) start brings a session back and captures", String(countCalls(rig, "session-start")));
     ok(rig.clock.pending().length === 1, "and the new session is timed again");
     rig.clock.advance(IDLE_MS);
@@ -1708,9 +1718,614 @@ console.log("\n[34] __cuTaskBoundary: same session (alias ids) ends the portal s
     process.env.XDG_CURRENT_DESKTOP = "KDE";
     const r = await call(rig, undefined, "renderer", undefined);
     process.env.XDG_CURRENT_DESKTOP = savedDe;
-    ok(r === "ok" && countCalls(rig, "session-end") === 0 && !rig.log.some(l => l.includes("task boundary")),
-       "off GNOME: a no-op", r);
+    ok(r === "ok" && countCalls(rig, "session-end") === 0 && !rig.log.some(l => l.includes("task boundary") && !l.includes("): received ")),
+       "off GNOME: a no-op (only the received diagnostic line)", r);
   } finally { process.env.XDG_CURRENT_DESKTOP = savedDe; rig.restore(); }
+}
+
+// ── Cloud-session check (js/cu_session_check.js, #293 round 8) ──
+// While a portal session is up for a cloud lock holder, the shared poller asks
+// upstream's session-state check (globalThis.__cdbRemoteSessionMode, exposed by
+// sub-patch 4f) 10 s after the last portal command; an ended session goes
+// through __cuTaskBoundary(holder, "session-check", holder). Result keys come
+// from upstream's refreshRemoteChromeSessionMode: ended / ok / transient /
+// notFound. All its timers run on the rig's virtual clock (clock.hold).
+const SESSION_CHECK = path.join(ROOT, "js", "cu_session_check.js");
+function loadSessionCheck() {
+  if (!globalThis.__cdbCuSessionCheck) new Function(readFileSync(SESSION_CHECK, "utf8"))();
+  return globalThis.__cdbCuSessionCheck;
+}
+const RUNNING = { ok: true, ended: false, transient: false, notFound: false };
+const ENDED = { ok: true, ended: true, transient: false, notFound: false };
+// results: function (id, n) -> result | Error (thrown). opts.holder (default
+// cse_X), opts.noAccessor (no 4f accessor at all), opts.noCommand.
+async function checkRig(results, opts = {}) {
+  const rig = idleRig(opts.delays);
+  const sc = loadSessionCheck();
+  sc._seam({ setTimeout: rig.clock.hold, clearTimeout: rig.clock.clearTimeout, now: rig.clock.now });
+  rig.requests = [];
+  if (opts.noAccessor) delete globalThis.__cdbRemoteSessionMode;
+  else globalThis.__cdbRemoteSessionMode = async () => ({
+    resolve: async () => ({}),
+    refresh: async (id) => { rig.requests.push(id); const r = results(id, rig.requests.length); if (r instanceof Error) throw r; return r; }
+  });
+  rig.ex.__setLockHeld(true, "holder" in opts ? opts.holder : "cse_X");
+  await sleep(60);
+  if (!opts.noCommand) await rig.zoom();
+  // Virtual seconds, one at a time, letting the async check settle in between.
+  rig.tick = async (secs) => { for (let i = 0; i < secs; i++) { rig.clock.advance(1000); for (let j = 0; j < 8; j++) await new Promise(r => setImmediate(r)); } await sleep(20); };
+  // The poll/stop lines; the arm decisions (armed / not armed) have their own list.
+  const isDecision = (l) => /session check: (armed for |not armed )/.test(l);
+  rig.checkLog = () => rig.log.filter(l => l.includes("[claude-cu] session check:") && !isDecision(l));
+  // The rig prefixes diag lines with "DIAG ": the new-line helpers return the bare text.
+  const bare = (l) => l.replace(/^DIAG /, "");
+  rig.decisionLog = () => rig.log.filter(isDecision).map(bare);
+  rig.lockLog = () => rig.log.map(bare).filter(l => /^\[claude-cu\] lock (taken by|released)/.test(l));
+  const restore = rig.restore;
+  rig.restore = () => { sc._seam(); delete globalThis.__cdbRemoteSessionMode; restore(); };
+  return rig;
+}
+
+console.log("\n[35] session check: first check 10 s after the last command; ended -> the portal session ends once");
+{
+  const rig = await checkRig(() => ENDED);
+  try {
+    await rig.tick(9);
+    ok(rig.requests.length === 0, "nothing asked 9 s after the command", rig.requests.join(" "));
+    await rig.tick(1);
+    ok(rig.requests.length === 1 && rig.requests[0] === "cse_X", "at 10 s: one check for cse_X", rig.requests.join(" "));
+    ok(countCalls(rig, "session-end") === 1, "ended: session-end", String(countCalls(rig, "session-end")));
+    ok(rig.log.some(l => l.includes("[claude-cu] session check: cse_X ended, ending the portal session")), "the end is logged");
+    ok(rig.log.some(l => l.includes("[claude-cu] task boundary (session-check): ending the portal session")),
+       "through the task boundary", rig.log.filter(l => l.includes("task boundary")).join(" | "));
+    await rig.tick(40);
+    ok(rig.requests.length === 1 && countCalls(rig, "session-end") === 1, "no further checks or ends until the next arm",
+       rig.requests.length + " / " + countCalls(rig, "session-end"));
+    ok((await tryRun(rig.zoom)) === "no error" && countCalls(rig, "session-start") === 2, "the next command starts a session again");
+    await rig.tick(10);
+    ok(rig.requests.length === 2, "and arms the check again", String(rig.requests.length));
+  } finally { rig.restore(); }
+}
+
+console.log("\n[36] session check: a running session is left alone, checked every 10 s, without log lines");
+{
+  const rig = await checkRig(() => RUNNING);
+  try {
+    await rig.tick(35);
+    ok(rig.requests.length === 3, "checks at 10, 20 and 30 s", String(rig.requests.length));
+    ok(countCalls(rig, "session-end") === 0, "no session-end", String(countCalls(rig, "session-end")));
+    ok(rig.checkLog().length === 0, "no per-check log line", rig.checkLog().join(" | "));
+    const armed = rig.clock.pending().filter(t => t.ms === 10000);
+    ok(armed.length === 1 && armed[0].unrefd, "one unref'd 10 s timer stays armed", JSON.stringify(armed.map(t => t.unrefd)));
+  } finally { rig.restore(); }
+}
+
+console.log("\n[37] session check: deferred while a command is in flight or a mouse button is held");
+{
+  const rig = await checkRig(() => ENDED, { delays: { zoom: 150 } });
+  try {
+    const p = rig.zoom();
+    await sleep(20);
+    await rig.tick(12);
+    ok(rig.requests.length === 0 && countCalls(rig, "session-end") === 0, "a command in flight: no request", String(rig.requests.length));
+    await p;
+    await rig.tick(9);
+    ok(rig.requests.length === 0, "the command's end re-arms: nothing 9 s after it", String(rig.requests.length));
+    await rig.ex.mouseDown();
+    await rig.tick(25);
+    ok(rig.requests.length === 0 && countCalls(rig, "session-end") === 0, "a held button: no request", String(rig.requests.length));
+    await rig.ex.mouseUp();
+    await rig.tick(10);
+    ok(rig.requests.length === 1 && countCalls(rig, "session-end") === 1, "released: checked and ended 10 s later",
+       rig.requests.length + " / " + countCalls(rig, "session-end"));
+  } finally { rig.restore(); }
+}
+
+console.log("\n[38] session check: errors back off to 20/40/60 s and never end the session");
+{
+  const rig = await checkRig((id, n) => n % 2 ? new Error("net::ERR_INTERNET_DISCONNECTED") : { ok: false, ended: false, transient: true, notFound: false });
+  try {
+    await rig.tick(10);
+    ok(rig.requests.length === 1, "first check at 10 s", String(rig.requests.length));
+    await rig.tick(19);
+    ok(rig.requests.length === 1, "nothing before 30 s", String(rig.requests.length));
+    await rig.tick(1);
+    ok(rig.requests.length === 2, "second at 30 s (20 s)", String(rig.requests.length));
+    await rig.tick(40);
+    ok(rig.requests.length === 3, "third at 70 s (40 s)", String(rig.requests.length));
+    await rig.tick(30);                             // t = 100 s: an action keeps the idle end away
+    await rig.zoom();
+    await rig.tick(59);
+    ok(rig.requests.length === 3, "after an action the backed-off interval stays: nothing at 159 s", String(rig.requests.length));
+    await rig.tick(1);
+    ok(rig.requests.length === 4, "capped at 60 s: the next check at 160 s", String(rig.requests.length));
+    await rig.tick(30);
+    ok(rig.requests.length === 4, "and still 60 s after it (nothing at 190 s)", String(rig.requests.length));
+    const backoff = rig.checkLog().filter(l => l.includes("backing off"));
+    ok(backoff.length === 3 && /20 s/.test(backoff[0]) && /40 s/.test(backoff[1]) && /60 s/.test(backoff[2]),
+       "one log line per change: 20, 40, 60 s", backoff.join(" | "));
+    ok(countCalls(rig, "session-end") === 0, "an error never ends the session", String(countCalls(rig, "session-end")));
+  } finally { rig.restore(); }
+}
+
+console.log("\n[39] session check: notFound stops the check for this holder; the idle timer still ends it");
+{
+  const rig = await checkRig(() => ({ ok: false, ended: false, transient: false, notFound: true }));
+  try {
+    await rig.tick(10);
+    ok(rig.requests.length === 1 && rig.checkLog().length === 1 && rig.checkLog()[0].includes("cse_X"), "one check, logged once", rig.checkLog().join(" | "));
+    await rig.tick(30);
+    await rig.zoom();
+    await rig.tick(30);
+    ok(rig.requests.length === 1 && rig.checkLog().length === 1, "never asked again for this holder, even after an action", String(rig.requests.length));
+    await rig.tick(91);
+    ok(countCalls(rig, "session-end") === 1 && rig.idleLogged(), "the idle backstop ends it", String(countCalls(rig, "session-end")));
+  } finally { rig.restore(); }
+}
+{
+  // Any other non-2xx answers a bare {ok:false} (a 401 during a cookie
+  // refresh; upstream caches it for 30 s): backed off like a transient error,
+  // never a stop.
+  const rig = await checkRig(() => ({ ok: false }));
+  try {
+    await rig.tick(40);
+    ok(rig.requests.length === 2 && countCalls(rig, "session-end") === 0 && !rig.checkLog().some(l => l.includes("stopping")),
+       "a bare {ok:false}: checked at 10 and 30 s, backed off, nothing ended", rig.requests.length + " / " + rig.checkLog().join(" | "));
+  } finally { rig.restore(); }
+}
+
+console.log("\n[40] session check: a session_X holder is asked as cse_X and passes the task boundary's id check");
+{
+  const rig = await checkRig(() => ENDED, { holder: "session_01AbC" });
+  try {
+    await rig.tick(10);
+    ok(rig.requests.join(" ") === "cse_01AbC", "request id cse_01AbC", rig.requests.join(" "));
+    ok(countCalls(rig, "session-end") === 1 && !rig.log.some(l => l.includes("task boundary (session-check): ignored")),
+       "ended: session-end, not ignored", String(countCalls(rig, "session-end")));
+  } finally { rig.restore(); }
+}
+
+console.log("\n[41] session check: a hub-chat (UUID) holder or no holder is never checked");
+for (const holder of ["3f2b6c1e-8d4a-4c3b-9e2f-1a2b3c4d5e6f", undefined]) {
+  const rig = await checkRig(() => ENDED, { holder });
+  try {
+    await rig.tick(40);
+    ok(rig.requests.length === 0 && rig.checkLog().length === 0 && countCalls(rig, "session-end") === 0,
+       "holder " + holder + ": no check, no log", rig.requests.length + " / " + rig.checkLog().join(" | "));
+  } finally { rig.restore(); }
+}
+
+console.log("\n[42] session check: a lock release, a session end or a task boundary stops it");
+{
+  let rig = await checkRig(() => ENDED);
+  try {
+    await rig.tick(5);
+    await rig.ex.__setLockHeld(false);
+    await sleep(30);
+    await rig.tick(30);
+    ok(rig.requests.length === 0, "lock released: no check", String(rig.requests.length));
+    ok(rig.checkLog().filter(l => l.includes("stopped for cse_X (lock released)")).length === 1, "one stop line", rig.checkLog().join(" | "));
+  } finally { rig.restore(); }
+  rig = await checkRig(() => ENDED);
+  try {
+    await rig.tick(5);
+    await rig.ex.__cuTaskBoundary("cse_X", "renderer", "cse_X");
+    await sleep(30);
+    await rig.tick(30);
+    ok(rig.requests.length === 0 && countCalls(rig, "session-end") === 1, "renderer task boundary: no check after it", String(rig.requests.length));
+  } finally { rig.restore(); }
+  rig = await checkRig(() => RUNNING);
+  try {
+    await rig.tick(5);
+    rig.clock.advance(IDLE_MS);                    // idle end (the check reschedules itself on the way)
+    await sleep(30);
+    const n = rig.requests.length;
+    await rig.tick(30);
+    ok(countCalls(rig, "session-end") === 1 && rig.requests.length === n, "idle end: the check stops with it", n + " -> " + rig.requests.length);
+  } finally { rig.restore(); }
+  rig = await checkRig(() => ENDED);
+  try {
+    // A reply that lands after the lock release is dropped.
+    let release;
+    globalThis.__cdbRemoteSessionMode = async () => ({ refresh: (id) => { rig.requests.push(id); return new Promise(r => { release = r; }); } });
+    await rig.tick(10);
+    ok(rig.requests.length === 1 && typeof release === "function", "a check in flight");
+    await rig.ex.__setLockHeld(false);
+    await sleep(30);
+    if (typeof release === "function") release(ENDED);
+    await sleep(30);
+    ok(!rig.log.some(l => l.includes("session check: cse_X ended")) && countCalls(rig, "session-end") === 1,
+       "its late 'ended' is ignored (only the release's session-end)", String(countCalls(rig, "session-end")));
+  } finally { rig.restore(); }
+}
+
+console.log("\n[43] session check: with the stop-sharing latch set, an ended session lifts it through the task boundary");
+{
+  const rig = await checkRig((id, n) => n === 1 ? RUNNING : ENDED);
+  try {
+    rig.stop.on = true;
+    ok((await tryRun(() => rig.ex.moveMouse(5, 5))).startsWith("Screen sharing was stopped"), "latched");
+    await rig.tick(10);
+    ok(rig.requests.length === 1 && countCalls(rig, "session-end") === 0, "running: the latch stays", String(countCalls(rig, "session-end")));
+    await rig.tick(10);
+    ok(rig.requests.length === 2 && countCalls(rig, "session-end") === 1 &&
+       rig.log.some(l => l.includes("stopped-by-user latch cleared (task boundary)")),
+       "ended: session-end and the latch is cleared", rig.log.filter(l => l.includes("latch")).join(" | "));
+    rig.stop.on = false;
+    ok((await tryRun(() => rig.ex.moveMouse(5, 5))) === "no error", "the next action shares again");
+  } finally { rig.restore(); }
+}
+
+console.log("\n[44] session check: no session-state accessor (older patch set) -> never checks; the idle backstop ends at 120 s");
+{
+  const rig = await checkRig(() => ENDED, { noAccessor: true });
+  try {
+    await rig.tick(60);
+    ok(rig.checkLog().length === 0 && rig.clock.pending().every(t => t.ms !== 10000), "no check armed, nothing logged", rig.checkLog().join(" | "));
+    ok(countCalls(rig, "session-end") === 0, "still up at 60 s");
+    await rig.tick(61);
+    ok(countCalls(rig, "session-end") === 1 && rig.idleLogged(), "idle end at 120 s", String(countCalls(rig, "session-end")));
+  } finally { rig.restore(); }
+}
+
+console.log("\n[45] session check: notFound lasts until the lock is released; the same holder on the next lock is checked again");
+{
+  let mode = "notFound";
+  const rig = await checkRig(() => mode === "notFound" ? { ok: false, ended: false, transient: false, notFound: true } : ENDED);
+  try {
+    await rig.tick(10);
+    ok(rig.requests.length === 1, "notFound at 10 s", String(rig.requests.length));
+    await rig.ex.__setLockHeld(false); await sleep(40);
+    mode = "ended";
+    rig.ex.__setLockHeld(true, "cse_X"); await sleep(60);
+    await rig.zoom();
+    await rig.tick(10);
+    ok(rig.requests.length === 2 && countCalls(rig, "session-end") === 2, "a new lock for cse_X: checked, ended",
+       rig.requests.length + " / " + countCalls(rig, "session-end"));
+  } finally { rig.restore(); }
+}
+
+console.log("\n[46] session check: an 'ended' reply that lands after a tool call began (its screens query) is dropped");
+{
+  let release;
+  // No command yet: the lock's session start armed the check, and the zoom's
+  // monitor list is not cached, so it starts with a `screens` query.
+  const rig = await checkRig(() => ENDED, { delays: { screens: 200 }, noCommand: true });
+  try {
+    globalThis.__cdbRemoteSessionMode = async () => ({ refresh: (id) => { rig.requests.push(id); return new Promise(r => { release = r; }); } });
+    await rig.tick(10);
+    ok(rig.requests.length === 1 && typeof release === "function", "a check in flight");
+    const p = tryRun(rig.zoom);                    // screens query first (200 ms), then the zoom
+    await sleep(30);
+    if (typeof release === "function") release(ENDED);
+    const r = await p; await sleep(50);
+    ok(r === "no error" && countCalls(rig, "session-end") === 0 && countCalls(rig, "session-start") === 1,
+       "the zoom runs on its session: no session-end, no second session-start",
+       r + " / end " + countCalls(rig, "session-end") + " / start " + countCalls(rig, "session-start"));
+    globalThis.__cdbRemoteSessionMode = async () => ({ refresh: async (id) => { rig.requests.push(id); return ENDED; } });
+    await rig.tick(10);
+    ok(rig.requests.length === 2 && countCalls(rig, "session-end") === 1, "10 s after the zoom: checked again and ended",
+       rig.requests.length + " / " + countCalls(rig, "session-end"));
+  } finally { rig.restore(); }
+}
+
+console.log("\n[47] session check: a task boundary while a session-start is in flight leaves no check armed");
+{
+  const rig = await checkRig(() => RUNNING);
+  try {
+    await rig.ex.__cuTaskBoundary("cse_X", "renderer", "cse_X"); await sleep(40);
+    const p = tryRun(rig.zoom);                    // lazy session-start (20 ms consent)
+    await sleep(5);
+    await rig.ex.__cuTaskBoundary("cse_X", "renderer", "cse_X");
+    await p; await sleep(80);
+    const n = rig.requests.length;
+    await rig.tick(35);
+    ok(countCalls(rig, "session-end") === 2 && rig.requests.length === n, "after the end: no check runs",
+       "requests +" + (rig.requests.length - n) + " / end " + countCalls(rig, "session-end"));
+  } finally { rig.restore(); }
+}
+
+console.log("\n[48] session check: a backed-off interval does not carry into the next turn");
+{
+  const rig = await checkRig((id, n) => n === 1 ? new Error("net::ERR_NETWORK_CHANGED") : ENDED);
+  try {
+    await rig.tick(30);
+    ok(rig.requests.length === 2 && countCalls(rig, "session-end") === 1, "error at 10 s, ended at 30 s", rig.requests.length + " / " + countCalls(rig, "session-end"));
+    await rig.zoom();                              // next turn: new session
+    await rig.tick(10);
+    ok(rig.requests.length === 3, "the next turn is checked 10 s after its command", String(rig.requests.length));
+  } finally { rig.restore(); }
+}
+
+// ── #293 round 9: the lock and the session check are observable ──
+// Every line goes through __cdbDiag (rig.log). The triggers are the real ones:
+// __setLockHeld (the lock hook), portal commands (rig.zoom arms the check) and
+// the poll replies.
+const NOT_ARMED_NONE = "[claude-cu] session check: not armed (no Computer Use lock holder; the portal session was started outside the lock)";
+
+console.log("\n[49] diagnostics: lock taken/released lines carry the holder, on entry; one 'armed' line per lock");
+{
+  const rig = await checkRig(() => RUNNING);
+  try {
+    await rig.zoom(); await rig.zoom();
+    ok(rig.lockLog().length === 1 && rig.lockLog()[0] === "[claude-cu] lock taken by cse_X", "lock taken by cse_X, once", rig.lockLog().join(" | "));
+    ok(rig.decisionLog().length === 1 && rig.decisionLog()[0] === "[claude-cu] session check: armed for cse_X",
+       "armed for cse_X logged once although every command arms (dedup)", rig.decisionLog().join(" | "));
+    await rig.ex.__setLockHeld(false); await sleep(40);
+    ok(rig.lockLog().length === 2 && rig.lockLog()[1] === "[claude-cu] lock released", "lock released", rig.lockLog().join(" | "));
+    rig.ex.__setLockHeld(true, "cse_X"); await sleep(60);
+    await rig.zoom(); await rig.zoom();
+    ok(rig.lockLog()[2] === "[claude-cu] lock taken by cse_X", "the same holder taken again is logged again", rig.lockLog().join(" | "));
+    ok(rig.decisionLog().length === 2, "the dedup reset on release: armed for cse_X logs again for the new lock", rig.decisionLog().join(" | "));
+  } finally { rig.restore(); }
+}
+
+console.log("\n[50] diagnostics: lock taken without a holder is 'none'");
+{
+  const rig = await checkRig(() => RUNNING, { holder: undefined, noCommand: true });
+  try {
+    ok(rig.lockLog()[0] === "[claude-cu] lock taken by none", "lock taken by none", rig.lockLog().join(" | "));
+    await rig.ex.__setLockHeld(false); await sleep(30);
+    ok(rig.lockLog()[1] === "[claude-cu] lock released", "released", rig.lockLog().join(" | "));
+  } finally { rig.restore(); }
+}
+
+console.log("\n[51] diagnostics: each not-armed reason is logged once per (holder, reason), also with no holder");
+{
+  let rig = await checkRig(() => RUNNING, { holder: undefined });
+  try {
+    await rig.zoom(); await rig.zoom(); await rig.tick(15);
+    ok(rig.decisionLog().length === 1 && rig.decisionLog()[0] === NOT_ARMED_NONE, "no holder: one 'not armed' line, deduplicated over every command",
+       rig.decisionLog().join(" | "));
+    ok(rig.requests.length === 0, "and nothing is checked", String(rig.requests.length));
+    await rig.ex.__setLockHeld(false); await sleep(30);
+    rig.ex.__setLockHeld(true); await sleep(60); await rig.zoom();
+    ok(rig.decisionLog().filter(l => l === NOT_ARMED_NONE).length === 2, "a new lock without a holder logs again", rig.decisionLog().join(" | "));
+  } finally { rig.restore(); }
+  const uuid = "3f2b6c1e-8d4a-4c3b-9e2f-1a2b3c4d5e6f";
+  rig = await checkRig(() => RUNNING, { holder: uuid });
+  try {
+    await rig.zoom(); await rig.zoom();
+    ok(rig.decisionLog().length === 1 && rig.decisionLog()[0] === "[claude-cu] session check: not armed (holder " + uuid + " is not a cloud session)",
+       "UUID holder: not a cloud session, once", rig.decisionLog().join(" | "));
+  } finally { rig.restore(); }
+  rig = await checkRig(() => RUNNING, { noAccessor: true });
+  try {
+    await rig.zoom(); await rig.zoom();
+    ok(rig.decisionLog().length === 1 && rig.decisionLog()[0] === "[claude-cu] session check: not armed (the session-state check is not available)",
+       "no accessor: not available, once", rig.decisionLog().join(" | "));
+  } finally { rig.restore(); }
+  rig = await checkRig(() => ({ ok: false, ended: false, transient: false, notFound: true }));
+  try {
+    await rig.tick(10);
+    await rig.zoom(); await rig.zoom();
+    const nk = "[claude-cu] session check: not armed (holder cse_X is not known to the server)";
+    ok(rig.decisionLog().filter(l => l === nk).length === 1, "notFound holder: 'not known to the server' once, although every command re-arms",
+       rig.decisionLog().join(" | "));
+    ok(rig.requests.length === 1, "behaviour unchanged: never asked again", String(rig.requests.length));
+    await rig.ex.__setLockHeld(false); await sleep(30);
+    rig.ex.__setLockHeld(true, "cse_X"); await sleep(60); await rig.zoom();
+    ok(rig.decisionLog().filter(l => l.includes("armed for cse_X")).length === 2, "the next lock arms again (and logs it)", rig.decisionLog().join(" | "));
+  } finally { rig.restore(); }
+}
+
+console.log("\n[52] diagnostics: a task boundary stops the check and resets the dedup");
+{
+  const rig = await checkRig(() => RUNNING);
+  try {
+    await rig.zoom();
+    await rig.ex.__cuTaskBoundary("cse_X", "renderer", "cse_X"); await sleep(40);
+    await rig.zoom(); await rig.zoom();
+    ok(rig.decisionLog().filter(l => l.includes("armed for cse_X")).length === 2,
+       "a task boundary stops the check; the next session arms and logs again", rig.decisionLog().join(" | "));
+  } finally { rig.restore(); }
+}
+
+console.log("\n[53] diagnostics: per-poll lines only with CDB_CU_DEBUG=1");
+{
+  const pollLines = (rig) => rig.log.filter(l => /session check: cse_X -> /.test(l)).map(l => l.replace(/^DIAG /, ""));
+  let rig = await checkRig(() => RUNNING);
+  try {
+    await rig.tick(35);
+    ok(rig.requests.length === 3 && pollLines(rig).length === 0, "off: three polls, no per-poll line", pollLines(rig).join(" | "));
+  } finally { rig.restore(); }
+  process.env.CDB_CU_DEBUG = "1";
+  try {
+    rig = await checkRig(() => RUNNING);
+    try {
+      await rig.tick(35);
+      ok(pollLines(rig).length === 3 && pollLines(rig).every(l => l === "[claude-cu] session check: cse_X -> ok=true ended=false next in 10 s"),
+         "on: one line per poll", pollLines(rig).join(" | "));
+    } finally { rig.restore(); }
+    rig = await checkRig((id, n) => n === 1 ? { ok: false, ended: false, transient: true, notFound: false } : ENDED);
+    try {
+      await rig.tick(30);
+      ok(pollLines(rig)[0] === "[claude-cu] session check: cse_X -> ok=false ended=false transient next in 20 s", "transient, with the backed-off interval", pollLines(rig).join(" | "));
+      ok(pollLines(rig)[1] === "[claude-cu] session check: cse_X -> ok=true ended=true", "ended", pollLines(rig).join(" | "));
+    } finally { rig.restore(); }
+    rig = await checkRig(() => ({ ok: false, ended: false, transient: false, notFound: true }));
+    try {
+      await rig.tick(10);
+      ok(pollLines(rig).length === 1 && pollLines(rig)[0] === "[claude-cu] session check: cse_X -> ok=false ended=false notFound", "notFound", pollLines(rig).join(" | "));
+    } finally { rig.restore(); }
+    rig = await checkRig(() => ENDED, { delays: { zoom: 150 } });
+    try {
+      const p = rig.zoom(); await sleep(20);
+      await rig.tick(12);
+      ok(pollLines(rig).some(l => l === "[claude-cu] session check: cse_X -> busy-skip next in 10 s"), "busy-skip", pollLines(rig).join(" | "));
+      await p;
+    } finally { rig.restore(); }
+  } finally { delete process.env.CDB_CU_DEBUG; }
+}
+
+console.log("\n[54] GNOME: a PipeWire frame timeout through the tool handler - one retry, no desktopCapturer, the session stays up");
+{
+  const FRAME = "timed out waiting for PipeWire frame on stream 64 (state events: stream 64 -> Connecting, stream 64 -> Paused, stream 64 -> Streaming)";
+  const st = { failZooms: 0 };
+  const rig = makeRig(20, (sub) => {
+    if (sub === "screens") return screensJson([true, true]);
+    if (sub === "zoom") {
+      if (st.failZooms > 0) { st.failZooms--; throw Object.assign(new Error("Command failed: zoom\n" + FRAME + "\n"), { code: 1, stderr: FRAME + "\n" }); }
+      return ZOOM_OK;
+    }
+    return "{}";
+  }, EDISPLAYS);
+  resetShot();
+  rig.ex.__setLockHeld(true, "local_frame");
+  await sleep(60);
+  st.failZooms = 1;
+  let z0 = countCalls(rig, "zoom");
+  let r = await handler("screenshot", {});
+  ok(r && r.content && r.content.some((b) => b.type === "image") && countCalls(rig, "zoom") === z0 + 2, "one frame timeout: the second zoom captures", String(countCalls(rig, "zoom") - z0));
+  st.failZooms = 2;
+  z0 = countCalls(rig, "zoom");
+  const cap0 = rig.log.filter(l => l === "CAPTURER").length;
+  const text = await shotText({});
+  ok(countCalls(rig, "zoom") === z0 + 2 && rig.log.filter(l => l === "CAPTURER").length === cap0, "two in a row: two zooms, no desktopCapturer (no Share Screen dialog)", (countCalls(rig, "zoom") - z0) + " zoom(s)");
+  ok(text.includes("could not capture the screen (" + FRAME) && text.includes("taking the screenshot again once is reasonable") && !text.includes("every capture tier failed"), "the model reads that the capture failed and may retry", text);
+  ok(countCalls(rig, "session-end") === 0, "the portal session is left up for the retry", String(countCalls(rig, "session-end")));
+  st.failZooms = 0;
+  r = await handler("screenshot", {});
+  ok(r && r.content && r.content.some((b) => b.type === "image"), "and the model's retry captures");
+  rig.ex.__setLockHeld(false);
+  await sleep(40);
+  rig.restore && rig.restore();
+}
+
+console.log("\n[55] the dock of a maximized window: a late window-manager restore is undone once (GNOME VM: 1 of 14 cycles)");
+{
+  const { EventEmitter } = await import("node:events");
+  // A BrowserWindow stand-in: methods on the prototype (as in Electron, so an
+  // instance-level wrapper shadows them), 'resize' on every size change.
+  class Win extends EventEmitter {
+    constructor(b) { super(); this.b = { ...b }; this.max = false; this.top = false; this.calls = []; }
+    isDestroyed() { return false; } isVisible() { return true; } isFocusable() { return true; }
+    isAlwaysOnTop() { return this.top; } isMaximized() { return this.max; } isFullScreen() { return false; } isMinimized() { return false; }
+    getBounds() { return { ...this.b }; }
+    setBounds(b) { this.calls.push("setBounds " + b.width + "x" + b.height); if (this.frozen) return; this.b = { ...b }; this.emit("resize"); }
+    unmaximize() { this.calls.push("unmaximize"); }
+    maximize() { this.max = true; this.b = { x: 0, y: 0, width: 1280, height: 778 }; this.emit("resize"); }
+    setAlwaysOnTop(v) { this.top = v; this.emit("always-on-top-changed", {}, v); }
+  }
+  const TARGET = { x: 740, y: 52, width: 520, height: 720 };
+  // Upstream's dock (ZWo/QWo/JWo, 5.1231.2) in short: unmaximize, animate
+  // setBounds to the panel (its last frame is exactly the target), then
+  // setAlwaysOnTop(true). GNOME's restore of the pre-maximize size lands
+  // `lateMs` after the dock signal (late) or before the animation (normal).
+  async function upstreamDock(w, lateMs) {
+    const wasMax = w.isMaximized();
+    if (wasMax) w.unmaximize();
+    const restore = () => { w.max = false; w.b = { x: 97, y: 11, width: 1085, height: 778 }; w.emit("unmaximize"); w.emit("resize"); };
+    if (wasMax && lateMs === null) restore();
+    const r = w.getBounds();
+    for (const c of [0.1, 0.5, 0.9, 1]) { await sleep(5); w.setBounds({ x: Math.round(r.x + (TARGET.x - r.x) * c), y: Math.round(r.y + (TARGET.y - r.y) * c), width: Math.round(r.width + (TARGET.width - r.width) * c), height: Math.round(r.height + (TARGET.height - r.height) * c) }); }
+    w.setAlwaysOnTop(true);
+    if (wasMax && typeof lateMs === "number") setTimeout(restore, lateMs);
+  }
+  const dockLines = (rig) => rig.log.filter((l) => l.includes("[claude-cu] dock:"));
+  // Let the earlier cases' async lock hooks settle: they reach whichever
+  // executor is globalThis.__linuxExecutor by then.
+  await sleep(500);
+  const rigFor = () => { const rig = makeRig(5, (sub) => (sub === "screens" ? screensJson([true]) : "{}"), EDISPLAYS); return rig; };
+
+  // (a) the miss: GNOME's unmaximize restore lands 60 ms after the dock signal.
+  {
+    const w = new Win({ x: 0, y: 0, width: 1280, height: 778 }); w.max = true; rigWindows.list = [w];
+    const rig = rigFor();
+    const p = rig.ex.__setLockHeld(true, "local_a");
+    await upstreamDock(w, 60);
+    await sleep(150);
+    ok(w.b.width === 520 && w.b.height === 720 && !w.max, "late restore: the window is back at upstream's 520x720", w.b.width + "x" + w.b.height + " " + w.calls.slice(-2).join(","));
+    ok(dockLines(rig).length === 1 && /is 1085x778 after the dock, not the 520x720 upstream asked for \(late (resize|unmaximize)\) - asking once more/.test(dockLines(rig)[0]), "one line names the miss", dockLines(rig).join(" | "));
+    ok(!Object.prototype.hasOwnProperty.call(w, "setBounds"), "upstream's setBounds is no longer wrapped after the dock signal");
+    await sleep(1500);
+    ok(dockLines(rig).some((l) => l.includes("the docked size holds after asking once more")), "the check confirms the dock held", dockLines(rig).join(" | "));
+    rig.ex.__setLockHeld(false); await p; rig.restore();
+  }
+  // (b) a dock that lands: nothing is asked again, nothing logged.
+  {
+    const w = new Win({ x: 0, y: 0, width: 1280, height: 778 }); w.max = true; rigWindows.list = [w];
+    const rig = rigFor();
+    rig.ex.__setLockHeld(true, "local_b");
+    await upstreamDock(w, null);
+    const n = w.calls.length;
+    await sleep(1600);
+    ok(w.calls.length === n && dockLines(rig).length === 0 && w.b.width === 520, "a dock that landed: no second setBounds, no line", w.calls.slice(n).join(",") + " " + dockLines(rig).join(" | "));
+    rig.ex.__setLockHeld(false); rig.restore();
+  }
+  // (c) asked once only: a window manager that keeps the window large gets one
+  // more request, then one line that Claude's window may cover the screen.
+  {
+    const w = new Win({ x: 0, y: 0, width: 1280, height: 778 }); w.max = true; rigWindows.list = [w];
+    const rig = rigFor();
+    rig.ex.__setLockHeld(true, "local_c");
+    await upstreamDock(w, 30);
+    await sleep(60);
+    // The window manager puts its size back after every request from now on.
+    w.on("resize", () => { if (w.b.width !== 1085) setTimeout(() => { w.b = { x: 97, y: 11, width: 1085, height: 778 }; w.emit("resize"); }, 5); });
+    w.emit("resize");
+    await sleep(1600);
+    const again = w.calls.filter((c) => c === "setBounds 520x720").length;
+    ok(again === 2 && dockLines(rig).filter((l) => l.includes("asking once more")).length === 1 && dockLines(rig).some((l) => l.includes("stayed 1085x778, not the docked 520x720 - it may cover part of the screen")), "asked once more only, then the miss is logged", again + " | " + dockLines(rig).join(" | "));
+    rig.ex.__setLockHeld(false); rig.restore();
+  }
+  // (f) GNOME still reports the maximized size at the dock signal (the
+  // animation's frames were not applied yet); its late restore follows. That
+  // late event owns the one re-assert: the dock lands.
+  {
+    const w = new Win({ x: 0, y: 0, width: 1280, height: 778 }); w.max = true; w.frozen = true; rigWindows.list = [w];
+    const rig = rigFor();
+    rig.ex.__setLockHeld(true, "local_f");
+    await upstreamDock(w, false);
+    const atSignal = w.b.width + "x" + w.b.height;
+    w.emit("resize");                                   // a configure that keeps the maximized size: no news
+    await sleep(60);
+    w.frozen = false; w.max = false; w.b = { x: 97, y: 11, width: 1085, height: 778 }; w.emit("unmaximize"); w.emit("resize");
+    await sleep(100);
+    ok(atSignal === "1280x778" && w.b.width === 520 && w.b.height === 720, "maximized size at the signal, late restore after: the late event re-asserts, the dock lands", atSignal + " -> " + w.b.width + "x" + w.b.height + " | " + dockLines(rig).join(" | "));
+    ok(dockLines(rig).filter((l) => l.includes("asking once more")).length === 1 && dockLines(rig).some((l) => l.includes("(late unmaximize)")), "  asked once, by the late unmaximize", dockLines(rig).join(" | "));
+    await sleep(1500);
+    ok(dockLines(rig).some((l) => l.includes("the docked size holds")), "  and the dock holds", dockLines(rig).join(" | "));
+    rig.ex.__setLockHeld(false); rig.restore();
+  }
+  // (g) maximized size at the signal and no late event at all: asked once
+  // after the settle delay, so a stuck window is still corrected.
+  {
+    const w = new Win({ x: 0, y: 0, width: 1280, height: 778 }); w.max = true; w.frozen = true; rigWindows.list = [w];
+    const rig = rigFor();
+    rig.ex.__setLockHeld(true, "local_g");
+    await upstreamDock(w, false);
+    w.frozen = false;
+    await sleep(600);
+    ok(w.b.width === 520 && dockLines(rig).some((l) => l.includes("still off 400 ms after the dock signal")), "no late event: asked once after 400 ms", w.b.width + "x" + w.b.height + " | " + dockLines(rig).join(" | "));
+    rig.ex.__setLockHeld(false); rig.restore();
+  }
+  // (d) the lock is released before the dock signal: nothing stays wrapped,
+  // upstream's restore is not touched.
+  {
+    const w = new Win({ x: 0, y: 0, width: 1280, height: 778 }); w.max = true; rigWindows.list = [w];
+    const rig = rigFor();
+    rig.ex.__setLockHeld(true, "local_d");
+    ok(Object.prototype.hasOwnProperty.call(w, "setBounds"), "while the dock runs, upstream's setBounds calls are recorded on the window");
+    rig.ex.__setLockHeld(false);
+    ok(!Object.prototype.hasOwnProperty.call(w, "setBounds") && w.listenerCount("always-on-top-changed") === 0 && w.listenerCount("resize") === 0, "a release removes the wrapper and every listener");
+    rig.restore();
+  }
+  // (e) kwin mode (its own executor docks) and an already docked window: untouched.
+  {
+    const w = new Win({ x: 0, y: 0, width: 1280, height: 778 }); rigWindows.list = [w];
+    const rig = rigFor();
+    globalThis.__cuKwinMode = true;
+    rig.ex.__setLockHeld(true, "local_e");
+    ok(!Object.prototype.hasOwnProperty.call(w, "setBounds") && w.listenerCount("always-on-top-changed") === 0, "kwin mode: no dock check");
+    globalThis.__cuKwinMode = false;
+    rig.ex.__setLockHeld(false);
+    w.top = true;
+    rig.ex.__setLockHeld(true, "local_e2");
+    ok(!Object.prototype.hasOwnProperty.call(w, "setBounds"), "already always on top (docked): no dock check");
+    rig.ex.__setLockHeld(false); rig.restore();
+  }
+  rigWindows.list = [];
 }
 
 console.log("\n" + (fail ? `${pass} passed, ${fail} FAILED` : `ALL ${pass} CHECKS PASSED`));

@@ -4,8 +4,8 @@
 # Patch the ion-dist 3P configuration SPA for Linux compatibility.
 #
 # The ion-dist bundle is a React SPA served via the app:// protocol that
-# powers Developer -> Configure Third-Party Inference. It has two issues
-# on Linux:
+# powers Developer -> Configure Third-Party Inference and the Cowork UI. It
+# has two issues on Linux:
 #
 #   1) The org-plugins mount path only has mac/win entries - on Linux it
 #      falls back to the macOS path "/Library/Application Support/Claude/org-plugins"

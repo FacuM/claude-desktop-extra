@@ -87,6 +87,12 @@ const UPSTREAM_CSS = `
 [data-mode=dark] .cds-root:not([data-mode=light]):not([data-mode=system]),.cds-root[data-mode=dark]{--cds-neutral-60:var(--cds-gray-840)}
 .dframe-root[data-variant=web] .df-pills[data-segmented]{background:var(--cds-neutral-60)}
 .to-transparent{--tw-gradient-to:transparent;--tw-gradient-stops:var(--tw-gradient-via-stops,var(--tw-gradient-position), var(--tw-gradient-from) var(--tw-gradient-from-position), var(--tw-gradient-to) var(--tw-gradient-to-position))}
+.cds-root:is([data-cds-fizzy-lake~="color"], [data-cds-fizzy-lake~="color"] *){--cds-fizzy-lake-color-sidebar:#fafafa}
+[data-mode=dark] .cds-root:is([data-cds-fizzy-lake~="color"], [data-cds-fizzy-lake~="color"] *){--cds-fizzy-lake-color-sidebar:#1f1f1f}
+.dframe-root[data-variant=web] .dframe-sidebar{--df-web-sidebar-bg:var(--cds-fizzy-lake-color-sidebar,#eee)}
+[data-mode=dark] .dframe-root[data-variant=web] .dframe-sidebar{--df-web-sidebar-bg:var(--cds-fizzy-lake-color-sidebar,#181818)}
+.dframe-root[data-variant=web][data-collapsed] .dframe-sidebar-body{--df-web-sidebar-bg:var(--cds-surface-popover);--df-web-sidebar-bg-image:none;background-color:var(--df-web-sidebar-bg)}
+@media screen and (resolution <= 1.99x){[data-own-scroll-layers]:not([data-sidebar-vibrancy]) .dframe-root[data-variant=web]:not([data-engine-glass]) .dframe-sidebar .dframe-nav-scroll{background:var(--df-web-sidebar-bg) local;will-change:scroll-position}}
 `;
 
 /*
@@ -98,9 +104,12 @@ const UPSTREAM_CSS = `
  *   disclaimer - role="note" data-disclaimer, the strip under the composer
  *   pills      - the "Chat and Cowork | Code" mode pills track (.df-pills[data-segmented]),
  *                painted from --cds-neutral-60 (v1.49585.0); the frame sits inside .cds-root
+ *   navscroll  - .dframe-nav-scroll inside .dframe-sidebar, painted on <= 1.99x displays
+ *                from --df-web-sidebar-bg / --cds-fizzy-lake-color-sidebar (#340)
  */
 const FRAGMENT = `
-<div class="cds-root dframe-root" data-variant="web">
+<div id="frameroot" class="cds-root dframe-root" data-variant="web">
+  <aside class="dframe-sidebar"><div id="sidebody" class="dframe-sidebar-body"><div id="navscroll" class="dframe-nav-scroll"></div></div></aside>
   <div id="pills" class="df-pills" data-segmented="true"></div>
   <div class="dframe-content">
     <div class="dframe-content-inner">
@@ -112,11 +121,13 @@ const FRAGMENT = `
   </div>
 </div>`;
 
-/** Our two inner-scope rules, removed to get the pre-fix sheet back. */
+/** Our inner-scope rules, removed to get the pre-fix sheet back. */
 function stripScopeFix(sheet) {
   return sheet
     .replace(/\.dframe-content-inner\{[^}]*\}/g, "")
-    .replace(/\.dframe-root\{--df-bg-page-hsl[^}]*\}/g, "");
+    .replace(/\.dframe-root\{--df-bg-page-hsl[^}]*\}/g, "")
+    .replace(/--df-web-sidebar-bg:[^;}]+;?/g, "")
+    .replace(/--cds-fizzy-lake-color-sidebar:[^;}]+;?/g, "");
 }
 
 function page(sheet, expect) {
@@ -156,6 +167,8 @@ function probe(mode) {
   html.setAttribute("data-theme", "claude");
   html.setAttribute("data-color-version", "v2");
   html.setAttribute("data-darker-default", "");
+  html.setAttribute("data-own-scroll-layers", "");
+  html.setAttribute("data-cds-fizzy-lake", "color");
   html.setAttribute("data-mode", mode);
   html.className = mode === "dark" ? "dark" : "";
   var want = hslToRgb(EXPECT[mode].bg100);
@@ -186,6 +199,29 @@ function probe(mode) {
     var pills = getComputedStyle(document.getElementById("pills")).backgroundColor;
     check(tag + "mode pills track (--cds-neutral-60) is " + EXPECT.pillsName[mode],
       near(colorsIn(pills)[0] || [], wantPills), pills + " want rgb(" + wantPills + ")");
+  }
+  if (EXPECT.sidebar) {
+    var wantNav = hslToRgb(EXPECT[mode].nav);
+    var nav = getComputedStyle(document.getElementById("navscroll")).backgroundColor;
+    check(tag + "sidebar scroll container (.dframe-nav-scroll) is " + EXPECT.sidebar.navName,
+      near(colorsIn(nav)[0] || [], wantNav), nav + " want rgb(" + wantNav + ")");
+    if (EXPECT[mode].navDarker) {
+      html.setAttribute("data-darker", "");
+      var wantNavDarker = hslToRgb(EXPECT[mode].navDarker);
+      var navDarker = getComputedStyle(document.getElementById("navscroll")).backgroundColor;
+      html.removeAttribute("data-darker");
+      check(tag + "[data-darker] sidebar scroll container (.dframe-nav-scroll) is " + EXPECT.sidebar.darkerName,
+        near(colorsIn(navDarker)[0] || [], wantNavDarker), navDarker + " want rgb(" + wantNavDarker + ")");
+    }
+    if (EXPECT[mode].peek) {
+      var fr = document.getElementById("frameroot");
+      fr.setAttribute("data-collapsed", "");
+      var wantPeek = hslToRgb(EXPECT[mode].peek);
+      var peek = getComputedStyle(document.getElementById("sidebody")).backgroundColor;
+      fr.removeAttribute("data-collapsed");
+      check(tag + "collapsed sidebar hover-peek (.dframe-sidebar-body) keeps --bg-000 popover surface",
+        near(colorsIn(peek)[0] || [], wantPeek), peek + " want rgb(" + wantPeek + ")");
+    }
   }
 }
 probe("dark");
@@ -238,6 +274,10 @@ await runSuite(async () => {
     "status backgrounds and on-colors map onto the status ramps / --oncolor-100");
   r.ok(/\.dframe-root\{[^}]*--df-hover:hsl\(var\(--text-000\) \/ 0\.06\)!important;--df-selected:hsl\(var\(--text-000\) \/ 0\.12\)!important/.test(sheet),
     "sidebar row states (--df-hover / --df-selected) are an alpha of --text-000");
+  r.ok(sheet.includes("--df-web-sidebar-bg:hsl(var(--bg-200))!important") &&
+       sheet.includes("[data-darker] .dframe-sidebar{background-color:hsl(var(--bg-300))!important;--df-web-sidebar-bg:hsl(var(--bg-300))!important}") &&
+       sheet.includes("--cds-fizzy-lake-color-sidebar:hsl(var(--bg-200))!important"),
+    "sidebar web scroll-layer tokens (--df-web-sidebar-bg and --cds-fizzy-lake-color-sidebar) map to the theme");
   r.ok(!/--cds-(alpha-\d|gray-\d+|switch-knob|slider-handle|fill-warning):/.test(sheet),
     "derived alphas, the gray palette, the white knob and the warning fill are deliberately NOT overridden");
 
@@ -283,8 +323,9 @@ await runSuite(async () => {
   writeFileSync(fixedPage, page(sheet, {
     label: "fixed", wantName: "the theme's --bg-100",
     pills: true, pillsName: { light: "the theme's --bg-400", dark: "the theme's --bg-100" },
-    dark: { bg100: THEME.dark["--bg-100"], bg300: THEME.dark["--bg-300"], other: STOCK.dark, pills: THEME.dark["--bg-100"] },
-    light: { bg100: THEME.light["--bg-100"], bg300: THEME.light["--bg-300"], other: STOCK.light, pills: THEME.light["--bg-400"] },
+    sidebar: { navName: "the theme's --bg-200", darkerName: "the theme's --bg-300" },
+    dark: { bg100: THEME.dark["--bg-100"], bg300: THEME.dark["--bg-300"], other: STOCK.dark, pills: THEME.dark["--bg-100"], nav: THEME.dark["--bg-200"], navDarker: THEME.dark["--bg-300"], peek: THEME.dark["--bg-000"] },
+    light: { bg100: THEME.light["--bg-100"], bg300: THEME.light["--bg-300"], other: STOCK.light, pills: THEME.light["--bg-400"], nav: THEME.light["--bg-200"], navDarker: THEME.light["--bg-300"], peek: THEME.light["--bg-000"] },
   }));
   const fixedLines = readProbe(dumpDom(chromium, fixedPage), "probe");
   if (!fixedLines) throw new Error("the fixed page wrote no probe output");
@@ -294,12 +335,74 @@ await runSuite(async () => {
   const controlPage = join(out, "control.html");
   writeFileSync(controlPage, page(control, {
     label: "control", wantName: "the STOCK frame gray",
-    dark: { bg100: STOCK.dark, bg300: THEME.dark["--bg-300"], other: THEME.dark["--bg-100"] },
-    light: { bg100: STOCK.light, bg300: THEME.light["--bg-300"], other: THEME.light["--bg-100"] },
+    sidebar: { navName: "the STOCK fizzy-lake sidebar" },
+    dark: { bg100: STOCK.dark, bg300: THEME.dark["--bg-300"], other: THEME.dark["--bg-100"], nav: "0 0% 12.1569%" },
+    light: { bg100: STOCK.light, bg300: THEME.light["--bg-300"], other: THEME.light["--bg-100"], nav: "0 0% 98.0392%" },
   }));
   const controlLines = readProbe(dumpDom(chromium, controlPage), "probe");
   if (!controlLines) throw new Error("the control page wrote no probe output");
   r.lines(controlLines);
+
+
+  r.section("optional transparent reply surroundings: real CSS cascade and rollback");
+  for (const [activeTheme, frostedReplyField] of ["", "nord", "braille-stars"].flatMap(theme => [[theme, false], [theme, true]])) {
+    const config = { activeTheme, themeWatch: false, transparentChatComposer: true, frostedReplyField };
+    const { themes: api, appEvents: events, userData } = installEngine({ config });
+    const view = mkWc();
+    events["web-contents-created"]({}, view); view.fire("dom-ready");
+    await settle();
+    const enabled = view.sheet();
+    r.ok(enabled && enabled.includes("transcript-bottom-backing-start"), `${activeTheme || "stock"}: option applies at startup`);
+    // The installed 5.11492.5 composer has a page fade with opaque side backing
+    // strips; the theme additionally paints the padded outer input container.
+    const baseline = enabled.slice(0, enabled.indexOf(".dframe-root :is([data-chat-input-container],[data-testid=transcript-bottom-fade]"));
+    const fixture = String.raw`<!doctype html><html><head><style>
+      .dframe-root{--bg-100:251 41.5% 8%;--cds-page-bg:#14111d;--engine-glass-opacity:.3;--engine-glass-blur:20px;--engine-glass-tint:#0a1430}
+      [data-chat-input-container]{padding:24px;background:#14111d}
+      [data-chat-input-container]::before{content:"";background:#14111d;box-shadow:0 0 0 32px #14111d}
+      [data-testid=transcript-bottom-fade]{background:linear-gradient(to top,var(--cds-page-bg),transparent)}
+      .bg-page,[data-disclaimer]{background:var(--cds-page-bg)}
+      .rounded-composer{border-radius:14px;background:#272331;border:1px solid #aaa;padding:16px}
+      [data-approval-card-root]{background:#34303d}
+      </style><style id="optional">${enabled}</style></head><body>
+      <div class="dframe-root" data-engine-backdrop-on data-engine-glass><div data-testid="chat-column">
+      <div data-chat-input-container id="outer"><div id="shell" data-cds="ChatComposer"><div class="rounded-composer" id="editor"><div id="editable" data-cds="ChatComposerEditor" contenteditable="true">Draft kept</div></div></div>
+      <div data-approval-card-root id="approval">Allow tool?</div><button id="send">Send</button></div>
+      <div data-testid="transcript-bottom-fade" id="fade"><div class="bg-page" id="backing" data-testid="transcript-bottom-backing-start"></div></div>
+      <div data-disclaimer id="disclaimer">Claude is AI and can make mistakes.</div></div></div>
+      <div class="bg-page" id="unrelated">Unrelated surface</div><pre id="probe"></pre><script>
+      var lines=[];function ok(c,s){lines.push((c?'PASS ':'FAIL ')+s)};
+      var css=id=>getComputedStyle(document.getElementById(id));
+      var style=document.getElementById('optional'),full=style.textContent;
+      style.textContent=${JSON.stringify(baseline)};
+      var original={editor:css('editor').backgroundColor,unrelated:css('unrelated').backgroundColor,backing:css('backing').backgroundColor,fade:css('fade').backgroundImage};
+      style.textContent=full;
+      ['outer','fade','backing','disclaimer'].forEach(id=>ok(css(id).backgroundColor==='rgba(0, 0, 0, 0)' && css(id).backgroundImage==='none',id+' is transparent'));
+      ok(css('outer').backdropFilter==='none','outer blur removed');
+      ok(getComputedStyle(document.getElementById('outer'),'::before').backgroundColor==='rgba(0, 0, 0, 0)' && getComputedStyle(document.getElementById('outer'),'::before').boxShadow==='none','outer pseudo backing and shadow removed');
+      ok(/0\.35\)/.test(css('editor').backgroundColor) && css('editor').borderTopWidth==='1px','rounded editor gets translucent fill and keeps its border');
+      ok(${frostedReplyField} ? css('shell').backgroundColor==='rgba(0, 0, 0, 0)' && css('shell').backdropFilter==='none' : css('shell').backdropFilter==='blur(20px) saturate(1.2)' && css('shell').borderRadius===css('editor').borderRadius,'shell matches selected frost mode and native corners');
+      ok(css('editor').backdropFilter===(${frostedReplyField} ? 'blur(20px) saturate(1.2)' : 'none'),'inner frost follows the placement toggle');
+      ok(css('approval').backgroundColor==='rgb(52, 48, 61)','approval card fill survives');
+      ok(css('unrelated').backgroundColor===original.unrelated,'unrelated surfaces survive');
+      document.getElementById('editable').focus();ok(document.activeElement.id==='editable','editor accepts focus');
+      var clicks=0;document.getElementById('send').onclick=()=>clicks++;document.getElementById('send').click();ok(clicks===1,'send button remains active');
+      style.textContent=${JSON.stringify(baseline)};
+      ok(css('backing').backgroundColor===original.backing && css('fade').backgroundImage===original.fade,'removing the sheet restores base backing and fade');
+      ok(document.getElementById('editor').textContent==='Draft kept','draft untouched');
+      document.getElementById('probe').textContent=lines.join('\n');</script></body></html>`;
+    const path = join(out, `reply-${activeTheme || "stock"}.html`);
+    writeFileSync(path, fixture);
+    const lines = readProbe(dumpDom(chromium, path), "probe");
+    if (!lines || lines.length !== 15 || lines.some(line => !/^(PASS|FAIL) /.test(line))) throw new Error("reply fixture did not execute all checks");
+    r.lines(lines);
+    writeFileSync(join(userData, "claude-desktop-extra.jsonc"), JSON.stringify({ ...config, transparentChatComposer: false }));
+    const before = view.css.length;
+    r.ok(api.reload("option off").ok, "disable reload succeeds"); await settle();
+    r.ok(activeTheme ? !view.sheet().includes("hsl(var(--bg-100)) 35%,transparent") : view.css.length === before && view.removedKeys.length > 0,
+      `${activeTheme || "stock"}: disabling removes the optional rules`);
+    api.apply(""); await settle();
+  }
 
   r.done();
 });

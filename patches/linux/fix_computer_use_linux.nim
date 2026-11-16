@@ -9,10 +9,75 @@
 # embeds them via staticRead at compile time; Python reads them at runtime.
 # No codegen — the .js files are the single source of truth.
 #
-# All 38 sub-patches use std/nre (PCRE) because many require backreferences.
+# All 70 sub-patches use std/nre (PCRE) because many require backreferences.
+# "Ask before Computer Use controls an app" (js/cu_consent.js, injected by
+# Patch 1 after the executors): sub-patch 6b makes upstream's grants full level
+# in the regular executor mode, 6c lets upstream's terminal / file-manager
+# warnings classify our canonical app ids by their aliases, and the description
+# sub-patches 13a/13b/13b.linux/13e/13f/13g ask globalThis.__cdbCuConsent.text()
+# first (empty while the switch is off), with 15b keying the tools list on it.
+# Sub-patches 15a-15d add the Linux accessibility tools (issue #306,
+# js/cu_ax_tools.js, injected with the executors by Patch 1): upstream's tool
+# builder, its tools/list cache key, the teach-mode read-only set and upstream's
+# dispatch (kwin mode) each call into that runtime, which answers "nothing" while
+# its Settings -> Extra switch is off.
 # Sub-patch 4e hooks main's releaseRemoteCuLock IPC (claude.ai's task-end
 # event: running->idle, Stop, archive, delete) and hands the id, source and
 # the CU lock's current holder to the Linux executor's __cuTaskBoundary.
+# Sub-patch 4b hands the new lock holder along with the acquire
+# (`__setLockHeld(true, holder)`), and sub-patch 4f exposes upstream's
+# remote-session status accessor as globalThis.__cdbRemoteSessionMode (Linux
+# only): js/cu_session_check.js (injected by Patch 1 before both executors)
+# polls it while a portal session is up for a cloud Cowork holder and ends the
+# session when the server reports the turn ended (issue #293).
+# Sub-patch 4g rewrites upstream's isBridgeComputerUsePlatform at its
+# definition, so device-bridge Computer Use (cloud Cowork, hub chat, Dispatch:
+# the tools announce, the call guard, the approval card's app icons) works on a
+# Wayland session when js/cu_mode_preamble.js decided a first-party bridge is
+# usable (globalThis.__cdbCuWaylandAnnounce, issue #323).
+# Sub-patches 16a-16d make upstream's per-app answers follow the active
+# backend (js/cu_consent.js): the system-prompt suffix after the tier rules,
+# the computerUsePerAppAccess feature, the renderer re-signal when that answer
+# changes, and the "Entire screen" pseudo-grant. 16f gives cloud sessions the
+# same pseudo-grant on a backend without a hit test, and 17f exposes
+# upstream's "a Claude dialog is open" predicate and 17g its own-input
+# marker for the Wayland input guard: with them the executor
+# answers upstream's whole-screen gate as upstream's own Wayland executor does
+# (issue #326).
+# Sub-patch 5e reads a coordinate that arrives before any screenshot (an app
+# restart mid-session) in the frame the Linux executor's next screenshot will
+# have (__coldFrame) instead of upstream's division by the scale factor, and
+# refuses it when that executor cannot tell the frame.
+# Sub-patch 4h routes the Linux arm of upstream's unhideComputerUseApps (turn-end
+# auto-unhide) to the active Linux executor's __unhideApps when it has one, so
+# the KWin executor lifts the capture exclusions it set (upstream's own Linux
+# unhide only knows windows its own executor hid).
+# Sub-patches 10b1-10b5 translate the Linux executor's selected display id (a
+# list index) to the Electron display id where it enters upstream's glow, teach
+# overlay and target label, so those follow the monitor Computer Use works on;
+# upstream's resolver and its main-window fallback stay unchanged. 10c keeps the
+# glow off while Computer Use runs on a background display. 10d exposes
+# upstream's drawn-pointer object (globalThis.__cdbCuDrawnPointer), which the
+# X11 executor feeds as upstream's input mixin does when upstream shows its
+# drawn pointer in the glow. 10e-10g hand upstream's glow show, hide and
+# display change to js/cu_wl_glow.js (embedded by Patch 1), which draws the
+# glow and the drawn pointer through the bridge's layer-shell overlay on a
+# Wayland row whose bridge announces it (KDE Plasma Wayland included: there
+# the kwin executor decides per lock, and its __cdbCuGlowOff keeps upstream's
+# show off while kwin-portal-bridge draws its own glow); 10h exposes upstream's glide planner
+# (globalThis.__cdbCuGlidePlan) so that arrow moves exactly like upstream's.
+# Sub-patch 17c exposes upstream's "user stopped sharing" abort as
+# globalThis.__cdbCuShareEnded, so the executors stop the running turn the
+# moment the user clicks Stop sharing (issue #323; js/cu_share_stop.js,
+# embedded by Patch 1, watches the portal bridges' stopped-by-user marker).
+# Sub-patch 17e exposes upstream's expected-Escape marker as
+# globalThis.__cdbCuExpectEscape: the executors call it right before they
+# inject a lone Escape, as upstream's own executor wrapper does, so upstream's
+# X11 Escape grab (switch "Escape stops Computer Use" off, or its watcher fell
+# back to that grab) absorbs the model's Escape instead of stopping the turn.
+# The Escape abort itself (17a / 17b / 17d) is the community patch
+# add_feature_cu_escape_abort.nim; the executors only call its optional
+# globalThis.__cdbCuEscWatch (suspendAround / toolCall / taskEnded).
 #
 # Idempotency is a MARKER SET (endStateMarkers below): one positive end-state
 # pattern per sub-patch, each with its exact expected count. All present =
@@ -27,6 +92,12 @@ const LINUX_EXECUTOR_JS = staticRead("../../js/cu_linux_executor.js")
 const LINUX_HANDLER_INJECTION_JS = staticRead("../../js/cu_handler_injection.js")
 const MODE_PREAMBLE_JS = staticRead("../../js/cu_mode_preamble.js")
 const KWIN_EXECUTOR_SOURCE = staticRead("../../js/executor_linux.js")
+const AX_TOOLS_JS = staticRead("../../js/cu_ax_tools.js")
+const SESSION_CHECK_JS = staticRead("../../js/cu_session_check.js")
+const DISPLAY_TARGET_JS = staticRead("../../js/cu_display_target.js")
+const CONSENT_JS = staticRead("../../js/cu_consent.js")
+const SHARE_STOP_JS = staticRead("../../js/cu_share_stop.js")
+const WL_GLOW_JS = staticRead("../../js/cu_wl_glow.js")
 
 # ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -155,7 +226,10 @@ proc buildKwinLinuxExecutorInjection(): string =
   js = js.replace(re"(?m)^export\s+", "")
   result =
     "(function(){\n" & js.strip(leading = false, trailing = true) &
-    "\n\nglobalThis.__linuxExecutor = createLinuxExecutor({ hostBundleId: \"com.anthropic.claude\" });\n})();\n"
+    "\n\nglobalThis.__linuxExecutor = createLinuxExecutor({ hostBundleId: \"com.anthropic.claude\" });\n" &
+    # Capture exclusions a crashed or killed previous run left behind (KWin keeps
+    # excludeFromCapture until the window closes); lifted once at app start.
+    "globalThis.__linuxExecutor.__restoreCaptureExclusions(\"app start\");\n})();\n"
 
 # ─── end-state markers (idempotency + post-condition) ──────────────────────
 
@@ -167,6 +241,100 @@ type EndStateMarker = object
 proc countMatches(content: string, pat: Regex): int =
   for _ in content.findIter(pat):
     inc result
+
+# The orchestrator stages index.js + its chunks as one file, each chunk after a
+# `\n/*__CDB_SPLIT__<file name>__*/\n` line. Each part is its own CommonJS
+# module at run time.
+const CDB_SPLIT = "\n/*__CDB_SPLIT__"
+
+# Sub-patches 10b1-10b5: the expression that turns a Linux executor display id
+# (a list index) into the Electron display id at the places where upstream's
+# glow / teach overlay / target label read the SELECTED display. Anything it
+# cannot map (and every non-Linux platform) passes through unchanged.
+const DID_HEAD =
+  "/*__cdbCuDid*/((v)=>{try{let f=globalThis.__cdbCuElectronDisplayId;" &
+  "return process.platform===\"linux\"&&typeof f==\"function\"?f(v):v}catch{return v}})("
+
+proc partSpan(c: string, at: int): (int, int) =
+  ## [start, end) of the staged part containing offset `at`.
+  let p = c.rfind(CDB_SPLIT, last = at)
+  var e = c.find(CDB_SPLIT, start = at)
+  if e == -1:
+    e = c.len
+  result = ((if p == -1: 0 else: p), e)
+
+proc namedPart(c, fileName: string): string =
+  ## The body of the staged part for chunk `fileName`, "" when not staged.
+  let head = CDB_SPLIT & fileName & "__*/\n"
+  let i = c.find(head)
+  if i == -1:
+    return ""
+  let b = i + head.len
+  var e = c.find(CDB_SPLIT, start = b)
+  if e == -1:
+    e = c.len
+  return c[b ..< e]
+
+proc waylandPredicateDefs(content, name: string): int =
+  ## How often `name` is defined as upstream's XDG_SESSION_TYPE Wayland check:
+  ## `M=()=>{let e=ENV().XDG_SESSION_TYPE;return e?e==="wayland":!!ENV().WAYLAND_DISPLAY}`.
+  let nEsc = escapeRe(name)
+  let envAcc = """(?:[\w$]+\(\)|process\.env)"""
+  let body =
+    """\{let ([\w$]+)=""" & envAcc &
+    """\.XDG_SESSION_TYPE;return \1\?\1===["'`]wayland["'`]:!!""" & envAcc &
+    """\.WAYLAND_DISPLAY\}"""
+  countMatches(
+    content,
+    re("(?:(?<![\\w$.])" & nEsc & "=\\(\\)=>|function " & nEsc & "\\(\\))" & body),
+  )
+
+proc exportTarget(part, alias: string): string =
+  ## The local an `exports.<alias>` getter of this part returns, "" unless the
+  ## getter is defined exactly once.
+  let pat = re(
+    """Object\.defineProperty\(exports,(["`])""" & escapeRe(alias) &
+      """\1,\{enumerable:!0,get:function\(\)\{return ([\w$]+)\}\}\)"""
+  )
+  var names: seq[string] = @[]
+  for m in part.findIter(pat):
+    names.add m.captures[1]
+  if names.len != 1:
+    return ""
+  return names[0]
+
+proc requiredChunk(part, ns: string): string =
+  ## The chunk file `ns=require("./<file>")` names in this part, "" unless
+  ## exactly one such binding.
+  let pat = re("(?<![\\w$.])" & escapeRe(ns) & """=require\(["`]\./([^"`]+)["`]\)""")
+  var files: seq[string] = @[]
+  for m in part.findIter(pat):
+    files.add m.captures[0]
+  if files.len != 1:
+    return ""
+  return files[0]
+
+proc bridgeGuardAlias(content: string): string =
+  ## The local upstream's device-bridge refusal guard
+  ## `if(!<ns>.<alias>())return R("Computer use over the device bridge is not
+  ## supported on this platform ...")` calls, resolved through `<ns>=require(...)`
+  ## and that chunk's export getter. "" when any step is not exactly one.
+  let guardPat =
+    re"""if\(!([\w$]+)\.([\w$]+)\(\)\)return [\w$]+\((["'`])Computer use over the device bridge is not supported on this platform"""
+  var hits: seq[RegexMatch] = @[]
+  for m in content.findIter(guardPat):
+    hits.add m
+  if hits.len != 1:
+    return ""
+  let g = hits[0]
+  let (ps, pe) = partSpan(content, g.matchBounds.a)
+  let file = requiredChunk(content[ps ..< pe], g.captures[0])
+  if file == "":
+    return ""
+  let target = namedPart(content, file)
+  if target == "":
+    return ""
+  return exportTarget(target, g.captures[1])
 
 const CU_PLATFORM_FN_BODY =
   # hasComputerUseExecutor (v2.19675.1+). Upstream added "linux" to its own CU
@@ -219,6 +387,55 @@ proc endStateMarkers(): seq[EndStateMarker] =
       """app\.on\(["`]ready["`],\(?async\(\)=>\{if\(process\.platform==="linux"\)\{""",
     ),
     rx(
+      # js/cu_session_check.js embedded by Patch 1 (#293): its one definition.
+      "1 session check embed",
+      """globalThis\.__cdbCuSessionCheck\s*=\s*\{""",
+    ),
+    rx(
+      # js/cu_display_target.js embedded by Patch 1: its one definition.
+      "1 display target embed",
+      """globalThis\.__cdbCuDisplayTarget=\{pick:""",
+    ),
+    rx(
+      # js/cu_wl_glow.js embedded by Patch 1: its one definition.
+      "1 wl glow embed",
+      """globalThis\.__cdbCuWlGlow=\{""",
+    ),
+    rx(
+      # js/cu_consent.js embedded by Patch 1: its one definition.
+      "1 consent embed",
+      """globalThis\.__cdbCuConsent=\{active:active,""",
+    ),
+    rx(
+      # js/cu_consent.js: the per-app access helper 16b / 16d call.
+      "1 shared screen helper",
+      """globalThis\.__cdbCuSharedScreen=function\(\)\{""",
+    ),
+    rx(
+      # js/cu_consent.js: the pseudo-grant helper 16d calls.
+      "1 screen grant helper",
+      """globalThis\.__cdbCuNoScreenGrant=function\(\)\{""",
+    ),
+    rx(
+      # js/cu_consent.js: the one "whole shared screen" predicate (issue #326)
+      # behind both pseudo-grant sites (16d local, 16f cloud).
+      "1 whole-screen predicate",
+      """globalThis\.__cdbCuScreenOnly=function\(\)\{""",
+    ),
+    rx(
+      # js/cu_consent.js: the cloud pseudo-grant helper 16f calls.
+      "1 cloud screen grant helper",
+      """globalThis\.__cdbCuWithScreenGrant=function\(""",
+    ),
+    lit(
+      "6b full grant level",
+      "cuOnlyMode:process.platform===\"linux\"&&!globalThis.__cuKwinMode||process.env.COWORK_CU_ONLY",
+    ),
+    rx(
+      "6c sentinel aliases",
+      """\{return ([\w$]+)\(([\w$]+)\)!==null\|\|process\.platform==="linux"&&\(globalThis\.__cdbCuAppIds\?\.aliasesOf\?\.\(\2\)\|\|\[\]\)\.some\(__cdbS=>\1\(__cdbS\)!==null\)\}""",
+    ),
+    rx(
       "2 CU platform gate",
       "function [\\w$]+\\(\\)\\{if\\(process\\.platform===\"linux\"\\)return!0;" &
         CU_PLATFORM_FN_BODY,
@@ -233,11 +450,11 @@ proc endStateMarkers(): seq[EndStateMarker] =
     ),
     rx(
       "4d platform executor factory",
-      """if\(process\.platform===["`]darwin["`]\)return [\w$]+(?:\.[\w$]+)*\([\w$]+\);if\(process\.platform==="linux"&&globalThis\.__linuxExecutor\)return globalThis\.__linuxExecutor;(?:if\(process\.platform===["`]linux["`]\)return [^;]{1,80};)?throw (?:new )?Error\(["`]computer-use executor not implemented""",
+      """if\(process\.platform===["`]darwin["`]\)return [\w$]+(?:\.[\w$]+)*\([^;]{1,400}\);if\(process\.platform==="linux"&&globalThis\.__linuxExecutor\)return globalThis\.__linuxExecutor;(?:if\(process\.platform===["`]linux["`]\)return [^;]{1,80};)?throw (?:new )?Error\(["`]computer-use executor not implemented""",
     ),
-    lit(
+    rx(
       "4b cu lock acquire",
-      ",process.platform===\"linux\"&&globalThis.__linuxExecutor?.__setLockHeld?.(!0).catch?.(",
+      """,process\.platform==="linux"&&globalThis\.__linuxExecutor\?\.__setLockHeld\?\.\(!0,[\w$]+\)\.catch\?\.\(""",
     ),
     lit(
       "4b.2 cu lock release",
@@ -248,9 +465,19 @@ proc endStateMarkers(): seq[EndStateMarker] =
       "4e task boundary",
       """releaseRemoteCuLock:\(([\w$]+),([\w$]+)\)=>\{try\{process\.platform==="linux"&&globalThis\.__linuxExecutor\?\.__cuTaskBoundary\?\.\(\1\?\?void 0,\2==="stop_click"\?"stop_click":"renderer",exports\.[\w$]+\.currentHolder\)\?\.catch\?\.\(""",
     ),
-    lit(
-      "5 ensureOsPermissions",
-      "ensureOsPermissions:process.platform===\"linux\"?async()=>({granted:!0}):",
+    rx(
+      "4f session check accessor",
+      """refresh:[\w$]+\.refreshRemoteChromeSessionMode\}\}process\.platform==="linux"&&\(globalThis\.__cdbRemoteSessionMode=[\w$]+\);""",
+    ),
+    rx(
+      # The predicate's own definition (isBridgeComputerUsePlatform), so every
+      # consumer follows it.
+      "4g bridge platform predicate",
+      """function [\w$]+\(\)\{return![\w$]+\(\)\|\|process\.platform==="linux"&&globalThis\.__cdbCuWaylandAnnounce===!0\}""",
+    ),
+    rx(
+      "4h unhide routing",
+      """if\(process\.platform===["`]linux["`]\)\{if\(typeof globalThis\.__linuxExecutor\?\.__unhideApps==="function"\)\{await globalThis\.__linuxExecutor\.__unhideApps\(([\w$]+)\);return\}let\{unhideComputerUseAppsLinux:([\w$]+)\}=[^{}]{0,300}await \2\(\1\);return\}""",
     ),
     rx(
       "5b screenshot intro note (decl)",
@@ -281,32 +508,92 @@ proc endStateMarkers(): seq[EndStateMarker] =
       "9b working handler",
       """\(process\.platform!=="linux"&&[\w$]+\.setIgnoreMouseEvents\(!0,\{forward:!0\}\)\),[\w$]+(?:\.[\w$]+)*\.getDispatcher\(""",
     ),
-    rx(
-      "8a glow overlay",
-      """\{if\(process\.platform==="linux"&&globalThis\.__cuKwinMode\)return;[\w$]+(?:\.[\w$]+)*\.on\(["`]cuLockChanged["`],""",
-    ),
     lit("10 overlay transparency", "transparent:!globalThis.__isVM"),
     rx(
-      "10b overlay display",
-      """\{if\(process\.platform==="linux"\)([\w$]+)=null;return \1===null\?""",
+      "10b1 glow display switch",
+      r"\{[\w$]+===[\w$]+\.currentHolder&&[\w$]+\(" & escapeRe(DID_HEAD) &
+        r"[\w$]+\)\)\}",
     ),
     rx(
+      "10b2 glow display at lock",
+      r"let ([\w$]+)=" & escapeRe(DID_HEAD) &
+        r"[\w$]+\([\w$]+\)\);\1===void 0&&![\w$]+\.isDestroyed\(\)&&\(\1=[\w$]+\.screen\.getDisplayMatching\(",
+    ),
+    rx(
+      "10b3 teach display at teach start",
+      r"let ([\w$]+)=" & escapeRe(DID_HEAD) &
+        r"[\w$]+\.getSession\([\w$]+\)\?\.cuSelectedDisplayId\);\1===void 0&&",
+    ),
+    rx(
+      "10b4 teach display switch",
+      r"\.on\([""`]cuSelectedDisplayChanged[""`],\(\(\{sessionId:([\w$]+),displayId:([\w$]+)\}\)=>\{\1===[\w$]+&&[\w$]+\(" &
+        escapeRe(DID_HEAD) & r"\2\)\)\}\)\)",
+    ),
+    rx(
+      "10b5 target label display",
+      r"\.displayName;let [\w$]+=[\w$]+\(" & escapeRe(DID_HEAD) &
+        r"([\w$]+)\.displayId\?\?null\)\);",
+    ),
+    lit(
+      "10b display id helper (executor)",
+      "globalThis.__cdbCuElectronDisplayId=function(v){",
+    ),
+    rx(
+      "10c glow off on a background display",
+      # `{` pristine-adjacent, `;` once 10e put its takeover in front.
+      """[{;]if\(![\w$]+\|\|process\.platform==="linux"&&globalThis\.__cdbCuGlowOff\?\.\(\)===!0\)return Promise\.resolve\(\);""",
+    ),
+    lit("10c glow-off helper (executor)", "globalThis.__cdbCuGlowOff=function(){"),
+    rx(
       "11 isEnabled gate",
-      """function [\w$]+\((?:[\w$]+=\{\})?\)\{if\(process\.platform==="linux"\)return(?: ?!0| globalThis\.__cdbCuHipaa=[\w$]+,![\w$]+\(\));return ?!?(?:[\w$]+(?:\.[\w$]+)*\.has\(process\.platform\)|[\w$]+\(\))(?:\|\|[\w$]+\(\))?\?(?:!1:)?[\w$]+\([\w$]*\)&&[\w$]+(?:\.[\w$]+)*\(["'`]chicagoEnabled["'`]\)(?::!1)?\}""",
+      """function [\w$]+\((?:[\w$]+=\{\})?\)\{if\(process\.platform==="linux"\)return(?: ?!0| globalThis\.__cdbCuHipaa=[\w$]+,![\w$]+\(\)(?:&&[\w$]+\(\))?);return ?!?(?:[\w$]+(?:\.[\w$]+)*\.has\(process\.platform\)|[\w$]+\(\))(?:\|\|![\w$]+\(\))?(?:\|\|[\w$]+\(\))?\?(?:!1:)?[\w$]+\([\w$]*\)&&[\w$]+(?:\.[\w$]+)*\(["'`]chicagoEnabled["'`]\)(?::!1)?\}""",
     ),
     rx(
       "12 isRegisterable gate",
-      """function [\w$]+\((?:[\w$]+=\{\})?\)\{if\(process\.platform==="linux"\)return (?:[\w$]+\([\w$]*\)|!0);return [\w$]+(?:\.[\w$]+)*\(([\w$]+)\)\?(?:![\w$]+\(\)&&)?(?:[\w$]+(?:\.[\w$]+)*\.has\(process\.platform\)|[\w$]+\(\)&&[\w$]+\([\w$]+\))""",
+      """function [\w$]+\((?:[\w$]+=\{\})?\)\{if\(process\.platform==="linux"\)return (?:[\w$]+\([\w$]*\)|!0);return [\w$]+(?:\.[\w$]+)*\(([\w$]+)\)\?(?:![\w$]+\(\)&&)?(?:[\w$]+(?:\.[\w$]+)*\.has\(process\.platform\)|[\w$]+\(\)&&[\w$]+\([\w$]+\)|[\w$]+\(\)\|\|![\w$]+\(\)\?!1:[\w$]+\(\)&&[\w$]+\([\w$]+\))""",
+    ),
+    rx(
+      # Our assignment, right before the factory it calls.
+      "10d drawn pointer for the Linux executor",
+      """process\.platform==="linux"&&\(globalThis\.__cdbCuDrawnPointer=Object\.assign\(([\w$]+)\(e=>e\),\{live:([\w$]+)\(!1,\(\)=>!0\)\}\)\);function \1\([\w$]+\)\{return\{glideTo:\2\(0,""",
+    ),
+    rx(
+      "10e glow show to the Wayland overlay",
+      """\{if\(process\.platform==="linux"&&globalThis\.__cdbCuWlGlow\?\.show\?\.\([\w$]+,[\w$]+,[\w$]+\)===!0\)return Promise\.resolve\(\);if\(!""",
+    ),
+    rx(
+      "10f glow hide to the Wayland overlay",
+      """\(\)\{process\.platform==="linux"&&globalThis\.__cdbCuWlGlow\?\.hide\?\.\(\);if\(\+\+""",
+    ),
+    rx(
+      "10g glow display to the Wayland overlay",
+      """=[\w$]+\?\?null,process\.platform==="linux"&&globalThis\.__cdbCuWlGlow\?\.display\?\.\([\w$]+\),""",
+    ),
+    rx(
+      "10h glide planner for the Linux executor",
+      """process\.platform==="linux"&&\(globalThis\.__cdbCuGlidePlan=\{plan:([\w$]+),frameMs:\(\)=>[\w$]+\.frameMs\}\);function \1\(""",
     ),
     rx(
       "13a allowlist gate",
       """(?:=|:\()process\.platform==="linux"\?"":"The frontmost application must be in the session allowlist""",
+    ),
+    rx(
+      "13a.ask input sentence",
+      """\(process\.platform==="linux"&&globalThis\.__cdbCuConsent\?\.text\("input"\)\|\|\([\w$]+\.hitTest==="none"\?""",
     ),
     lit(
       "13b request_access prefix",
       "(process.platform===\"linux\"?(globalThis.__cuKwinMode?`This computer is running Linux with KDE Plasma. The file manager is \"Dolphin\". `",
     ),
     lit("13b.linux request_access X11 sentence", CU_X11_ACCESS_SENTENCE),
+    lit(
+      "13b.ask request_access prefix",
+      ":(globalThis.__cdbCuConsent?.text(\"prefix\")||`This computer is running Linux. ",
+    ),
+    lit(
+      "13b.linux.ask request_access sentence",
+      "(globalThis.__cdbCuConsent?.text(\"access\")||(globalThis.__cuKwinMode||process.env.XDG_SESSION_TYPE===\"wayland\"?",
+    ),
     rx(
       "13b.kwin-alias",
       """[\w$]+=globalThis\.__cuKwinMode\?[\w$]+\.map\(v=>v==="org\.kde\.plasmashell"\?"plasmashell":v\):[\w$]+,""",
@@ -337,15 +624,15 @@ proc endStateMarkers(): seq[EndStateMarker] =
     ),
     lit(
       "13e open_application allowlist",
-      "\"On Linux, all applications are directly accessible.\"",
+      "(globalThis.__cdbCuConsent?.text(\"openApp\")||\"On Linux, all applications are directly accessible.\")",
     ),
     lit(
       "13f screenshot description",
-      "\"Take a screenshot of the primary display. All open windows are visible.\"",
+      "(globalThis.__cdbCuConsent?.text(\"screenshot\")||\"Take a screenshot of the primary display. All open windows are visible.\")",
     ),
     lit(
       "13g screenshot suffix",
-      "(process.platform===\"linux\"?\" The returned image is what subsequent click coordinates are relative to.\"",
+      "(process.platform===\"linux\"?(globalThis.__cdbCuConsent?.text(\"shotSuffix\")||\" The returned image is what subsequent click coordinates are relative to.\")",
     ),
     lit(
       "14a same filesystem",
@@ -366,6 +653,106 @@ proc endStateMarkers(): seq[EndStateMarker] =
       "${globalThis.__cuKwinMode?' This computer is running Linux with KDE Plasma. The desktop shell is plasmashell.",
       2,
     ),
+    lit("1b accessibility tools runtime", "globalThis.__cdbAxTools=function(t){"),
+    rx(
+      "15a tool builder",
+      """\.\.\.\(process\.platform==="linux"&&globalThis\.__cdbAxTools\?\.\([\w$]+\)\|\|\[\]\)\]\}""",
+    ),
+    rx(
+      "15b tools/list cache key",
+      """\$\{process\.platform==="linux"&&\(globalThis\.__cdbAxKey\?\.\(\)\|\|""\)\+\(globalThis\.__cdbCuConsent\?\.key\?\.\(\)\|\|""\)\|\|""\}`;""",
+    ),
+    rx(
+      "15c read-only tools",
+      """return!\([\w$]+\.has\(([\w$]+)\)\|\|process\.platform==="linux"&&\(\1==="app_ax_find"\|\|\1==="app_list_windows"\)\)\}""",
+    ),
+    rx(
+      "15d.1 dispatch session id",
+      """,__cdbAxSid:process\.platform==="linux"\?[\w$]+\.sessionId:void 0\}""",
+    ),
+    rx(
+      "15d.2 dispatch",
+      """\{if\(process\.platform==="linux"&&globalThis\.__cdbAxHandles\?\.\([\w$]+\)\)return await globalThis\.__cdbAxCall\([\w$]+,[\w$]+,\{sid:[\w$]+\.__cdbAxSid,ctx:[\w$]+,tier:\(__cdbA,__cdbT\)=>[\w$]+\((?:[\w$]+,)?[\w$]+,__cdbA,__cdbT\)\}\);let [\w$]+=[\w$]+\.executor\.appScoped;""",
+    ),
+    rx(
+      "16a prompt suffix",
+      """function [\w$]+\(\)\{if\(process\.platform==="linux"\)\{let __cdbSpx;try\{__cdbSpx=globalThis\.__cdbCuConsent\?\.spSuffix\?\.\(\)\}catch\(__cdbSpe\)\{\}if\(typeof __cdbSpx==="string"\)return __cdbSpx\}return [\w$]+\.[\w$]+\(\)\?[`"]\\n\\nOn this system \(a Linux Wayland session\)""",
+    ),
+    rx(
+      "16b per-app access",
+      """computerUsePerAppAccess:\(process\.platform==="linux"&&typeof globalThis\.__cdbCuSharedScreen==="function"\?globalThis\.__cdbCuSharedScreen\(\):[\w$]+\(\)\)\?\{status:"unsupported",reason:"A Wayland session shares the whole screen""",
+    ),
+    rx(
+      "16c features broadcast",
+      """function ([\w$]+)\(\)\{for\(let ([\w$]+) of [\w$]+\)\2\(\)\}process\.platform==="linux"&&\(globalThis\.__cdbCuFeaturesChanged=\1\);""",
+    ),
+    rx(
+      # js/cu_share_stop.js embedded by Patch 1: its one definition.
+      "1 stop-sharing embed",
+      """globalThis\.__cdbCuShareStop=Object\.freeze\(""",
+    ),
+    rx(
+      # The runtime global's defining assignment, after upstream's function.
+      "17e expected-Escape marker",
+      """function [\w$]+\(\)\{[\w$]+\+\+,setTimeout\(\(?\(\)=>\{[\w$]+>0&&[\w$]+--\}\)?,100\)\}process\.platform==="linux"&&\(globalThis\.__cdbCuExpectEscape=[\w$]+\);""",
+    ),
+    rx(
+      # The runtime global's defining assignment, after upstream's lock-change function.
+      "17h Escape grab",
+      """===0\?[\w$]+\(\):[\w$]+\(\)\}process\.platform==="linux"&&\(globalThis\.__cdbCuEscGrab=\{suspend:function\(\)\{""",
+    ),
+    rx(
+      # The runtime global's defining assignment, after upstream's function.
+      "17c share-ended abort",
+      """\}process\.platform==="linux"&&\(globalThis\.__cdbCuShareEnded=[\w$]+\);""",
+    ),
+    rx(
+      "16e enable card screenshot filtering",
+      """screenshotFiltering:\(process\.platform==="linux"&&globalThis\.__cdbCuSharedScreen\?\.\(\)===!1\?globalThis\.__linuxExecutor\?\.capabilities\?\.screenshotFiltering\?\?"mask":[\w$]+\.[\w$]+\.screenshotFiltering\),(?:hostPlatform:[\w$]+\.[\w$]+\.platform,)?featureDisabled:!0""",
+      2,
+    ),
+    rx("7d teach gate", """/\*__cdbTeachKwin\*/"""),
+    rx(
+      "16d screen pseudo-grant",
+      """\{if\(process\.platform==="linux"&&globalThis\.__cdbCuNoScreenGrant\?\.\(\)===!0\|\|[\w$]+\.[\w$]+!==[\w$]+\.[\w$]+\|\|""",
+    ),
+    rx(
+      "16f cloud screen pseudo-grant",
+      """getAllowedApps:\(\)=>process\.platform==="linux"&&typeof globalThis\.__cdbCuWithScreenGrant=="function"\?globalThis\.__cdbCuWithScreenGrant\(""",
+    ),
+    rx(
+      "16f cloud grants stored without it",
+      """\.apps=process\.platform==="linux"\?\[\.\.\.[\w$]+\]\.filter\(__cuScr=>__cuScr\.bundleId!==[\w$]+\.[\w$]+\):\[\.\.\.[\w$]+\],""",
+    ),
+    rx(
+      # The runtime global's defining assignment, after upstream's function.
+      "17f dialog-open predicate",
+      """\{return [\w$]+>0\}process\.platform==="linux"&&\(globalThis\.__cdbCuDialogOpen=[\w$]+\);""",
+    ),
+    rx(
+      # Inside upstream's guard install branch (Wayland sessions only).
+      "17g own-input marker",
+      """\(([\w$]+)=!0,process\.platform==="linux"&&\(globalThis\.__cdbCuMarkInput=[\w$]+\),[\w$]+\(\),""",
+    ),
+    rx(
+      # The screenshot handler's two image returns (resolvePrepareCapture /
+      # screenshot()).
+      "5c screenshot mask note",
+      """\.\.\.\(process\.platform==="linux"&&globalThis\.__cdbCuShotNote\?\.\(([\w$]+)\.base64\)\|\|\[\]\),\{type:"image",data:\1\.base64,mimeType:"image/jpeg"\}\],screenshot:\1\}""",
+      2,
+    ),
+    rx(
+      "5c zoom mask note",
+      """\{content:\(__cdbZ=>\[\.\.\.\(process\.platform==="linux"&&globalThis\.__cdbCuShotNote\?\.\(__cdbZ\.base64\)\|\|\[\]\),\{type:"image",data:__cdbZ\.base64,mimeType:"image/jpeg"\}\]\)\(await [\w$]+\.executor\.zoom\(""",
+    ),
+    rx(
+      "5e no-screenshot coordinate frame",
+      """let __cdbCx=process\.platform==="linux"\?globalThis\.__linuxExecutor:null,__cdbCf=typeof __cdbCx\?\.__coldFrame==="function"\?\(__cdbF=>__cdbF&&__cdbF\.imgW>0&&__cdbF\.imgH>0\?__cdbF:!1\)\(__cdbCx\.__coldFrame\(([\w$]+),!0\)\):null,[\w$]+=__cdbCf\?Math\.round\([\w$]+\*\(\1\.width/__cdbCf\.imgW\)\)\+\1\.originX:__cdbCf===!1\?1/0:Math\.round\([\w$]+/\1\.scaleFactor\)\+\1\.originX,""",
+    ),
+    rx(
+      "5d teach-step refusal text",
+      """return ([\w$]+)\.isError\?process\.platform==="linux"\?\{content:\[\{type:"text",text:JSON\.stringify\(([\w$]+)\)\},\.\.\.\1\.content\]\}:[\w$]+\(\2\):\{content:""",
+    ),
   ]
 
 # ─── main patch ─────────────────────────────────────────────────────────────
@@ -375,13 +762,25 @@ proc apply*(input: string): string =
   let original = input
   var patchesApplied = 0
   var changes = 0
-  const EXPECTED_PATCHES = 38
+  const EXPECTED_PATCHES = 70
 
   let gateSet = cuPlatformSetName(content)
   if gateSet == "":
     raise newException(
       ValueError,
       "  [FAIL] CU platform gate (`return SET.has(process.platform)&&!(wayland()&&!portal())`, SET with linux) not found exactly once - re-audit",
+    )
+  # An older build of this patch turned upstream's drawn-pointer decision off
+  # on Linux (`function T(){if(process.platform==="linux")return!1;try{...`).
+  # That output is never accepted as patched: 10d now leaves the decision to
+  # upstream.
+  if countMatches(
+    content,
+    re"""function [\w$]+\(\)\{if\(process\.platform==="linux"\)return!1;try\{let ([\w$]+)=[\w$]+\(\);return \1==="default"\?[\w$]+\([\w$]+\):\1==="on"\}catch""",
+  ) != 0:
+    raise newException(
+      ValueError,
+      "  [FAIL] 10d: input carries the old \"drawn cursor off on Linux\" edit - use a fresh extract",
     )
   let markers = endStateMarkers()
   var present: seq[string] = @[]
@@ -410,6 +809,27 @@ proc apply*(input: string): string =
   block:
     let regularJs = LINUX_EXECUTOR_JS.strip()
     let kwinJs = buildKwinLinuxExecutorInjection().strip()
+    # The accessibility tools runtime (issue #306) goes after the executors: it
+    # hooks the executor's lock/task-boundary methods and asks it for its bridge.
+    let axJs = AX_TOOLS_JS.strip()
+    # The cloud-session check (issue #293) goes before both executors: each calls
+    # globalThis.__cdbCuSessionCheck at run time. The newline only keeps the
+    # embed and the executor code that follows on separate lines/statements.
+    let sessionJs = SESSION_CHECK_JS.strip()
+    # The display auto-target helper (which monitor holds the granted apps'
+    # windows) also goes before both executors: each calls
+    # globalThis.__cdbCuDisplayTarget from resolvePrepareCapture and
+    # findWindowDisplays at run time.
+    let displayTargetJs = DISPLAY_TARGET_JS.strip()
+    # The consent module ("Ask before Computer Use controls an app") goes last:
+    # it reads the executor and the app-id helper only at call time.
+    let consentJs = CONSENT_JS.strip()
+    # The Stop-sharing marker watch goes before both executors with the
+    # session check: each calls globalThis.__cdbCuShareStop at run time.
+    let shareStopJs = SHARE_STOP_JS.strip()
+    # The Wayland glow overlay (10e-10h) goes after the executors: it asks the
+    # executor for its row (__wlGlowRow) only at call time.
+    let wlGlowJs = WL_GLOW_JS.strip()
     # v1.26832.0 switched minifier: most string literals became backtick
     # template literals (app.on(`ready`)). Accept either quote style here and
     # everywhere else a literal is part of an anchor.
@@ -423,10 +843,12 @@ proc apply*(input: string): string =
       pat,
       proc(m: RegexMatch): string =
         m.captures[0] & "if(process.platform===\"linux\"){" & MODE_PREAMBLE_JS &
-          "if(globalThis.__cuKwinMode){" & kwinJs & "}else{" & regularJs & "}}",
+          sessionJs & "\n" & shareStopJs & "\n" & displayTargetJs & "\n" &
+          "if(globalThis.__cuKwinMode){" & kwinJs & "}else{" & regularJs & "}" & axJs &
+          "\n" & wlGlowJs & "\n" & consentJs & "}",
     )
     if n >= 1:
-      echo &"  [OK] Linux executor: injected regular + kwin-wayland variants ({n} match)"
+      echo &"  [OK] Linux executor: injected session check + regular + kwin-wayland variants ({n} match)"
       inc changes, n
       inc patchesApplied
     else:
@@ -471,8 +893,11 @@ proc apply*(input: string): string =
     # "frontmost" arm (the one 13a blanks on Linux) and the hitTest-keyed
     # dialog-focus refusals stay off. Upstream's own X11 executor spreads
     # LINUX into its capabilities, so LINUX itself is left untouched.
+    # v5.11492.0: `Y=!isWayland()` became the last declarator of its `var`
+    # list, so it ends in `;` instead of `,`; the separator is captured and
+    # written back as found.
     let pat =
-      re"""(?<![\w$.])([\w$]+)=([\w$]+)\(\)\?([\w$]+):([\w$]+),([\w$]+)=!\2\(\),"""
+      re"""(?<![\w$.])([\w$]+)=([\w$]+)\(\)\?([\w$]+):([\w$]+),([\w$]+)=!\2\(\)([,;])"""
     var found = 0
     var waylandPreset, nativePreset = ""
     for m in content.findIter(pat):
@@ -482,7 +907,7 @@ proc apply*(input: string): string =
     if found != 1:
       raise newException(
         ValueError,
-        &"  [FAIL] 2b PLATFORM_CAPABILITIES preset (`X=isWayland()?A:B,Y=!isWayland(),`): {found} matches, expected 1",
+        &"  [FAIL] 2b PLATFORM_CAPABILITIES preset (`X=isWayland()?A:B,Y=!isWayland()[,;]`): {found} matches, expected 1",
       )
     let nativeDecl = re(
       "(?<![\\w$.])" & escapeRe(nativePreset) &
@@ -506,7 +931,7 @@ proc apply*(input: string): string =
         let c = m.captures
         &"{c[0]}={c[1]}()?{c[2]}:process.platform===\"linux\"?" &
           "{screenshotFiltering:\"none\",platform:\"linux\"}" &
-          &":{c[3]},{c[4]}=!{c[1]}(),",
+          &":{c[3]},{c[4]}=!{c[1]}(){c[5]}",
     )
     if n != 1:
       raise newException(
@@ -562,11 +987,15 @@ proc apply*(input: string): string =
     # (`if(linux)return init(),isWayland()?portalExec(t):x11Exec(t);`). Ours
     # goes in front of it, so our bridges keep driving Linux CU and upstream's
     # native executor stays the fallback when no bridge executor was installed.
+    # 4.23118.0: the darwin arm's argument became an object literal
+    # (`t.Fm({...a,aimPhantomCursor:(e,n,r)=>...,placePhantomCursor:t.ur})`),
+    # so the argument is `[^;]{1,400}` (no `;` inside; the throw string pins
+    # the site), not a bare identifier.
     # NB: the throw interpolates `${process.platform}` - the placeholder body
     # contains a `.`, so it is `[\w$.]+` (NOT `[\w$]+`, which stops at the dot
     # and never reaches the closing `}` - a silent 0-match trap).
     let pat =
-      re"""(if\(process\.platform===["`]darwin["`]\)return [\w$]+(?:\.[\w$]+)*\([\w$]+\);)((?:if\(process\.platform===["`]linux["`]\)return [^;]{1,80};)?throw (?:new )?Error\(`computer-use executor not implemented for \$\{[\w$.]+\}`\))"""
+      re"""(if\(process\.platform===["`]darwin["`]\)return [\w$]+(?:\.[\w$]+)*\([^;]{1,400}\);)((?:if\(process\.platform===["`]linux["`]\)return [^;]{1,80};)?throw (?:new )?Error\(`computer-use executor not implemented for \$\{[\w$.]+\}`\))"""
     let n = replaceFirst(
       content,
       pat,
@@ -592,13 +1021,16 @@ proc apply*(input: string): string =
         "  [FAIL] platform executor factory: 0 matches (issue #159 throw-site anchor) - re-audit",
       )
 
-  # ── Patch 4b (kwin-wayland): cu lock acquire → __setLockHeld(true) ──────
+  # ── Patch 4b (kwin-wayland): cu lock acquire → __setLockHeld(true, holder) ──
   # v1.20186.1 refactored the lock class: `this.holder` became
   # `this.exclusiveHolder`, and acquire() changed from a `this.holder===void
   # 0&&(this.holder=X,emit(...),cb())` guarded expression into an early-return
   # guard shape ending in `return this.exclusiveHolder=X,emit(...),cb(),!0`.
   # The cuLockChanged emit is unchanged; anchor the acquire-side emit and inject
   # __setLockHeld(true) right before it.
+  # 4.4212.0 (#293): also pass the holder just assigned (the captured right-hand
+  # side of `this.exclusiveHolder=`, `e` in 4.4212.0), so the executor knows the
+  # cloud session id it may poll for the turn end (js/cu_session_check.js).
   block:
     # v1.26832.0: the trailing callback became a method call (`e.nn()`) and the
     # event name a backtick literal. Capture the whole emit-and-callback tail and
@@ -608,20 +1040,25 @@ proc apply*(input: string): string =
     # Allow (and keep verbatim) zero or more `this.<field>++,` steps there.
     let pat =
       re"""(return this\.exclusiveHolder=([\w$]+),(?:this\.[\w$]+\+\+,)*)(this\.emit\(["`]cuLockChanged["`],\{holder:\2\}\),[\w$]+(?:\.[\w$]+)*\(\),!0)"""
-    let n = replaceFirst(
-      content,
-      pat,
-      proc(m: RegexMatch): string =
-        m.captures[0] &
-          "process.platform===\"linux\"&&globalThis.__linuxExecutor?.__setLockHeld?.(!0).catch?.(e=>(globalThis.__cdbDiag||console.warn)(\"[linux-executor] failed to start bridge session on lock acquire\",e))," &
-          m.captures[2],
-    )
-    if n >= 1:
-      echo &"  [OK] cu lock acquire: start bridge session on Linux ({n} match)"
+    let hits = countMatches(content, pat)
+    var n = 0
+    if hits == 1:
+      n = replaceFirst(
+        content,
+        pat,
+        proc(m: RegexMatch): string =
+          m.captures[0] &
+            "process.platform===\"linux\"&&globalThis.__linuxExecutor?.__setLockHeld?.(!0," &
+            m.captures[1] &
+            ").catch?.(e=>(globalThis.__cdbDiag||console.warn)(\"[linux-executor] failed to start bridge session on lock acquire\",e))," &
+            m.captures[2],
+      )
+    if n == 1:
+      echo &"  [OK] 4b cu lock acquire: start bridge session on Linux, hand over the holder ({n} match)"
       inc changes, n
       inc patchesApplied
     else:
-      echo "  [FAIL] cu lock acquire pattern: 0 matches"
+      echo &"  [FAIL] 4b cu lock acquire pattern: {hits} matches, expected 1"
 
   # ── Patch 4b.2: cu lock release → __setLockHeld(false) ─────────────────
   # v1.20186.1: `this.holder` → `this.exclusiveHolder` (see Patch 4b).
@@ -668,9 +1105,14 @@ proc apply*(input: string): string =
   # shadowed at the handler site. The lock is the `<name>=new class extends
   # ...{...get currentHolder(){return this.exclusiveHolder}` instance that
   # Patches 4b/4b.2 hook (3.6556.2: `aJ`, exported as `ZC`).
+  #
+  # v5.11492.0: the handler first fans a Stop out to its listeners
+  # (`releaseRemoteCuLock:(e,t)=>{S3o(e,t),l3a(e??void 0,...)}`, S3o: `if(t===
+  # "stop_click"&&e!=null)for(let t of x3o)try{t(e)}catch{}`); that optional
+  # leading `<fn>(id,source),` call is kept after our hook.
   block:
     let handlerPat =
-      re"""(releaseRemoteCuLock:\(([\w$]+),([\w$]+)\)=>\{)([\w$]+\(\2\?\?void 0,\3===(["`])stop_click\5\?\5stop_click\5:\5renderer\5\)\})"""
+      re"""(releaseRemoteCuLock:\(([\w$]+),([\w$]+)\)=>\{)((?:[\w$]+\(\2,\3\),)?[\w$]+\(\2\?\?void 0,\3===(["`])stop_click\5\?\5stop_click\5:\5renderer\5\)\})"""
     let handlerHits = countMatches(content, handlerPat)
     if handlerHits != 1:
       echo &"  [FAIL] 4e releaseRemoteCuLock handler: {handlerHits} matches, expected 1"
@@ -735,22 +1177,191 @@ proc apply*(input: string): string =
           else:
             echo "  [FAIL] 4e releaseRemoteCuLock handler: replacement did not apply"
 
-  # ── Patch 5: ensureOsPermissions → skip TCC on Linux ───────────────────
+  # ── Patch 4f: session check accessor → globalThis.__cdbRemoteSessionMode ──
+  # Upstream main reaches its remote-session status check through a lazy
+  # accessor (4.4212.0: `ner` in index.chunk-CvhJZ02X.js):
+  #   async function ner(){if(AB!==void 0)return AB;let e=await Promise.resolve()
+  #   .then((()=>require("./index.chunk-CL5khZ71.js"))).then((e=>e.t));
+  #   return{resolve:e.resolveRemoteChromeSessionMode,
+  #   refresh:e.refreshRemoteChromeSessionMode}}
+  # We assign it, on Linux only, to globalThis.__cdbRemoteSessionMode right after
+  # its declaration; js/cu_session_check.js calls `(await it()).refresh(id)` while
+  # a portal session is up for a cloud Cowork holder (#293). No call of ours runs
+  # here, so nothing changes until the poller asks; off Linux nothing is assigned.
+  #
+  # refreshRemoteChromeSessionMode(id) (4.4212.0: `Xt` -> `Y` in
+  # index.chunk-CL5khZ71.js) GETs `/v1/code/sessions/<id>` (cookie auth, 5 s
+  # timeout, one retry on a transient result) and resolves to exactly one of:
+  #   HTTP 5xx/429/408, network error, timeout -> {ok:!1,transient:!0}
+  #   HTTP 404, or a body without a session    -> {ok:!1,notFound:!0}
+  #   any other non-2xx status                 -> {ok:!1}
+  #   success -> {ok:!0,mode,scheduledFire,triggerId,ended,coworkRemote,
+  #     projectThread,[codeCloud,browserHost],[deviceBound,boundDeviceId],
+  #     conversationUuid,terminal,unconfirmedChat,presentedChat,presentedPending,
+  #     hubChat,chatTabGroupKey,title}
+  # where `ended` is `o.status==="archived"||o.status==="failed"||
+  # o.worker_status==="idle"||o.worker_status==="running"&&
+  # o.connection_status==="disconnected"`. A non-ok, non-transient result is
+  # cached for 30 s and refresh() hands the cached failure back until then; an
+  # ok result is dropped from the cache and fetched again.
+  #
+  # Anchor: the function whose brace-free body ends in the
+  # `return{resolve:X.resolveRemoteChromeSessionMode,refresh:X.refreshRemoteChromeSessionMode}}`
+  # pair (the export names are the stable part), exactly once, with a require()
+  # of the module in that body. The `(?<=[;}])` lookbehind keeps it a statement-
+  # level declaration (4.4212.0: `var AB;async function ner(){...`), so the
+  # injected statement never lands in expression position.
   block:
-    let pat = re"""ensureOsPermissions:([\w$]+(?:\.[\w$]+)*)"""
-    let n = replaceFirst(
-      content,
-      pat,
-      proc(m: RegexMatch): string =
-        let fnName = m.captures[0]
-        &"ensureOsPermissions:process.platform===\"linux\"?async()=>({{granted:!0}}):{fnName}",
-    )
-    if n >= 1:
-      echo &"  [OK] ensureOsPermissions: skip TCC on Linux ({n} match)"
-      inc changes, n
-      inc patchesApplied
+    let pat =
+      re"""(?<=[;}])(async function ([\w$]+)\(\)\{([^{}]{0,400})return\{resolve:([\w$]+)\.resolveRemoteChromeSessionMode,refresh:\4\.refreshRemoteChromeSessionMode\}\})"""
+    let hits = countMatches(content, pat)
+    if hits != 1:
+      echo &"  [FAIL] 4f session check accessor: {hits} matches, expected 1"
     else:
-      echo "  [FAIL] ensureOsPermissions pattern: 0 matches"
+      let m0 = content.find(pat).get()
+      let fnName = m0.captures[1]
+      if "require(" notin m0.captures[2]:
+        echo &"  [FAIL] 4f session check accessor {fnName}: body does not require() the session module - re-audit"
+      else:
+        let n = replaceFirst(
+          content,
+          pat,
+          proc(m: RegexMatch): string =
+            m.captures[0] &
+              "process.platform===\"linux\"&&(globalThis.__cdbRemoteSessionMode=" &
+              m.captures[1] & ");",
+        )
+        if n == 1:
+          echo &"  [OK] 4f session check accessor: {fnName} exposed as globalThis.__cdbRemoteSessionMode on Linux (1 match)"
+          inc changes, n
+          inc patchesApplied
+        else:
+          echo "  [FAIL] 4f session check accessor: replacement did not apply"
+
+  # ── Patch 4g: isBridgeComputerUsePlatform passes on a usable Wayland bridge ──
+  # Upstream's device-bridge Computer Use (cloud Cowork, hub chat, Dispatch)
+  # goes through one predicate (4.23118.1: `U2r`, namespace key
+  # isBridgeComputerUsePlatform, export alias `EF`, in index.chunk-k6x_9PBk.js):
+  #   function U2r(){return!WO()}
+  #   var WO=()=>{let e=UO().XDG_SESSION_TYPE;return e?e==="wayland":
+  #     !!UO().WAYLAND_DISPLAY}
+  # It has three consumers, all wrong for our bridges on Wayland (issue #323):
+  #   - the remote-tools announce gate (`E4r`: `return Nb()||!U2r()||
+  #     !X("4293378213")?!1:...`, callers: the device bridge build,
+  #     cu_gate_reconcile, cu_preference_change) - every computer_* tool was
+  #     left out of the announce;
+  #   - the device-bridge call guard in the lazy chunk (`if(!e.EF())return R(
+  #     "Computer use over the device bridge is not supported on this platform
+  #     (on Linux it needs an Xorg session; ...")`) - every call was refused;
+  #   - getAppIconForBundleId (`{isBridgeComputerUsePlatform:i}=await ...;
+  #     if(!i()||...)return null`) - no app icons on the approval card.
+  # So the DEFINITION is rewritten: on Linux it also passes when
+  # js/cu_mode_preamble.js decided that a first-party bridge is usable on this
+  # session (globalThis.__cdbCuWaylandAnnounce === true, set once per process
+  # before the device connects; fallback routes leave it false). Every
+  # consumer, present or future, follows. X11, darwin and win32 are unchanged
+  # (`!M()` is true there or the global is never true); the HIPAA term and the
+  # GrowthBook gate 4293378213 of each consumer stay as upstream wrote them.
+  #
+  # Anchor: the un-minified namespace key `isBridgeComputerUsePlatform:()=>N`,
+  # exactly once. Pre-asserts: N is defined once as `function N(){return!M()}`,
+  # M is the XDG_SESSION_TYPE Wayland check, defined once. Post-asserts (fail
+  # loud, so a consumer moved onto another predicate breaks the build): the
+  # announce gate still calls N, and the device-bridge guard's
+  # `<ns>.<alias>()` resolves to N through the export getter of the chunk its
+  # `<ns>=require(...)` names.
+  block:
+    let keyPat = re"""isBridgeComputerUsePlatform:\(\)=>([\w$]+)[,}]"""
+    var keyNames: seq[string] = @[]
+    for m in content.findIter(keyPat):
+      keyNames.add m.captures[0]
+    if keyNames.len != 1:
+      echo &"  [FAIL] 4g isBridgeComputerUsePlatform namespace key: {keyNames.len} matches, expected 1"
+    else:
+      let nm = keyNames[0]
+      let nmEsc = escapeRe(nm)
+      let defPat = re("function " & nmEsc & """\(\)\{return!([\w$]+)\(\)\}""")
+      let defHits = countMatches(content, defPat)
+      if defHits != 1:
+        echo &"  [FAIL] 4g bridge platform predicate: {nm} defined as `return!M()` {defHits} times, expected 1 - re-audit"
+      else:
+        let mo = content.find(defPat).get().captures[0]
+        let moHits = waylandPredicateDefs(content, mo)
+        if moHits != 1:
+          echo &"  [FAIL] 4g bridge platform predicate: {mo} is not the XDG_SESSION_TYPE Wayland check ({moHits} definitions matched, expected 1) - re-audit"
+        else:
+          let gatePat = re(
+            """function [\w$]+\(\)\{return [\w$]+\(\)\|\|!""" & nmEsc &
+              """\(\)\|\|![\w$]+\(["'`]4293378213["'`]\)\?!1:"""
+          )
+          let gateHits = countMatches(content, gatePat)
+          let guardAlias = bridgeGuardAlias(content)
+          if gateHits != 1:
+            echo &"  [FAIL] 4g announce gate no longer calls {nm}() ({gateHits} matches of `return A()||!{nm}()||!C(\"4293378213\")?!1:`, expected 1) - re-audit"
+          elif guardAlias != nm:
+            echo &"  [FAIL] 4g device-bridge guard does not resolve to {nm} (resolved: '{guardAlias}') - re-audit"
+          else:
+            let n = replaceFirst(
+              content,
+              defPat,
+              proc(m: RegexMatch): string =
+                "function " & nm & "(){return!" & m.captures[0] &
+                  "()||process.platform===\"linux\"&&globalThis.__cdbCuWaylandAnnounce===!0}",
+            )
+            if n == 1:
+              echo &"  [OK] 4g bridge platform predicate: {nm}() = !{mo}() or a usable Linux bridge (announce gate + device-bridge guard + app icons, 1 definition)"
+              inc changes, n
+              inc patchesApplied
+            else:
+              echo "  [FAIL] 4g bridge platform predicate: replacement did not apply"
+
+  # ── Patch 4h: turn-end unhide → the Linux executor's __unhideApps ──────
+  # Upstream lifts what Computer Use hid during a turn through one function
+  # (4.4212.0: `Z9i`, exported as unhideComputerUseApps, in
+  # index.chunk-CvhJZ02X.js; callers: releaseTurnScopedState, the turn result /
+  # leavingRunning paths and the remote-tools path, each behind the
+  # chicagoAutoUnhide setting):
+  #   async function Z9i(e){if(e.length!==0){if(process.platform==="win32"){
+  #   let{unhideComputerUseAppsWin32:t}=await ...require("./<win chunk>")...;
+  #   await t(e);return}if(process.platform==="linux"){
+  #   let{unhideComputerUseAppsLinux:t}=await ...require("./<linux chunk>")...;
+  #   await t(e);return}await(await e3()).apps.unhide(e)}}
+  # Its Linux arm always loads upstream's own Linux executor module, whose
+  # unhide only knows windows upstream's executor hid, so the KWin executor's
+  # capture exclusions were never lifted through it. We put, at the start of
+  # the Linux arm, a call to the active Linux executor's __unhideApps(ids) when
+  # it has that method (js/executor_linux.js: restore-prepare-state); without
+  # it upstream's own Linux arm runs unchanged. Off Linux nothing changes.
+  # (Every turn end also lifts them on the CU lock release, regardless of
+  # chicagoAutoUnhide: js/executor_linux.js __setLockHeld(false).)
+  #
+  # Anchor: the function whose body is `if(P.length!==0){if(process.platform==="win32")
+  # {let{unhideComputerUseAppsWin32:..}=...}if(process.platform==="linux"){
+  # let{unhideComputerUseAppsLinux:X}=...;await X(P);return}`, exactly once (the
+  # export names are the stable part).
+  block:
+    let pat =
+      re"""(async function ([\w$]+)\(([\w$]+)\)\{if\(\3\.length!==0\)\{if\(process\.platform===(["`])win32\4\)\{let\{unhideComputerUseAppsWin32:[\w$]+\}=[^{}]{0,300}\}if\(process\.platform===\4linux\4\)\{)(let\{unhideComputerUseAppsLinux:([\w$]+)\}=[^{}]{0,300}await \6\(\3\);return\})"""
+    let hits = countMatches(content, pat)
+    if hits != 1:
+      echo &"  [FAIL] 4h unhide routing: {hits} matches of upstream's unhide function, expected 1"
+    else:
+      let fnName = content.find(pat).get().captures[1]
+      let n = replaceFirst(
+        content,
+        pat,
+        proc(m: RegexMatch): string =
+          m.captures[0] &
+            "if(typeof globalThis.__linuxExecutor?.__unhideApps===\"function\"){" &
+            "await globalThis.__linuxExecutor.__unhideApps(" & m.captures[2] &
+            ");return}" & m.captures[4],
+      )
+      if n == 1:
+        echo &"  [OK] 4h unhide routing: {fnName}'s Linux arm calls the Linux executor's __unhideApps when present (1 match)"
+        inc changes, n
+        inc patchesApplied
+      else:
+        echo "  [FAIL] 4h unhide routing: replacement did not apply"
 
   # ── Patch 5b (kwin-wayland): screenshot intro note workaround ──────────
   block:
@@ -909,6 +1520,75 @@ proc apply*(input: string): string =
     inc changes
     inc patchesApplied
 
+  # ── Patch 6b: full grant level in the regular executor mode ─────────────
+  block:
+    # "Ask before Computer Use controls an app" sends request_access through
+    # upstream's own handleToolCall (js/cu_handler_injection.js). Upstream
+    # grants browsers at level "read" and terminals/IDEs at "click"; only its
+    # `cuOnlyMode` context flag proposes and stores "full" for every app (and
+    # drops the read/click first-request warnings that go with those levels).
+    # The flag is one property of the per-session dispatch context builder:
+    #   cuOnlyMode:process.env.COWORK_CU_ONLY!=="0"&&<flag>("3371831021")
+    # Linux regular mode sets it whatever the ask switch says (the switch only
+    # decides whether a Code session's request_access reaches upstream at all;
+    # upstream's own request_access / request_teach_access - teach mode, cloud
+    # Cowork - get full-level grants in regular mode either way); kwin mode
+    # keeps upstream's levels. Cowork's own cuOnlyMode (the system prompt /
+    # tool set one) is a separate value and is not touched.
+    let pat = re"""cuOnlyMode:(process\.env\.COWORK_CU_ONLY!==["`]0["`]&&)"""
+    let found = countMatches(content, pat)
+    if found != 1:
+      raise newException(
+        ValueError,
+        &"  [FAIL] 6b cuOnlyMode context flag (`cuOnlyMode:process.env.COWORK_CU_ONLY!==\"0\"&&`): {found} matches, expected 1 - re-audit",
+      )
+    let n = replaceFirst(
+      content,
+      pat,
+      proc(m: RegexMatch): string =
+        "cuOnlyMode:process.platform===\"linux\"&&!globalThis.__cuKwinMode||" &
+          m.captures[0],
+    )
+    if n != 1:
+      raise newException(
+        ValueError, &"  [FAIL] 6b cuOnlyMode context flag: {n} rewrites, expected 1"
+      )
+    echo "  [OK] 6b grant level: full for every approved app in regular mode (1 match)"
+    inc changes
+    inc patchesApplied
+
+  # ── Patch 6c: sentinel warnings see our canonical app ids ──────────────
+  block:
+    # Upstream's request_access card marks terminals, file managers and system
+    # settings (isSentinel) from executable names ("gnome-terminal-server",
+    # "nautilus", "dolphin", ...). The regular executor's app ids are .desktop
+    # ids ("org.gnome.Nautilus"), so the predicate also tries the id's aliases
+    # (StartupWMClass, Exec, the resolved executable) on Linux. Anchored on the
+    # classifier's last return so the predicate right after it is the one.
+    let pat =
+      re"""(return["`]system_settings["`]\}return null\}function ([\w$]+)\(([\w$]+)\)\{return ([\w$]+)\(\3\)!==null)\}"""
+    let found = countMatches(content, pat)
+    if found != 1:
+      raise newException(
+        ValueError,
+        &"  [FAIL] 6c sentinel predicate (`return\"system_settings\"}}return null}}function S(e){{return x(e)!==null}}`): {found} matches, expected 1 - re-audit",
+      )
+    let n = replaceFirst(
+      content,
+      pat,
+      proc(m: RegexMatch): string =
+        let c = m.captures
+        c[0] & "||process.platform===\"linux\"&&(globalThis.__cdbCuAppIds?.aliasesOf?.(" &
+          c[2] & ")||[]).some(__cdbS=>" & c[3] & "(__cdbS)!==null)}",
+    )
+    if n != 1:
+      raise newException(
+        ValueError, &"  [FAIL] 6c sentinel predicate: {n} rewrites, expected 1"
+      )
+    echo "  [OK] 6c sentinel predicate: Linux app ids classified by their aliases (1 match)"
+    inc changes
+    inc patchesApplied
+
   var overlayVarOpt: Option[string]
 
   # ── Patch 7b (kwin-wayland): teach overlay bridge-backed init ──────────
@@ -967,6 +1647,62 @@ proc apply*(input: string): string =
           echo "  [OK] cu side-panel: Linux bridge-backed init"
           inc changes
           inc patchesApplied
+
+  # ── Patch 7d (kwin-wayland): teach mode on KDE Wayland ────────────────
+  # Upstream turns teach mode off on every Wayland session: its overlay is an
+  # Electron click-through window (4.23118.1, k6x_9PBk):
+  #   Z2r=!WO()                          CLICK_THROUGH_WINDOWS
+  #   function t3r(){return Z2r?f4r()?!0:(e3r??=wx(EU,"teachModeEnabled",!0,O()),e3r):!1}
+  #                                      getChicagoTeachModeEnabled
+  # so in kwin mode the teach tools were never listed (session server tool
+  # builder `teachMode:t.iF()`, local agent `hn=dn&&t.iF()`) and 7b's
+  # bridge-backed teach controller never ran. The KWin executor draws teach
+  # steps through kwin-portal-bridge's own overlay and says so with
+  # `__teachOverlay: true` (js/executor_linux.js). The first term becomes
+  # `Z2r || (Linux && kwin mode && that flag)`; the rest of the getter (the
+  # override and the server-side teachModeEnabled value) is kept verbatim.
+  # Anchor: the getter, exactly once. Cross-checks: its first term is
+  # CLICK_THROUGH_WINDOWS (namespace key, once) and is defined once as
+  # `=!M()` with M the XDG_SESSION_TYPE Wayland check.
+  block:
+    let pat =
+      re"""function ([\w$]+)\(\)\{return ([\w$]+)\?([\w$]+)\(\)\?!0:\(([\w$]+)\?\?=([\w$]+)\(([\w$]+),["'`]teachModeEnabled["'`],!0,([\w$]+)\(\)\),\4\):!1\}"""
+    var hits: seq[RegexMatch] = @[]
+    for m in content.findIter(pat):
+      hits.add m
+    if hits.len != 1:
+      echo &"  [FAIL] 7d teach gate (`function G(){{return C?O()?!0:(v??=r(n,\"teachModeEnabled\",!0,o()),v):!1}}`): {hits.len} matches, expected 1"
+    else:
+      let fnName = hits[0].captures[0]
+      let ct = hits[0].captures[1]
+      let ctEsc = escapeRe(ct)
+      let keyHits =
+        countMatches(content, re("""CLICK_THROUGH_WINDOWS:\(\)=>""" & ctEsc & "[,}]"))
+      let defPat = re("(?<![\\w$.])" & ctEsc & """=!([\w$]+)\(\)""")
+      var defs: seq[string] = @[]
+      for m in content.findIter(defPat):
+        defs.add m.captures[0]
+      if keyHits != 1:
+        echo &"  [FAIL] 7d teach gate {fnName}: {ct} is not CLICK_THROUGH_WINDOWS ({keyHits} namespace keys, expected 1) - re-audit"
+      elif defs.len != 1 or waylandPredicateDefs(content, defs[0]) != 1:
+        echo &"  [FAIL] 7d teach gate {fnName}: {ct} is not defined once as `=!M()` with M the XDG_SESSION_TYPE Wayland check ({defs.len} definitions) - re-audit"
+      else:
+        let n = replaceFirst(
+          content,
+          pat,
+          proc(m: RegexMatch): string =
+            let whole = m.match
+            let head = "function " & m.captures[0] & "(){return " & m.captures[1] & "?"
+            "function " & m.captures[0] & "(){return(" & m.captures[1] &
+              "||/*__cdbTeachKwin*/process.platform===\"linux\"&&globalThis.__cuKwinMode===!0&&globalThis.__linuxExecutor?.__teachOverlay===!0)?" &
+              whole[head.len ..^ 1],
+        )
+        if n == 1:
+          echo &"  [OK] 7d teach gate: {fnName}() also on in kwin mode with the bridge's teach overlay ({ct} = !{defs[0]}(), 1 match)"
+          inc changes
+          inc patchesApplied
+        else:
+          echo "  [FAIL] 7d teach gate: replacement did not apply"
 
   # ── Patch 8: teach overlay mouse — tooltip-bounds polling on Linux ─────
   var overlayVar: string
@@ -1040,28 +1776,6 @@ proc apply*(input: string): string =
       else:
         echo "  [FAIL] teach overlay: SUn pattern not found"
 
-  # ── Patch 8a (kwin-wayland): disable glow overlay ──────────────────────
-  block:
-    # v1.26832.0: the emitter is reached through a module namespace (`N.t.on(...)`)
-    # and the event name is a backtick literal. Capture the whole `.on(...)` head
-    # and re-emit it instead of rebuilding it from an identifier.
-    let pat =
-      re"""(function [\w$]+\(([\w$]+),([\w$]+)\)\{)([\w$]+(?:\.[\w$]+)*\.on\(["`]cuLockChanged["`],)"""
-    let n = replaceFirst(
-      content,
-      pat,
-      proc(m: RegexMatch): string =
-        m.captures[0] &
-          "if(process.platform===\"linux\"&&globalThis.__cuKwinMode)return;" &
-          m.captures[3],
-    )
-    if n >= 1:
-      echo &"  [OK] cu glow overlay: disabled in kwin-wayland mode ({n} match)"
-      inc changes, n
-      inc patchesApplied
-    else:
-      echo "  [FAIL] cu glow overlay pattern: 0 matches"
-
   # ── Patch 10: teach overlay VM-aware transparency ──────────────────────
   block:
     # Python walks ALL matches and picks the first whose 80-byte prefix contains "workArea".
@@ -1092,23 +1806,537 @@ proc apply*(input: string): string =
     if not applied:
       echo "  [FAIL] teach overlay transparency pattern not found"
 
-  # ── Patch 10b: xlr() force primary monitor on Linux ────────────────────
+  # ── Patches 10b1-10b5: the selected display reaches upstream as an Electron id
+  # Upstream's overlay display resolver (4.23118.1 names):
+  #   function xui(e){return e===null?u.screen.getPrimaryDisplay():
+  #     u.screen.getAllDisplays().find((t=>t.id===e))??u.screen.getPrimaryDisplay()}
+  # takes Electron display ids: the macOS executor's display ids are Electron
+  # ids. The Linux executor's are list indexes (the session's
+  # cuSelectedDisplayId, a screenshot's displayId), so they never matched and
+  # every overlay sat on Electron's primary. The resolver also receives REAL
+  # Electron ids (the main window's display, upstream's fallback), and on
+  # EDID-less X11 outputs Electron ids are small integers too, so the resolver
+  # cannot tell the two apart. The selected id is translated where it ENTERS
+  # the overlay code instead (DID_HEAD -> js/cu_linux_executor.js
+  # __cdbCuElectronDisplayId); the resolver and its main-window fallback stay
+  # byte-unchanged. The entries, every caller checked:
+  #   10b1 glow setter from cuSelectedDisplayChanged: Jvo(sid,id) (its three
+  #        registrations: two session managers' cuSelectedDisplayChanged and
+  #        the remote-tools callback FOa)
+  #   10b2 glow setter at lock: Yvo's cuLockChanged `let r=e(n)` (the session's
+  #        cuSelectedDisplayId ?? store ?? remote host), BEFORE the fallback
+  #   10b3 teach setter at teach start: `let n=e.getSession(t)?.cuSelectedDisplayId`
+  #   10b4 teach setter from cuSelectedDisplayChanged
+  #   10b5 the screenshot target label: Nui's `xui(e.displayId??null)`
+  # The glow setter (Wvo) and teach setter (Oyo) have no other callers.
+  # v5.1231.0 added a drawn-cursor redraw after the glow setter's setBounds:
+  #   function UUo(e){VUo=e??null,M7&&!M7.isDestroyed()&&(M7.setBounds(HUo().bounds),FQa())}
+  # (FQa repaints the pointer upstream draws in the glow, see 10d). Either
+  # shape is accepted; the selected id still enters through the same callers.
+  block:
+    let glowSetterRe =
+      re"""function ([\w$]+)\(([\w$]+)\)\{[\w$]+=\2\?\?null,([\w$]+)&&!\3\.isDestroyed\(\)&&(?:\3\.setBounds\([\w$]+\(\)\.bounds\)|\(\3\.setBounds\([\w$]+\(\)\.bounds\),[\w$]+\(\)\))\}"""
+    let teachSetterRe =
+      re"""function ([\w$]+)\(([\w$]+)\)\{[\w$]+=\2\?\?null;let ([\w$]+)=[\w$]+\(\);\3&&\3\.setBounds\([\w$]+\(\)\.workArea\)\}"""
+    let resolverRe =
+      re"""function ([\w$]+)\(([\w$]+)\)\{return \2===null\?[\w$]+\.screen\.getPrimaryDisplay\(\):[\w$]+\.screen\.getAllDisplays\(\)\.find\(\(?([\w$]+)\)?=>\3\.id===\2\)?\)\?\?[\w$]+\.screen\.getPrimaryDisplay\(\)\}"""
+    proc onlyName(c: string, pat: Regex, what: string): string =
+      var names: seq[string] = @[]
+      for m in c.findIter(pat):
+        names.add m.captures[0]
+      if names.len != 1:
+        echo &"  [FAIL] 10b {what}: {names.len} definitions, expected 1 - re-audit"
+        return ""
+      names[0]
+
+    let glowSetter = onlyName(
+      content, glowSetterRe,
+      "glow setter `function W(e){H=e??null,j&&!j.isDestroyed()&&(j.setBounds(U().bounds),R())}`",
+    )
+    let teachSetter = onlyName(
+      content, teachSetterRe,
+      "teach setter `function O(e){T=e??null;let t=L();t&&t.setBounds(k().workArea)}`",
+    )
+    let resolver = onlyName(content, resolverRe, "overlay display resolver")
+    if glowSetter != "" and teachSetter != "" and resolver != "":
+      let g = escapeRe(glowSetter)
+      let t = escapeRe(teachSetter)
+      let r = escapeRe(resolver)
+      # (label, pattern, rebuild from captures)
+      type Site = tuple[label: string, pat: Regex, build: proc(m: RegexMatch): string]
+      let sites: seq[Site] =
+        @[
+          (
+            "10b1 glow display switch",
+            re(r"\{([\w$]+)===([\w$]+)\.currentHolder&&(" & g & r")\(([\w$]+)\)\}"),
+            proc(m: RegexMatch): string =
+              "{" & m.captures[0] & "===" & m.captures[1] & ".currentHolder&&" &
+                m.captures[2] & "(" & DID_HEAD & m.captures[3] & "))}",
+          ),
+          (
+            "10b2 glow display at lock",
+            re(
+              r"let ([\w$]+)=([\w$]+\([\w$]+\));(\1===void 0&&!([\w$]+)\.isDestroyed\(\)&&\(\1=[\w$]+\.screen\.getDisplayMatching\(\4\.getBounds\(\)\)\.id\)," &
+                g & r"\(\1\),)"
+            ),
+            proc(m: RegexMatch): string =
+              "let " & m.captures[0] & "=" & DID_HEAD & m.captures[1] & ");" &
+                m.captures[2],
+          ),
+          (
+            "10b3 teach display at teach start",
+            re(
+              r"let ([\w$]+)=([\w$]+\.getSession\([\w$]+\)\?\.cuSelectedDisplayId);(\1===void 0&&([\w$]+)&&!\4\.isDestroyed\(\)&&\(\1=[\w$]+\.screen\.getDisplayMatching\(\4\.getBounds\(\)\)\.id\)," &
+                t & r"\(\1\))"
+            ),
+            proc(m: RegexMatch): string =
+              "let " & m.captures[0] & "=" & DID_HEAD & m.captures[1] & ");" &
+                m.captures[2],
+          ),
+          (
+            "10b4 teach display switch",
+            re(
+              r"(\.on\([""`]cuSelectedDisplayChanged[""`],\(\(\{sessionId:([\w$]+),displayId:([\w$]+)\}\)=>\{\2===[\w$]+&&" &
+                t & r"\()\3\)\}\)\)"
+            ),
+            proc(m: RegexMatch): string =
+              m.captures[0] & DID_HEAD & m.captures[2] & "))}))",
+          ),
+          (
+            "10b5 target label display",
+            re(
+              r"(function [\w$]+\(([\w$]+)\)\{if\(\2\.mode===[""`]app[""`]\)return \2\.displayName;let [\w$]+=" &
+                r & r"\()(\2\.displayId\?\?null)\);"
+            ),
+            proc(m: RegexMatch): string =
+              m.captures[0] & DID_HEAD & m.captures[2] & "));",
+          ),
+        ]
+      for site in sites:
+        var hits = 0
+        for m in content.findIter(site.pat):
+          inc hits
+        if hits != 1:
+          echo &"  [FAIL] {site.label}: {hits} matches, expected 1 - re-audit"
+          continue
+        let n = replaceFirst(content, site.pat, site.build)
+        if n == 1:
+          echo &"  [OK] {site.label}: Linux display id -> Electron id (glow {glowSetter}, teach {teachSetter}, resolver {resolver}; 1 match)"
+          inc changes
+          inc patchesApplied
+        else:
+          echo &"  [FAIL] {site.label}: replacement did not apply"
+
+  # ── Patch 10c: no glow for a background display ────────────────────────
+  # Upstream's glow show (4.23118.1: `function Kvo(e){if(!Z2r)return
+  # Promise.resolve();...`) already skips the glow where it cannot draw it
+  # (Z2r = CLICK_THROUGH_WINDOWS = not a Wayland session). On Linux it also
+  # skips it while the executor says __cdbCuGlowOff() (target mode: Computer
+  # Use works on a background display, not the user's monitors; or an X11
+  # session without a compositing manager, where Electron would draw the
+  # transparent glow as an opaque black screen - x11-bridge doctor
+  # capabilities.compositing, issue #327). Anchor: the
+  # show function exactly once, its flag the CLICK_THROUGH_WINDOWS key, and its
+  # one call the cuLockChanged handler's "[cu-glow] showGlow failed" catch.
   block:
     let pat =
-      re"""(function [\w$]+\(([\w$]+)\)\{)(return \2===null\?[\w$]+\.screen\.getPrimaryDisplay\(\):[\w$]+\.screen\.getAllDisplays\(\)\.find)"""
-    let n = replaceFirst(
-      content,
-      pat,
-      proc(m: RegexMatch): string =
-        let param = m.captures[1]
-        m.captures[0] & &"if(process.platform===\"linux\"){param}=null;" & m.captures[2],
-    )
-    if n >= 1:
-      echo &"  [OK] teach overlay display: forced to primary monitor on Linux ({n} match)"
-      inc changes, n
-      inc patchesApplied
+      re"""function ([\w$]+)\(([\w$]+)\)\{if\(!([\w$]+)\)return Promise\.resolve\(\);([\w$]+)&&=\(clearTimeout\(\4\),null\);"""
+    var hits: seq[RegexMatch] = @[]
+    for m in content.findIter(pat):
+      hits.add m
+    if hits.len != 1:
+      echo &"  [FAIL] 10c glow show (`function K(e){{if(!CT)return Promise.resolve();T&&=(clearTimeout(T),null);`): {hits.len} matches, expected 1"
     else:
-      echo "  [FAIL] xlr display resolver pattern: 0 matches (teach may appear on wrong monitor)"
+      let fnName = hits[0].captures[0]
+      let ct = hits[0].captures[2]
+      let keyHits = countMatches(
+        content, re("""CLICK_THROUGH_WINDOWS:\(\)=>""" & escapeRe(ct) & "[,}]")
+      )
+      let callHits = countMatches(
+        content,
+        re(
+          "(?<![\\w$.])" & escapeRe(fnName) &
+            """\(\)\.catch\(\(?[\w$]+\)?=>\{?[\w$]+\.warn\(["'`]\[cu-glow\] showGlow failed"""
+        ),
+      )
+      if keyHits != 1:
+        echo &"  [FAIL] 10c glow show {fnName}: {ct} is not CLICK_THROUGH_WINDOWS ({keyHits} namespace keys, expected 1) - re-audit"
+      elif callHits != 1:
+        echo &"  [FAIL] 10c glow show {fnName}: not the cuLockChanged glow call ({callHits} `{fnName}().catch(...[cu-glow] showGlow failed` sites, expected 1) - re-audit"
+      else:
+        let n = replaceFirst(
+          content,
+          pat,
+          proc(m: RegexMatch): string =
+            "function " & m.captures[0] & "(" & m.captures[1] & "){if(!" & m.captures[2] &
+              "||process.platform===\"linux\"&&globalThis.__cdbCuGlowOff?.()===!0)return Promise.resolve();" &
+              m.captures[3] & "&&=(clearTimeout(" & m.captures[3] & "),null);",
+        )
+        if n == 1:
+          echo &"  [OK] 10c glow show {fnName}: off on a background display or without a compositing manager (1 match)"
+          inc changes
+          inc patchesApplied
+        else:
+          echo "  [FAIL] 10c glow show: replacement did not apply"
+
+  # ── Patch 10d: upstream's drawn pointer for the Linux executor ─────────
+  # v5.1231.0 can draw its own pointer in the glow window (GrowthBook flag
+  # 1916550538): with the flag on the glow show swaps the pulsing glow for a
+  # thin rim and places an arrow at screen.getCursorScreenPoint()
+  #   r=(e?.claudeHasThePointer??!0)&&toi(); ... r?NQa(e,NUo):PQa()
+  # Upstream's executors move that arrow through the object its factory
+  # returns (5.1231.2 names):
+  #   function IQa(e){return{glideTo:L4(0,((t,n)=>{let r=e(n);...})),
+  #     jumpTo:L4(void 0,...),press:L4(void 0,...),realPointerGoesTo:L4(void 0,...)}}
+  # (createDarwinExecutor: drawnPointer:IQa((e=>e)); upstream's own Linux and
+  # win32 executors: drawnPointer:t.Qm(e=>r.screen.screenToDipPoint(e))). L4
+  # makes every method a no-op returning its first argument unless the glow
+  # window shows the arrow. Our Linux executor replaces upstream's, so nothing
+  # fed the arrow. On Linux the factory's result is exposed as
+  # globalThis.__cdbCuDrawnPointer for js/cu_linux_executor.js, which feeds it
+  # on X11 exactly as upstream's input mixin does. The mapper is the identity:
+  # our executor receives Electron DIP points (the handler maps image pixels to
+  # DIP, x11-bridge gets them through _x11Px), the space the glow window bounds
+  # and getCursorScreenPoint() use; upstream's own Linux executor works in
+  # screen pixels, hence its screenToDipPoint. `live` (L4(!1,()=>!0)) answers
+  # whether the arrow is shown right now, with upstream's own test. Wayland
+  # sessions show no glow upstream (their overlay rows, kwin mode included,
+  # use js/cu_wl_glow.js's own arrow), a background display and X11 without a
+  # compositing manager turn it off (10c): the arrow is never live there and
+  # the executor does not call it. The flag
+  # decision (toi) stays upstream's.
+  # Anchor: the factory exactly once, its four methods once each through the
+  # same wrapper, the wrapper's shape (default unless the arrow is shown), and
+  # one darwin executor consumer.
+  block:
+    let pat =
+      re"""(?<![\w$.])function ([\w$]+)\(([\w$]+)\)\{return\{glideTo:([\w$]+)\(0,\(\(([\w$]+),([\w$]+)\)=>\{let [\w$]+=\2\(\5\);"""
+    var hits: seq[RegexMatch] = @[]
+    for m in content.findIter(pat):
+      hits.add m
+    if hits.len != 1:
+      echo &"  [FAIL] 10d drawn pointer factory (`function F(e){{return{{glideTo:W(0,((t,n)=>{{let r=e(n);`): {hits.len} matches, expected 1 - re-audit"
+    else:
+      let at = hits[0].matchBounds.a
+      let fnName = hits[0].captures[0]
+      let wrap = hits[0].captures[2]
+      let w = escapeRe(wrap)
+      let body = content[at ..< min(content.len, at + 3000)]
+      var methodsOk = true
+      var missing = ""
+      for meth in ["jumpTo", "press", "realPointerGoesTo"]:
+        let inFn = countMatches(body, re(meth & ":" & w & """\(void 0,"""))
+        let all = countMatches(content, re("[{,]" & meth & ":" & w & """\(void 0,"""))
+        if inFn != 1 or all != 1:
+          methodsOk = false
+          missing.add &" {meth}({inFn} in the factory, {all} in the bundle)"
+      let wrapHits = countMatches(
+        content,
+        re(
+          "function " & w &
+            """\(([\w$]+),([\w$]+)\)\{return\(\.\.\.([\w$]+)\)=>\{let ([\w$]+)=[\w$]+;try\{return [\w$]+\(\)&&\4\?\2\(\4,\.\.\.\3\):\1\}"""
+        ),
+      )
+      let darwinHits = countMatches(
+        content,
+        re("drawnPointer:" & escapeRe(fnName) & """\(\(?\(?[\w$]+\)?=>[\w$]+\)?\)"""),
+      )
+      let prev = (if at > 0: content[at - 1] else: ';')
+      if not methodsOk:
+        echo &"  [FAIL] 10d drawn pointer factory {fnName}: methods not found exactly once through {wrap}:{missing} - re-audit"
+      elif wrapHits != 1:
+        echo &"  [FAIL] 10d drawn pointer factory {fnName}: wrapper {wrap} is not `function W(e,t){{return(...n)=>{{let r=N;try{{return G()&&r?t(r,...n):e}}` ({wrapHits} definitions, expected 1) - re-audit"
+      elif darwinHits != 1:
+        echo &"  [FAIL] 10d drawn pointer factory {fnName}: not the darwin executor's drawnPointer ({darwinHits} `drawnPointer:{fnName}(e=>e)` sites, expected 1) - re-audit"
+      elif prev notin {';', '}', '\n'}:
+        echo &"  [FAIL] 10d drawn pointer factory {fnName}: not at a statement boundary (preceded by '{prev}') - re-audit"
+      else:
+        let inject =
+          "process.platform===\"linux\"&&(globalThis.__cdbCuDrawnPointer=Object.assign(" &
+          fnName & "(e=>e),{live:" & wrap & "(!1,()=>!0)}));"
+        content = content[0 ..< at] & inject & content[at .. ^1]
+        echo &"  [OK] 10d drawn pointer factory {fnName} (wrapper {wrap}): exposed to the Linux executor, DIP mapper (1 match)"
+        inc changes
+        inc patchesApplied
+
+  # ── Patches 10e-10h: upstream's glow on a Wayland row -> js/cu_wl_glow.js ─
+  # Upstream's glow lifecycle (5.1231.2 names, main chunk):
+  #   show    function GUo(e){if(!pai)return Promise.resolve();IUo&&=(...);
+  #             let t=++BUo;N7(!0);let n=e?.showBadge??!0,
+  #             r=(e?.claudeHasThePointer??!0)&&toi();...e.setBounds(HUo().bounds)...}
+  #           (10c added `||linux&&__cdbCuGlowOff()` to its gate). Callers: the
+  #           cuLockChanged handler `UUo(r),GUo().catch(...showGlow failed)`
+  #           and, through its export, watch-record's
+  #           `t.dr({showBadge:!1,claudeHasThePointer:!1})` (outside a lock).
+  #   hide    function KUo(){if(++BUo,PQa(),!M7||M7.isDestroyed()){N7(!1);return}...}
+  #           Callers: the same handler's release arm, watch-record's `t.cr()`.
+  #   display function UUo(e){VUo=e??null,M7&&!M7.isDestroyed()&&(M7.setBounds(HUo().bounds),FQa())}
+  #           Callers: the handler (`UUo(r)` before the show), the glow switch
+  #           (10b1), watch-record's `t.ur(...)`.
+  # pai = CLICK_THROUGH_WINDOWS = !isWayland(), so on any Wayland session
+  # (XWayland included) upstream's show returns at once and draws nothing.
+  # 10e puts js/cu_wl_glow.js's show in front of that gate: it answers true
+  # only on a Wayland row whose bridge can draw the overlay, inside a lock,
+  # and then upstream's body is skipped (it would draw nothing); false runs
+  # upstream's own body unchanged (X11, macOS/Windows, Wayland rows without
+  # the overlay, watch-record outside a lock). It gets upstream's options, its
+  # display getter (HUo) and its drawn-cursor flag decision (toi, flag
+  # 1916550538), so look and display are upstream's own decisions. 10f / 10g
+  # call the module first in the hide and display setter; upstream's bodies
+  # still run (no window exists on Wayland, so they do nothing there). 10h
+  # exposes upstream's glide planner (rQa: the arc, tilt and lift frames its
+  # drawn arrow animates) and its frame interval as globalThis.__cdbCuGlidePlan.
+  # Anchors: each function exactly once, tied to each other through the
+  # shared generation counter, busy setter, window and getter; the getter is
+  # the overlay display resolver's (10b); the flag decision reads 1916550538;
+  # every direct caller counted (the show and hide each once, from the lock
+  # handler; the display setter twice) and the one cross-chunk show caller
+  # passes claudeHasThePointer:!1; the planner is the one the drawn-pointer
+  # factory (10d) calls with its interpolated position.
+  block:
+    let showPat =
+      re"""(function ([\w$]+)\(([\w$]+)\)\{)(if\(!([\w$]+)\|\|process\.platform==="linux"&&globalThis\.__cdbCuGlowOff\?\.\(\)===!0\)return Promise\.resolve\(\);([\w$]+)&&=\(clearTimeout\(\6\),null\);let ([\w$]+)=\+\+([\w$]+);([\w$]+)\(!0\);let [\w$]+=\3\?\.showBadge\?\?!0,[\w$]+=\(\3\?\.claudeHasThePointer\?\?!0\)&&([\w$]+)\(\);)"""
+    var shows: seq[RegexMatch] = @[]
+    for m in content.findIter(showPat):
+      shows.add m
+    let resolverRe =
+      re"""function ([\w$]+)\(([\w$]+)\)\{return \2===null\?[\w$]+\.screen\.getPrimaryDisplay\(\):[\w$]+\.screen\.getAllDisplays\(\)\.find\(\(?([\w$]+)\)?=>\3\.id===\2\)?\)\?\?[\w$]+\.screen\.getPrimaryDisplay\(\)\}"""
+    var resolvers: seq[string] = @[]
+    for m in content.findIter(resolverRe):
+      resolvers.add m.captures[0]
+    proc callers(c, name: string): int =
+      ## `name(` call sites, the definition excluded.
+      countMatches(c, re("(?<![\\w$.])" & escapeRe(name) & "\\(")) -
+        countMatches(c, re("function " & escapeRe(name) & "\\("))
+
+    if shows.len != 1:
+      echo &"  [FAIL] 10e glow show (10c-patched `function G(e){{if(!CT||...)return Promise.resolve();...claudeHasThePointer??!0)&&F();`): {shows.len} matches, expected 1 - re-audit"
+    elif resolvers.len != 1:
+      echo &"  [FAIL] 10e overlay display resolver: {resolvers.len} definitions, expected 1 - re-audit"
+    else:
+      let sm = shows[0]
+      let showFn = sm.captures[1]
+      let param = sm.captures[2]
+      let gen = sm.captures[7]
+      let busy = sm.captures[8]
+      let flagFn = sm.captures[9]
+      let resolver = resolvers[0]
+      let body = content[sm.matchBounds.a ..< min(content.len, sm.matchBounds.a + 2500)]
+      # The getter the show sizes its window with, the window it shows.
+      let boundsRe =
+        re"""\(([\w$]+)\.isDestroyed\(\)\|\|\(\1\.setBounds\(([\w$]+)\(\)\.bounds\),\1\.isVisible\(\)\|\|\1\.showInactive\(\)"""
+      var getter = ""
+      var boundsHits = 0
+      for m in body.findIter(boundsRe):
+        inc boundsHits
+        getter = m.captures[1]
+      let getterOk =
+        getter != "" and
+        countMatches(
+          content,
+          re(
+            "function " & escapeRe(getter) & "\\(\\)\\{return " & escapeRe(resolver) &
+              "\\([\\w$]+\\)\\}"
+          ),
+        ) == 1
+      let flagRe = re(
+        "function " & escapeRe(flagFn) &
+          """\(\)\{try\{let ([\w$]+)=[\w$]+\(\);return \1==="default"\?[\w$]+\(([\w$]+)\):\1==="on"\}catch"""
+      )
+      var flagVar = ""
+      var flagHits = 0
+      for m in content.findIter(flagRe):
+        inc flagHits
+        flagVar = m.captures[1]
+      let flagOk =
+        flagHits == 1 and
+        countMatches(
+          content, re("(?<![\\w$.])" & escapeRe(flagVar) & "=\"1916550538\"")
+        ) == 1
+      let lockCall = countMatches(
+        content,
+        re(
+          "(?<![\\w$.])" & escapeRe(showFn) &
+            """\(\)\.catch\(\(?[\w$]+\)?=>\{?[\w$]+\.warn\(["'`]\[cu-glow\] showGlow failed"""
+        ),
+      )
+      # Its export key, and the one namespace call through it (watch-record).
+      var exportKey = ""
+      var exportHits = 0
+      for m in content.findIter(
+        re(
+          """Object\.defineProperty\(exports,"([\w$]+)",\{enumerable:!0,get:function\(\)\{return """ &
+            escapeRe(showFn) & "\\}\\}\\)"
+        )
+      ):
+        inc exportHits
+        exportKey = m.captures[0]
+      let watchCall =
+        if exportKey == "":
+          0
+        else:
+          countMatches(
+            content,
+            re(
+              "[\\w$]\\." & escapeRe(exportKey) &
+                """\(\{showBadge:!1,claudeHasThePointer:!1\}\)\.catch\("""
+            ),
+          )
+      if boundsHits != 1 or not getterOk:
+        echo &"  [FAIL] 10e glow show {showFn}: its display getter is not `function G(){{return {resolver}(X)}}` ({boundsHits} setBounds sites, getter '{getter}') - re-audit"
+      elif not flagOk:
+        echo &"  [FAIL] 10e glow show {showFn}: {flagFn}() is not the flag 1916550538 decision ({flagHits} definitions) - re-audit"
+      elif callers(content, showFn) != 1 or lockCall != 1:
+        echo &"  [FAIL] 10e glow show {showFn}: {callers(content, showFn)} direct callers ({lockCall} lock-handler calls), expected the lock handler only - re-audit"
+      elif exportHits != 1 or watchCall != 1:
+        echo &"  [FAIL] 10e glow show {showFn}: export '{exportKey}' ({exportHits}) with {watchCall} watch-record calls `{{showBadge:!1,claudeHasThePointer:!1}}`, expected 1 each - re-audit"
+      else:
+        let n = replaceFirst(
+          content,
+          showPat,
+          proc(m: RegexMatch): string =
+            m.captures[0] &
+              "if(process.platform===\"linux\"&&globalThis.__cdbCuWlGlow?.show?.(" &
+              param & "," & getter & "," & flagFn & ")===!0)return Promise.resolve();" &
+              m.captures[3],
+        )
+        if n == 1:
+          echo &"  [OK] 10e glow show {showFn}: Wayland overlay rows go to js/cu_wl_glow.js (getter {getter}, flag {flagFn}; 1 match)"
+          inc changes
+          inc patchesApplied
+        else:
+          echo "  [FAIL] 10e glow show: replacement did not apply"
+
+        # 10f: the hide, tied to the show's generation counter and busy setter.
+        let hidePat = re(
+          "(function ([\\w$]+)\\(\\)\\{)(if\\(\\+\\+" & escapeRe(gen) &
+            ",([\\w$]+)\\(\\),!([\\w$]+)\\|\\|\\5\\.isDestroyed\\(\\)\\)\\{" &
+            escapeRe(busy) & "\\(!1\\);return\\})"
+        )
+        var hides: seq[RegexMatch] = @[]
+        for m in content.findIter(hidePat):
+          hides.add m
+        if hides.len != 1:
+          echo &"  [FAIL] 10f glow hide (`function H(){{if(++{gen},X(),!W||W.isDestroyed()){{{busy}(!1);return}}`): {hides.len} matches, expected 1 - re-audit"
+        else:
+          let hideFn = hides[0].captures[1]
+          let win = hides[0].captures[4]
+          let releaseCall = countMatches(
+            content,
+            re(
+              "\\}else " & escapeRe(hideFn) &
+                """\(\)\}\)\),[\w$]+\.info\(["'`]\[cu-glow\] initialized"""
+            ),
+          )
+          if callers(content, hideFn) != 1 or releaseCall != 1:
+            echo &"  [FAIL] 10f glow hide {hideFn}: {callers(content, hideFn)} direct callers ({releaseCall} in the lock handler's release arm), expected 1 - re-audit"
+          else:
+            let nh = replaceFirst(
+              content,
+              hidePat,
+              proc(m: RegexMatch): string =
+                m.captures[0] &
+                  "process.platform===\"linux\"&&globalThis.__cdbCuWlGlow?.hide?.();" &
+                  m.captures[2],
+            )
+            if nh == 1:
+              echo &"  [OK] 10f glow hide {hideFn}: js/cu_wl_glow.js first, upstream's body unchanged (1 match)"
+              inc changes
+              inc patchesApplied
+            else:
+              echo "  [FAIL] 10f glow hide: replacement did not apply"
+
+            # 10g: the display setter on the same window and getter.
+            let dispPat = re(
+              "(function ([\\w$]+)\\(([\\w$]+)\\)\\{[\\w$]+=\\3\\?\\?null,)(" &
+                escapeRe(win) & "&&!" & escapeRe(win) & "\\.isDestroyed\\(\\)&&\\(" &
+                escapeRe(win) & "\\.setBounds\\(" & escapeRe(getter) &
+                "\\(\\)\\.bounds\\),[\\w$]+\\(\\)\\)\\})"
+            )
+            var disps: seq[RegexMatch] = @[]
+            for m in content.findIter(dispPat):
+              disps.add m
+            if disps.len != 1:
+              echo &"  [FAIL] 10g glow display setter (`function S(e){{V=e??null,{win}&&!{win}.isDestroyed()&&({win}.setBounds({getter}().bounds),R())}}`): {disps.len} matches, expected 1 - re-audit"
+            else:
+              let dispFn = disps[0].captures[1]
+              # The lock handler (before the show) and the glow switch (10b1).
+              let atLock = countMatches(
+                content,
+                re(
+                  "(?<![\\w$.])" & escapeRe(dispFn) & "\\(([\\w$]+)\\)," &
+                    escapeRe(showFn) & "\\(\\)\\.catch\\("
+                ),
+              )
+              if callers(content, dispFn) != 2 or atLock != 1:
+                echo &"  [FAIL] 10g glow display setter {dispFn}: {callers(content, dispFn)} direct callers ({atLock} right before the show), expected 2 - re-audit"
+              else:
+                let nd = replaceFirst(
+                  content,
+                  dispPat,
+                  proc(m: RegexMatch): string =
+                    m.captures[0] &
+                      "process.platform===\"linux\"&&globalThis.__cdbCuWlGlow?.display?.(" &
+                      getter & ")," & m.captures[3],
+                )
+                if nd == 1:
+                  echo &"  [OK] 10g glow display setter {dispFn}: js/cu_wl_glow.js follows the display (1 match)"
+                  inc changes
+                  inc patchesApplied
+                else:
+                  echo "  [FAIL] 10g glow display setter: replacement did not apply"
+
+  block:
+    let planPat =
+      re"""(?<![\w$.])function ([\w$]+)\(([\w$]+),([\w$]+)\)\{let [\w$]+=([\w$]+),[\w$]+=\3\.x-\2\.x,[\w$]+=\3\.y-\2\.y,([\w$]+)=Math\.hypot\([\w$]+,[\w$]+\);if\(\5<\.5\)return\{durationMs:0,arriveMs:0,frames:\[\]\};"""
+    var plans: seq[RegexMatch] = @[]
+    for m in content.findIter(planPat):
+      plans.add m
+    if plans.len != 1:
+      echo &"  [FAIL] 10h glide planner (`function P(e,t){{let n=C,r=t.x-e.x,...;if(a<.5)return{{durationMs:0,arriveMs:0,frames:[]}};`): {plans.len} matches, expected 1 - re-audit"
+    else:
+      let at = plans[0].matchBounds.a
+      let planFn = plans[0].captures[0]
+      let cfg = plans[0].captures[3]
+      let cfgDecl = re("(?<![\\w$.])" & escapeRe(cfg) & "=\\{baseMs:")
+      var cfgAt = -1
+      var cfgHits = 0
+      for m in content.findIter(cfgDecl):
+        inc cfgHits
+        cfgAt = m.matchBounds.a
+      let cfgOk =
+        cfgHits == 1 and cfgAt < at and
+        content[cfgAt ..< min(content.len, cfgAt + 600)].contains("frameMs:")
+      # The drawn-pointer factory (10d) calls it with its interpolated
+      # position: `...&&P(I(),r)` once, inside the factory.
+      let facPat = re"""(?<![\w$.])function ([\w$]+)\(([\w$]+)\)\{return\{glideTo:"""
+      var facAt = -1
+      var facHits = 0
+      for m in content.findIter(facPat):
+        inc facHits
+        facAt = m.matchBounds.a
+      let useRe = re("&&" & escapeRe(planFn) & "\\([\\w$]+\\(\\),[\\w$]+\\)")
+      let useAll = countMatches(content, useRe)
+      let useIn =
+        if facAt < 0:
+          0
+        else:
+          countMatches(content[facAt ..< min(content.len, facAt + 1500)], useRe)
+      let prev = (if at > 0: content[at - 1] else: ';')
+      if not cfgOk:
+        echo &"  [FAIL] 10h glide planner {planFn}: its config {cfg} is not the one `{cfg}={{baseMs:...frameMs:...}}` before it ({cfgHits} declarations) - re-audit"
+      elif facHits != 1 or useAll != 1 or useIn != 1:
+        echo &"  [FAIL] 10h glide planner {planFn}: not the drawn-pointer factory's planner ({facHits} factories, {useAll} `&&{planFn}(I(),r)` calls, {useIn} inside it) - re-audit"
+      elif prev notin {';', '}', '\n'}:
+        echo &"  [FAIL] 10h glide planner {planFn}: not at a statement boundary (preceded by '{prev}') - re-audit"
+      else:
+        let inject =
+          "process.platform===\"linux\"&&(globalThis.__cdbCuGlidePlan={plan:" & planFn &
+          ",frameMs:()=>" & cfg & ".frameMs});"
+        content = content[0 ..< at] & inject & content[at .. ^1]
+        echo &"  [OK] 10h glide planner {planFn} (config {cfg}): exposed to js/cu_wl_glow.js (1 match)"
+        inc changes
+        inc patchesApplied
 
   # ── Patch 11: force the primary CU enable gate → true on Linux ──────────
   block:
@@ -1163,6 +2391,17 @@ proc apply*(input: string): string =
     #   function aV(e={}){return!$B()||cb()?!1:iV(e)&&nb("chicagoEnabled")}
     # iV() now also requires the Linux rollout flag 3676943315; the Linux
     # branch bypasses it like it bypasses the rest of the rollout gate.
+    # v5.1231.0 adds the managed `computerUseEnabled` key (admin switch) to
+    # the gate, ahead of the HIPAA gate:
+    #   function EW(e={}){return!SW()||!_W()||bb()?!1:TW(e)&&ub("chicagoEnabled")}
+    #   function _W(){return Yl()&&K().type==="3p"&&W1e()||V1e()!==!1}
+    #   function V1e(){let{value:e,errors:t}=H1e();return S1e(t,"computerUseEnabled")?!1:...}
+    # Upstream applies it on every platform (TW, the rollout gate, also opens
+    # with `if(!_W())return!1;`), so the Linux branch keeps it: an admin's
+    # `computerUseEnabled:false` turns Computer Use off on Linux as it does on
+    # macOS/Windows. Only the platform/rollout/chicagoEnabled parts stay forced.
+    let patV5 =
+      re"""(function [\w$]+\(([\w$]+)=\{\}\)\{)return![\w$]+(?:\.[\w$]+)*\(\)\|\|!([\w$]+)\(\)\|\|([\w$]+)\(\)\?!1:[\w$]+\(\2\)&&[\w$]+(?:\.[\w$]+)*\(["'`]chicagoEnabled["'`]\)\}"""
     let patV19675 =
       re"""(function [\w$]+\(([\w$]+)=\{\}\)\{)return![\w$]+(?:\.[\w$]+)*\(\)\|\|([\w$]+)\(\)\?!1:[\w$]+\(\2\)&&[\w$]+(?:\.[\w$]+)*\(["'`]chicagoEnabled["'`]\)\}"""
     let patV46388 =
@@ -1176,18 +2415,66 @@ proc apply*(input: string): string =
       re"""(function [\w$]+\(\)\{)return [\w$]+\.has\(process\.platform\)&&[\w$]+\(\)\}"""
     let patOld =
       re"""(function [\w$]+\(\)\{)return [\w$]+\([\w$]+\)\?[\w$]+\.has\(process\.platform\)&&[\w$]+\(\):[\w$]+\(\)\}"""
-    var n = replaceFirst(
-      content,
-      patV19675,
-      proc(m: RegexMatch): string =
-        let bounds = m.matchBounds
-        let whole = content[bounds.a .. bounds.b]
-        let headerLen = m.captures[0].len
-        let hipaaName = m.captures[2]
-        m.captures[0] & "if(process.platform===\"linux\")return globalThis.__cdbCuHipaa=" &
-          hipaaName & ",!" & hipaaName & "();" & whole[headerLen ..^ 1],
-    )
-    if n == 0:
+    var n = 0
+    var v5Hits: seq[RegexMatch] = @[]
+    for m in content.findIter(patV5):
+      v5Hits.add m
+    if v5Hits.len > 1:
+      echo &"  [FAIL] 11 isEnabled gate: {v5Hits.len} v5 shapes, expected 1 - re-audit"
+    elif v5Hits.len == 1:
+      # The middle gate must be the managed computerUseEnabled check:
+      # `function M(){return ...||R()!==!1}` with R reading the key.
+      let managed = v5Hits[0].captures[2]
+      var readers: seq[string] = @[]
+      for d in content.findIter(
+        re(
+          "function " & escapeRe(managed) &
+            """\(\)\{return [^{}]{0,120}\|\|([\w$]+)\(\)!==!1\}"""
+        )
+      ):
+        readers.add d.captures[0]
+      let readerOk =
+        readers.len == 1 and
+        countMatches(
+          content,
+          re(
+            "function " & escapeRe(readers[0]) &
+              """\(\)\{let\{value:[\w$]+,errors:[\w$]+\}=[\w$]+\(\);return [\w$]+\([\w$]+,"computerUseEnabled"\)"""
+          ),
+        ) == 1
+      if not readerOk:
+        echo &"  [FAIL] 11 isEnabled gate: {managed}() is not the managed computerUseEnabled check ({readers.len} definitions) - re-audit"
+      else:
+        n = replaceFirst(
+          content,
+          patV5,
+          proc(m: RegexMatch): string =
+            let bounds = m.matchBounds
+            let whole = content[bounds.a .. bounds.b]
+            let headerLen = m.captures[0].len
+            let managedName = m.captures[2]
+            let hipaaName = m.captures[3]
+            m.captures[0] &
+              "if(process.platform===\"linux\")return globalThis.__cdbCuHipaa=" &
+              hipaaName & ",!" & hipaaName & "()&&" & managedName & "();" &
+              whole[headerLen ..^ 1],
+        )
+        if n == 1:
+          echo &"  [OK] 11 isEnabled: Linux keeps the managed computerUseEnabled check {managed}() and the HIPAA gate"
+    if n == 0 and v5Hits.len == 0:
+      n = replaceFirst(
+        content,
+        patV19675,
+        proc(m: RegexMatch): string =
+          let bounds = m.matchBounds
+          let whole = content[bounds.a .. bounds.b]
+          let headerLen = m.captures[0].len
+          let hipaaName = m.captures[2]
+          m.captures[0] &
+            "if(process.platform===\"linux\")return globalThis.__cdbCuHipaa=" & hipaaName &
+            ",!" & hipaaName & "();" & whole[headerLen ..^ 1],
+      )
+    if n == 0 and v5Hits.len == 0:
       n = replaceFirst(
         content,
         patV46388,
@@ -1200,7 +2487,7 @@ proc apply*(input: string): string =
             "if(process.platform===\"linux\")return globalThis.__cdbCuHipaa=" & hipaaName &
             ",!" & hipaaName & "();" & whole[headerLen ..^ 1],
       )
-    if n == 0:
+    if n == 0 and v5Hits.len == 0:
       n = replaceFirst(
         content,
         patV26832,
@@ -1211,7 +2498,7 @@ proc apply*(input: string): string =
           m.captures[0] & "if(process.platform===\"linux\")return!0;" &
             whole[headerLen ..^ 1],
       )
-    if n == 0:
+    if n == 0 and v5Hits.len == 0:
       n = replaceFirst(
         content,
         patV18286,
@@ -1222,7 +2509,7 @@ proc apply*(input: string): string =
           m.captures[0] & "if(process.platform===\"linux\")return!0;" &
             whole[headerLen ..^ 1],
       )
-    if n == 0:
+    if n == 0 and v5Hits.len == 0:
       n = replaceFirst(
         content,
         patNew,
@@ -1233,7 +2520,7 @@ proc apply*(input: string): string =
           m.captures[0] & "if(process.platform===\"linux\")return!0;" &
             whole[headerLen ..^ 1],
       )
-    if n == 0:
+    if n == 0 and v5Hits.len == 0:
       n = replaceFirst(
         content,
         patOld,
@@ -1245,7 +2532,7 @@ proc apply*(input: string): string =
             whole[headerLen ..^ 1],
       )
     if n >= 1:
-      echo &"  [OK] isEnabled: force true on Linux ({n} match)"
+      echo &"  [OK] isEnabled: Linux branch injected ({n} match)"
       inc changes, n
       inc patchesApplied
     else:
@@ -1280,8 +2567,12 @@ proc apply*(input: string): string =
     # hasComputerUseExecutor() instead of testing the Set:
     #   function f4n(e={}){return jb(J2n)?!cb()&&$B()&&iV(e):aV(e)}
     # Delegate to the Patch-11 gate with the same arg.
+    # v5.1231.0 adds the managed computerUseEnabled check to the flag-on arm:
+    #   function Vai(e={}){return X(hai)?bb()||!_W()?!1:SW()&&TW(e):EW(e)}
+    # The Linux branch still delegates to the Patch-11 gate (EW), which keeps
+    # both the HIPAA gate and the managed key on Linux.
     let patV19675 =
-      re"""(function [\w$]+\(([\w$]+)=\{\}\)\{)return [\w$]+(?:\.[\w$]+)*\([\w$]+\)\?(?:![\w$]+\(\)&&)?[\w$]+\(\)&&[\w$]+\(\2\):([\w$]+)\(\2\)\}"""
+      re"""(function [\w$]+\(([\w$]+)=\{\}\)\{)return [\w$]+(?:\.[\w$]+)*\([\w$]+\)\?(?:(?:![\w$]+\(\)&&)?[\w$]+\(\)&&[\w$]+\(\2\)|[\w$]+\(\)\|\|![\w$]+\(\)\?!1:[\w$]+\(\)&&[\w$]+\(\2\)):([\w$]+)\(\2\)\}"""
     let patV26832 =
       re"""(function [\w$]+\(\)\{)return [\w$]+(?:\.[\w$]+)*\(([\w$]+)\)\?(?:![\w$]+\(\)&&)?[\w$]+(?:\.[\w$]+)*\.has\(process\.platform\)&&[\w$]+\(\):([\w$]+)\(\)\}"""
     let patBue =
@@ -1301,6 +2592,23 @@ proc apply*(input: string): string =
         m.captures[0] & "if(process.platform===\"linux\")return " & wsName & "(" & arg &
           ");" & whole[headerLen ..^ 1],
     )
+    if n == 1:
+      # The delegate must be the Patch-11 gate (now carrying the Linux branch).
+      var delegates = 0
+      for m in content.findIter(
+        re"""function ([\w$]+)\([\w$]+=\{\}\)\{if\(process\.platform==="linux"\)return ([\w$]+)\([\w$]+\);"""
+      ):
+        if countMatches(
+          content,
+          re(
+            "function " & escapeRe(m.captures[1]) &
+              """\([\w$]+=\{\}\)\{if\(process\.platform==="linux"\)return globalThis\.__cdbCuHipaa="""
+          ),
+        ) == 1:
+          inc delegates
+      if delegates != 1:
+        echo &"  [FAIL] 12 isRegisterable gate: does not delegate to the Patch-11 gate ({delegates} delegates) - re-audit"
+        n = -1
     if n == 0:
       n = replaceFirst(
         content,
@@ -1349,28 +2657,26 @@ proc apply*(input: string): string =
 
   # 13a: Lf allowlist gate → empty on Linux
   block:
-    let pat =
-      re"""([\w$]+)=["`]The frontmost application must be in the session allowlist at the time of this call, or this tool returns an error and does nothing\.["`]"""
-    var n = replaceFirst(
-      content,
-      pat,
-      proc(m: RegexMatch): string =
-        let v = m.captures[0]
-        &"{v}=process.platform===\"linux\"?\"\":\"The frontmost application must be in the session allowlist at the time of this call, or this tool returns an error and does nothing.\"",
-    )
     # v2.19675.1: the sentence is the else-arm of a hitTest ternary
-    # (`i=t.hitTest==="none"?"<shared-screen text>":"The frontmost ..."`), no
-    # longer its own assignment. Wrap that arm instead.
-    if n == 0:
-      let patV19675 =
-        re"""([\w$]+\.hitTest==="none"\?"[^"]*":)("The frontmost application must be in the session allowlist at the time of this call, or this tool returns an error and does nothing\.")"""
+    # (`i=t.hitTest==="none"?"<shared-screen text>":"The frontmost ..."`).
+    # Wrap that arm (empty on Linux), and the whole ternary in the live
+    # "Ask before Computer Use controls an app" sentence, which is "" while
+    # the switch is off (js/cu_consent.js text("input")).
+    let patV19675 =
+      re"""([\w$]+\.hitTest==="none"\?"[^"]*":)("The frontmost application must be in the session allowlist at the time of this call, or this tool returns an error and does nothing\.")"""
+    let found13a = countMatches(content, patV19675)
+    var n = 0
+    if found13a == 1:
       n = replaceFirst(
         content,
         patV19675,
         proc(m: RegexMatch): string =
-          m.captures[0] & "(process.platform===\"linux\"?\"\":" & m.captures[1] & ")",
+          "(process.platform===\"linux\"&&globalThis.__cdbCuConsent?.text(\"input\")||(" &
+            m.captures[0] & "(process.platform===\"linux\"?\"\":" & m.captures[1] & ")))",
       )
-    if n >= 1:
+    else:
+      echo &"  [FAIL] 13a frontmost sentence (hitTest ternary): {found13a} matches, expected 1"
+    if n == 1:
       echo "  [OK] 13a Lf allowlist gate: empty on Linux"
       inc descChanges
       inc patchesApplied
@@ -1393,13 +2699,14 @@ proc apply*(input: string): string =
     let new13b =
       "(process.platform===\"linux\"?(globalThis.__cuKwinMode?" &
       "`This computer is running Linux with KDE Plasma. The file manager is \"Dolphin\". `" &
-      ":" & "`This computer is running Linux. " &
+      ":(globalThis.__cdbCuConsent?.text(\"prefix\")||" &
+      "`This computer is running Linux. " &
       "On Linux, ALL applications are automatically accessible at full " &
       "tier without explicit permission grants. You do NOT need to call " &
       "request_access before using other tools. If called, it returns " &
       "synthetic grant confirmations. The file manager depends on the " &
       "desktop environment (e.g. Nautilus on GNOME, Dolphin on KDE, " &
-      "Thunar on XFCE). `)" & ":" &
+      "Thunar on XFCE). `))" & ":" &
       "`This computer is running macOS. The file manager is \"Finder\". `)"
     if replaceLiteralFirstAny(content, old13b, new13b) == 1:
       echo "  [OK] 13b request_access: 3-way (kwin-wayland=KDE/Dolphin, regular=generic Linux, other=macOS)"
@@ -1427,8 +2734,8 @@ proc apply*(input: string): string =
         content,
         pat,
         proc(m: RegexMatch): string =
-          "(globalThis.__cuKwinMode||process.env.XDG_SESSION_TYPE===\"wayland\"?" &
-            m.match & ":" & CU_X11_ACCESS_SENTENCE & ")",
+          "(globalThis.__cdbCuConsent?.text(\"access\")||(globalThis.__cuKwinMode||process.env.XDG_SESSION_TYPE===\"wayland\"?" &
+            m.match & ":" & CU_X11_ACCESS_SENTENCE & "))",
       )
       if n == 1:
         echo "  [OK] 13b.linux request_access: Wayland sentence only on Wayland, X11 gets the whole-display sentence"
@@ -1648,7 +2955,9 @@ proc apply*(input: string): string =
     # v1.32352.1: the em-dash is emitted as the six-char \u2014 escape (see
     # 13b.kwin-shell-hint). The re-emitted branch keeps the escape, which JS
     # decodes to the same character.
-    let linuxSentence = "\"On Linux, all applications are directly accessible.\""
+    # Switch on, js/cu_consent.js text("openApp") says the app must be approved.
+    let linuxSentence =
+      "(globalThis.__cdbCuConsent?.text(\"openApp\")||\"On Linux, all applications are directly accessible.\")"
     let macSentence =
       "\"The target must already be in the session allowlist " &
       "\\u2014 call request_access first.\""
@@ -1683,9 +2992,12 @@ proc apply*(input: string): string =
       "\"Take a screenshot of the primary display. On this platform, screenshots are NOT filtered \\u2014 all open windows are visible. Input actions targeting apps not in the session allowlist are rejected.\"",
       "`Take a screenshot of the primary display. On this platform, screenshots are NOT filtered \\u2014 all open windows are visible. Input actions targeting apps not in the session allowlist are rejected.`",
     ]
+    # Switch on, js/cu_consent.js text("screenshot") says what this session's
+    # screenshots show (masked or the whole screen).
+    const linux13f =
+      "(globalThis.__cdbCuConsent?.text(\"screenshot\")||\"Take a screenshot of the primary display. All open windows are visible.\")"
     let new13f =
-      "(process.platform===\"linux\"?" &
-      "\"Take a screenshot of the primary display. All open windows are visible.\"" & ":" &
+      "(process.platform===\"linux\"?" & linux13f & ":" &
       "\"Take a screenshot of the primary display. On this platform, " &
       "screenshots are NOT filtered \\u2014 all open windows are visible. " &
       "Input actions targeting apps not in the session allowlist are rejected.\")"
@@ -1699,9 +3011,7 @@ proc apply*(input: string): string =
       content,
       pat13f,
       proc(m: RegexMatch): string =
-        "(process.platform===\"linux\"?" &
-          "\"Take a screenshot of the primary display. All open windows are visible.\":" &
-          m.captures[0] & ")",
+        "(process.platform===\"linux\"?" & linux13f & ":" & m.captures[0] & ")",
     )
     if n13f == 0:
       n13f = replaceLiteralFirstAny(content, old13f, new13f)
@@ -1722,7 +3032,7 @@ proc apply*(input: string): string =
       proc(m: RegexMatch): string =
         let v = m.captures[0]
         &"{v}+(process.platform===\"linux\"" &
-          "?\" The returned image is what subsequent click coordinates are relative to.\"" &
+          "?(globalThis.__cdbCuConsent?.text(\"shotSuffix\")||\" The returned image is what subsequent click coordinates are relative to.\")" &
           ":\" Returns an error if the allowlist is empty. The returned image is what subsequent click coordinates are relative to.\")",
     )
     if n >= 1:
@@ -1817,6 +3127,1061 @@ proc apply*(input: string): string =
       inc patchesApplied
     else:
       echo &"  [FAIL] 14d CU env prompt: {envCount} environment sentence anchors, expected 2"
+
+  # ─── Patch 15: accessibility tools (issue #306, js/cu_ax_tools.js) ────
+  # Upstream's app-scoped AX tools (app_ax_find, app_click, ...) are darwin
+  # only (`appScoped` is set by a darwin-gated flag). Ours reuse the names and
+  # argument shapes, served by the bridges' ax-* subcommands. Every hook is
+  # behind process.platform==="linux" and returns "nothing" while the switch is
+  # off: no tool, an unchanged cache key, upstream's own dispatch.
+  const SPLIT_MARK = "\n/*__CDB_SPLIT__"
+  proc partOf(c: string, at: int): int =
+    ## Start of the staged chunk part containing offset `at` (0 = the stub).
+    let p = c.rfind(SPLIT_MARK, last = at)
+    if p == -1: 0 else: p
+
+  # 15a: tool builder tail `...t.appScoped?Pe(t.appScoped.supportsRawInput??!1,
+  # t.platform):[]]}` -> also spread our tools. Same builder serves the local
+  # computer-use server and the remote-devices bridge; the runtime leaves the
+  # latter out (it passes saveToDisk:false).
+  block:
+    let pat =
+      re"""(\.\.\.([\w$]+)\.appScoped\?[\w$]+\(\2\.appScoped\.supportsRawInput\?\?!1,\2\.platform\):\[\])\]\}"""
+    let n = countMatches(content, pat)
+    if n != 1:
+      echo &"  [FAIL] 15a tool builder tail (`...t.appScoped?X(...):[]]}}`): {n} matches, expected 1"
+    else:
+      discard replaceFirst(
+        content,
+        pat,
+        proc(m: RegexMatch): string =
+          m.captures[0] & ",...(process.platform===\"linux\"&&globalThis.__cdbAxTools?.(" &
+            m.captures[1] & ")||[])]}",
+      )
+      echo "  [OK] 15a tool builder: Linux accessibility tools appended (1 match)"
+      inc changes
+      inc patchesApplied
+
+  # 15b: tools/list cache key `${flag()}:${teach()}:${opts().adaptiveResolution}`
+  # -> also the switch, so a flip takes effect for the next session. "" while
+  # off: the key is upstream's byte for byte.
+  block:
+    let pat =
+      re"""(function [\w$]+\(\)\{let [\w$]+=`\$\{[\w$]+\(\)\}:\$\{[\w$]+(?:\.[\w$]+)?\(\)\}:\$\{[\w$]+(?:\.[\w$]+)?\(\)\.adaptiveResolution\})`;"""
+    let n = countMatches(content, pat)
+    if n != 1:
+      echo &"  [FAIL] 15b tools/list cache key template: {n} matches, expected 1"
+    else:
+      discard replaceFirst(
+        content,
+        pat,
+        proc(m: RegexMatch): string =
+          m.captures[0] &
+            "${process.platform===\"linux\"&&(globalThis.__cdbAxKey?.()||\"\")+(globalThis.__cdbCuConsent?.key?.()||\"\")||\"\"}`;",
+      )
+      echo "  [OK] 15b tools/list cache key: includes the accessibility and ask-before-control modes (1 match)"
+      inc changes
+      inc patchesApplied
+
+  # 15c: teach mode's read-only set (a tool outside it counts as an action and
+  # ends a teach step). app_ax_find / app_list_windows only read. Linux only:
+  # on macOS upstream's own app_* tools keep upstream's classification.
+  block:
+    let pat =
+      re"""(if\(([\w$]+)===(["`])computer_batch\3\)\{let ([\w$]+)=[\w$]+\.input\?\.actions;return Array\.isArray\(\4\)\?\4\.some\(\(?([\w$]+)=>typeof \5\?\.action==(["`])string\6&&!([\w$]+)\.has\(\5\.action\)\)\)?:!1\}return!)\7\.has\(\2\)\}"""
+    let n = countMatches(content, pat)
+    if n != 1:
+      echo &"  [FAIL] 15c read-only tool set (computer_batch arm + `return!SET.has(name)}}`): {n} matches, expected 1"
+    else:
+      discard replaceFirst(
+        content,
+        pat,
+        proc(m: RegexMatch): string =
+          let nm = m.captures[1]
+          m.captures[0] & "(" & m.captures[6] & ".has(" & nm &
+            ")||process.platform===\"linux\"&&(" & nm & "===\"app_ax_find\"||" & nm &
+            "===\"app_list_windows\"))}",
+      )
+      echo "  [OK] 15c read-only tool set: app_ax_find + app_list_windows on Linux (1 match)"
+      inc changes
+      inc patchesApplied
+
+  # 15d: upstream's dispatch. Where upstream dispatches (kwin mode), our names
+  # would hit its app_* branch, which needs executor.appScoped (darwin). Before
+  # that branch, hand our tools to the runtime with the session's context (its
+  # lastScreenshot), the session id (added to that context in the per-session
+  # wrapper, which has it) and upstream's own tier check (`{error}` or
+  # `{grant}`: read / click / full per tool). Upstream's earlier gates (no
+  # grants, CU disabled, another session's lock) still run first.
+  block:
+    let sidPat =
+      re"""(typingWaitAllowance:([\w$]+)\.getTypingWaitAllowance\?\.\(\),cuOnlyMode:\2\.cuOnlyMode)\}"""
+    # v5.11492.0: the tier check takes the session adapter first (for its
+    # isDeniedBeyondSettings), `An(adapter,ctx,bundleId,tier)`, and opens its
+    # not-granted branch with `{let i=ctx.policyDeniedBundleIds...`; before it
+    # was `Dn(ctx,bundleId,tier)` with `return ctx.policyDeniedBundleIds`.
+    # Group 2 is the optional adapter parameter; the call below passes the
+    # dispatch's adapter (qaPat group 2) only when upstream's takes one.
+    let tierPat =
+      re"""function ([\w$]+)\((?:([\w$]+),)?([\w$]+),([\w$]+),([\w$]+)\)\{let ([\w$]+)=\3\.allowedApps\.find\(\(?([\w$]+)=>\7\.bundleId===\4\)\)?;if\(!\6\)(?:return |\{let [\w$]+=)\3\.policyDeniedBundleIds"""
+    let qaPat =
+      re"""(async function [\w$]+\(([\w$]+),([\w$]+),([\w$]+),([\w$]+)\)\{let\{logger:[\w$]+,serverName:[\w$]+\}=\2,([\w$]+)=[\w$]+\(\5\);[\s\S]{0,1500}?,([\w$]+)=[\w$]+\(\4\);[\s\S]{0,1500}?if\(([\w$]+)\(\3\)\)\{)(let [\w$]+=\2\.executor\.appScoped;return )"""
+    let nSid = countMatches(content, sidPat)
+    let nTier = countMatches(content, tierPat)
+    let nQa = countMatches(content, qaPat)
+    if nSid != 1 or nTier != 1 or nQa != 1:
+      echo &"  [FAIL] 15d dispatch anchors: session context {nSid}, tier check {nTier}, app_* branch {nQa} match(es), expected 1 each"
+    else:
+      let sidM = content.find(sidPat).get()
+      let tierM = content.find(tierPat).get()
+      let qaM = content.find(qaPat).get()
+      let tierFn = tierM.captures[0]
+      let tierTakesAdapter = 1 in tierM.captureBounds
+      let eiFn = qaM.captures[7]
+      # The app_* predicate must be upstream's: `function Ei(e){return
+      # e==="app_release"||...`. And all three sites live in one chunk part:
+      # the tier check is called by name, and the session id travels on the
+      # context object the wrapper builds for this dispatch.
+      let eiPat = re(
+        "function " & escapeRe(eiFn) &
+          """\(([\w$]+)\)\{return \1===(["`])app_release\2\|\|"""
+      )
+      let part = partOf(content, qaM.matchBounds.a)
+      if countMatches(content, eiPat) != 1:
+        echo &"  [FAIL] 15d app_* predicate {eiFn} is not upstream's app_release/app_* test"
+      elif partOf(content, tierM.matchBounds.a) != part or
+          partOf(content, sidM.matchBounds.a) != part:
+        echo "  [FAIL] 15d dispatch, tier check and session context are not in one chunk part"
+      else:
+        let n1 = replaceFirst(
+          content,
+          sidPat,
+          proc(m: RegexMatch): string =
+            m.captures[0] & ",__cdbAxSid:process.platform===\"linux\"?" & m.captures[1] &
+              ".sessionId:void 0}",
+        )
+        let n2 = replaceFirst(
+          content,
+          qaPat,
+          proc(m: RegexMatch): string =
+            let toolName = m.captures[2]
+            let ctxVar = m.captures[5]
+            let argsVar = m.captures[6]
+            let tierArgs = (if tierTakesAdapter: m.captures[1] & ","
+            else: "") & ctxVar
+            m.captures[0] &
+              "if(process.platform===\"linux\"&&globalThis.__cdbAxHandles?.(" & toolName &
+              "))return await globalThis.__cdbAxCall(" & toolName & "," & argsVar &
+              ",{sid:" & ctxVar & ".__cdbAxSid,ctx:" & ctxVar & ",tier:(__cdbA,__cdbT)=>" &
+              tierFn & "(" & tierArgs & ",__cdbA,__cdbT)});" & m.captures[8],
+        )
+        if n1 == 1 and n2 == 1:
+          echo &"  [OK] 15d dispatch: Linux accessibility tools before upstream's app_* branch, tier check {tierFn} (2 sites)"
+          inc changes, 2
+          inc patchesApplied
+        else:
+          echo &"  [FAIL] 15d dispatch: {n1}/1 session context, {n2}/1 dispatch rewrites"
+
+  # ─── Patch 16: per-app access follows the active backend ──────────────
+  # Upstream answers "per app?" for its own Wayland portal executor: one shared
+  # screen (`WO()`, the XDG_SESSION_TYPE Wayland check). Our bridges differ per
+  # backend (kwin: native per-app; x11-bridge and wlroots-bridge on sway /
+  # Hyprland: masked screenshots + hit test; GNOME, niri, fallback tools: the
+  # whole screen). js/cu_consent.js answers from the live executor:
+  # spSuffix() for the prompt text, globalThis.__cdbCuSharedScreen() for the
+  # yes/no. Every hook is behind process.platform==="linux" and keeps
+  # upstream's own answer when the helper is missing.
+
+  # 16a: the system-prompt suffix after the tier rules (4.23118.1: `xe` in
+  # index.chunk-D4NaWzj8.js, exported as `ct`; consumers: the local Cowork
+  # computer_use / cu_only sections and the session server's request_access
+  # result in that chunk, the local agent's canUseTool deny message in
+  # index.chunk-DGosOwKd.js via `D.ct()`):
+  #   function xe(){return t.X0()?`\n\nOn this system (a Linux Wayland session)
+  #   those tiers apply to the whole shared screen at once ...`:""}
+  # On Linux, a string from spSuffix() wins ("" in kwin mode); without it
+  # upstream's text stays. Pre-assert: X0 resolves to the Wayland check.
+  block:
+    let pat =
+      re"""(function ([\w$]+)\(\)\{)(return ([\w$]+)\.([\w$]+)\(\)\?([`"])\\n\\nOn this system \(a Linux Wayland session\) those tiers apply to the whole shared screen)"""
+    var hits: seq[RegexMatch] = @[]
+    for m in content.findIter(pat):
+      hits.add m
+    if hits.len != 1:
+      echo &"  [FAIL] 16a prompt suffix (`function F(){{return t.X0()?\"\\n\\nOn this system (a Linux Wayland session) ...`): {hits.len} matches, expected 1"
+    else:
+      let h = hits[0]
+      let fnName = h.captures[1]
+      let (ps, pe) = partSpan(content, h.matchBounds.a)
+      let file = requiredChunk(content[ps ..< pe], h.captures[3])
+      let target = namedPart(content, file)
+      let pred = exportTarget(target, h.captures[4])
+      if pred == "" or waylandPredicateDefs(target, pred) != 1:
+        echo &"  [FAIL] 16a prompt suffix {fnName}: {h.captures[3]}.{h.captures[4]}() does not resolve to the XDG_SESSION_TYPE Wayland check (chunk '{file}', local '{pred}') - re-audit"
+      else:
+        let n = replaceFirst(
+          content,
+          pat,
+          proc(m: RegexMatch): string =
+            m.captures[0] &
+              "if(process.platform===\"linux\"){let __cdbSpx;try{__cdbSpx=globalThis.__cdbCuConsent?.spSuffix?.()}catch(__cdbSpe){}if(typeof __cdbSpx===\"string\")return __cdbSpx}" &
+              m.captures[2],
+        )
+        if n == 1:
+          echo &"  [OK] 16a prompt suffix: {fnName}() asks js/cu_consent.js spSuffix() on Linux ({h.captures[3]}.{h.captures[4]} = {pred}, 1 match)"
+          inc changes
+          inc patchesApplied
+        else:
+          echo "  [FAIL] 16a prompt suffix: replacement did not apply"
+
+  # 16b: the supported-features entry (4.23118.1: in `jG`, index.chunk-
+  # k6x_9PBk.js; read by the enable modal, Settings -> Computer use, the
+  # approval card and the "Unhide apps" row):
+  #   computerUsePerAppAccess:WO()?{status:"unsupported",reason:"A Wayland
+  #   session shares the whole screen",unsupportedCode:"unknown"}:SG
+  # The condition becomes __cdbCuSharedScreen() on Linux (X11 included: with
+  # the ask switch off nothing is per app there either). Pre-assert: the
+  # condition is the Wayland check.
+  block:
+    let pat =
+      re"""computerUsePerAppAccess:([\w$]+)\(\)(\?\{status:"unsupported",reason:"A Wayland session shares the whole screen")"""
+    var hits: seq[RegexMatch] = @[]
+    for m in content.findIter(pat):
+      hits.add m
+    if hits.len != 1:
+      echo &"  [FAIL] 16b computerUsePerAppAccess (`computerUsePerAppAccess:WO()?{{status:\"unsupported\",reason:\"A Wayland session shares the whole screen\"`): {hits.len} matches, expected 1"
+    else:
+      let cond = hits[0].captures[0]
+      let (ps, pe) = partSpan(content, hits[0].matchBounds.a)
+      if waylandPredicateDefs(content[ps ..< pe], cond) != 1:
+        echo &"  [FAIL] 16b computerUsePerAppAccess: {cond}() is not the XDG_SESSION_TYPE Wayland check of its chunk - re-audit"
+      else:
+        let n = replaceFirst(
+          content,
+          pat,
+          proc(m: RegexMatch): string =
+            "computerUsePerAppAccess:(process.platform===\"linux\"&&typeof globalThis.__cdbCuSharedScreen===\"function\"?globalThis.__cdbCuSharedScreen():" &
+              m.captures[0] & "())" & m.captures[1],
+        )
+        if n == 1:
+          echo &"  [OK] 16b computerUsePerAppAccess: follows the active backend on Linux (upstream: {cond}(), 1 match)"
+          inc changes
+          inc patchesApplied
+        else:
+          echo "  [FAIL] 16b computerUsePerAppAccess: replacement did not apply"
+
+  # 16c: upstream's supported-features broadcast (4.23118.1, k6x_9PBk):
+  #   function RG(){for(let e of Usi)e()}
+  #   function qsi(e){if(Usi.add(e),!Hsi){...}return()=>{Usi.delete(e)}}
+  # qsi is onSupportedFeaturesInputsChanged; each window subscribes with
+  # `()=>{e.isDestroyed()||t.dispatchSupportedFeaturesChanged()}` and the
+  # renderer then fetches the features again. RG is exposed (Linux only) as
+  # globalThis.__cdbCuFeaturesChanged, which js/cu_consent.js calls when the
+  # 16b answer changed after the renderer read it (doctor reply, background
+  # display, ask switch). Nothing is called here.
+  block:
+    let keyPat = re"""onSupportedFeaturesInputsChanged:\(\)=>([\w$]+)[,}]"""
+    var keys: seq[string] = @[]
+    for m in content.findIter(keyPat):
+      keys.add m.captures[0]
+    if keys.len != 1:
+      echo &"  [FAIL] 16c onSupportedFeaturesInputsChanged namespace key: {keys.len} matches, expected 1"
+    else:
+      let sub = keys[0]
+      let subPat =
+        re("function " & escapeRe(sub) & """\(([\w$]+)\)\{if\(([\w$]+)\.add\(\1\),""")
+      var sets: seq[string] = @[]
+      for m in content.findIter(subPat):
+        sets.add m.captures[1]
+      if sets.len != 1:
+        echo &"  [FAIL] 16c subscriber {sub}: `function {sub}(e){{if(S.add(e),` {sets.len} matches, expected 1"
+      else:
+        let firePat = re(
+          """(?<=[;{}])(function ([\w$]+)\(\)\{for\(let ([\w$]+) of """ &
+            escapeRe(sets[0]) & """\)\3\(\)\})"""
+        )
+        var fires: seq[RegexMatch] = @[]
+        for m in content.findIter(firePat):
+          fires.add m
+        let listeners = countMatches(
+          content,
+          re"""\.isDestroyed\(\)\|\|[\w$]+\.dispatchSupportedFeaturesChanged\(\)""",
+        )
+        if fires.len != 1:
+          echo &"  [FAIL] 16c broadcast over {sets[0]}: `function F(){{for(let e of {sets[0]})e()}}` {fires.len} matches, expected 1"
+        elif listeners < 1:
+          echo "  [FAIL] 16c no window listener calls dispatchSupportedFeaturesChanged() - re-audit"
+        else:
+          let fire = fires[0].captures[1]
+          let n = replaceFirst(
+            content,
+            firePat,
+            proc(m: RegexMatch): string =
+              m.captures[0] &
+                "process.platform===\"linux\"&&(globalThis.__cdbCuFeaturesChanged=" &
+                m.captures[1] & ");",
+          )
+          if n == 1:
+            echo &"  [OK] 16c features broadcast: {fire} (subscribers of {sub}) exposed as globalThis.__cdbCuFeaturesChanged on Linux (1 match)"
+            inc changes
+            inc patchesApplied
+          else:
+            echo "  [FAIL] 16c features broadcast: replacement did not apply"
+
+  # 16d: the "Entire screen" pseudo-grant (4.23118.1: `ye` in D4NaWzj8, the
+  # dispatch context's getAllowedApps):
+  #   function ye(e,r){if(t.xF!==t.bF||e.some(e=>e.bundleId==="com.anthropic.cu.screen"))
+  #   return e;...return[...e,{bundleId:t.mL,displayName:"Entire screen",...}]}
+  # xF is PLATFORM_CAPABILITIES, bF the Wayland preset, so on every Wayland
+  # session - kwin mode included, where upstream dispatches - the model's
+  # list_granted_applications showed an "Entire screen" grant at the most
+  # permissive tier. On Linux it is left out when __cdbCuNoScreenGrant() says
+  # so: unless __cdbCuScreenOnly() (regular mode on a backend without a hit
+  # test, where upstream's whole-screen gate needs it - 16f gives cloud
+  # sessions the same) and upstream's gate is the one checking (with "Ask
+  # before Computer Use controls an app" on, the Code-tab gate of
+  # js/cu_consent.js checks instead). It is only ever removed, never added.
+  block:
+    let pat =
+      re"""(function ([\w$]+)\(([\w$]+),[\w$]+\)\{if\()(([\w$]+)\.([\w$]+)!==\5\.([\w$]+)\|\|\3\.some\(\(?([\w$]+)=>\8\.bundleId===(["'`])com\.anthropic\.cu\.screen\9\)\)?\)return \3;)"""
+    var hits: seq[RegexMatch] = @[]
+    for m in content.findIter(pat):
+      hits.add m
+    if hits.len != 1:
+      echo &"  [FAIL] 16d screen pseudo-grant (`function F(e,r){{if(t.A!==t.B||e.some(e=>e.bundleId===\"com.anthropic.cu.screen\"))return e;`): {hits.len} matches, expected 1"
+    else:
+      let h = hits[0]
+      let fnName = h.captures[1]
+      let tail =
+        content[h.matchBounds.b + 1 ..< min(h.matchBounds.b + 600, content.len)]
+      let (ps, pe) = partSpan(content, h.matchBounds.a)
+      let file = requiredChunk(content[ps ..< pe], h.captures[4])
+      let target = namedPart(content, file)
+      let capsName = exportTarget(target, h.captures[5])
+      let wlName = exportTarget(target, h.captures[6])
+      let capsOk =
+        capsName != "" and
+        countMatches(
+          target, re("PLATFORM_CAPABILITIES:\\(\\)=>" & escapeRe(capsName) & "[,}]")
+        ) == 1
+      let wlOk =
+        wlName != "" and
+        countMatches(
+          target,
+          re(
+            "(?<![\\w$.])" & escapeRe(wlName) &
+              """=\{screenshotFiltering:"none",platform:"linux",hitTest:"none"\}"""
+          ),
+        ) == 1
+      if not tail.contains(re"""displayName:(["'`])Entire screen\1"""):
+        echo &"  [FAIL] 16d screen pseudo-grant {fnName}: no `displayName:\"Entire screen\"` after the guard - re-audit"
+      elif not capsOk or not wlOk:
+        echo &"  [FAIL] 16d screen pseudo-grant {fnName}: {h.captures[4]}.{h.captures[5]} / .{h.captures[6]} are not PLATFORM_CAPABILITIES / the Wayland preset (chunk '{file}': '{capsName}' / '{wlName}') - re-audit"
+      else:
+        let n = replaceFirst(
+          content,
+          pat,
+          proc(m: RegexMatch): string =
+            m.captures[0] &
+              "process.platform===\"linux\"&&globalThis.__cdbCuNoScreenGrant?.()===!0||" &
+              m.captures[3],
+        )
+        if n == 1:
+          echo &"  [OK] 16d screen pseudo-grant: {fnName} leaves \"Entire screen\" out on Linux unless the backend shares the whole screen without a hit test and upstream's gate checks (1 match)"
+          inc changes
+          inc patchesApplied
+        else:
+          echo "  [FAIL] 16d screen pseudo-grant: replacement did not apply"
+
+  # 16e: the enable-prompt approval card (CU available but not yet enabled:
+  # the session server's request_access and the local agent's canUseTool,
+  # 4.23118.1 D4NaWzj8 / DGosOwKd) is built from the static preset:
+  #   {...,screenshotFiltering:t.xF.screenshotFiltering,[hostPlatform:t.xF.platform,]
+  #   featureDisabled:!0,...}
+  # 2b pins that preset to "none" on Linux, and with "none" + hostPlatform
+  # "linux" the card tells the user "Claude will be able to see your entire
+  # screen and click or type in any app on it. On this system, Claude's access
+  # can't be limited to the apps or levels listed here." - false where access
+  # is per app. On Linux, when __cdbCuSharedScreen() says so, the card gets
+  # the live executor's value (exec-free getter: "mask" on a masking bridge,
+  # "native" in kwin mode), the same value upstream's regular request_access
+  # card already reads; otherwise upstream's preset value stays.
+  # Anchor: both sites (2); the preset must be PLATFORM_CAPABILITIES.
+  block:
+    let pat =
+      re"""screenshotFiltering:(([\w$]+)\.([\w$]+)\.screenshotFiltering),((?:hostPlatform:\2\.\3\.platform,)?featureDisabled:!0)"""
+    var hits: seq[RegexMatch] = @[]
+    for m in content.findIter(pat):
+      hits.add m
+    var bad = ""
+    for h in hits:
+      let (ps, pe) = partSpan(content, h.matchBounds.a)
+      let file = requiredChunk(content[ps ..< pe], h.captures[1])
+      let target = namedPart(content, file)
+      let capsName = exportTarget(target, h.captures[2])
+      if capsName == "" or
+          countMatches(
+            target, re("PLATFORM_CAPABILITIES:\\(\\)=>" & escapeRe(capsName) & "[,}]")
+          ) != 1:
+        bad = h.captures[0]
+    if hits.len != 2:
+      echo &"  [FAIL] 16e enable card (`screenshotFiltering:t.xF.screenshotFiltering,...featureDisabled:!0`): {hits.len} matches, expected 2"
+    elif bad != "":
+      echo &"  [FAIL] 16e enable card: {bad} is not PLATFORM_CAPABILITIES.screenshotFiltering - re-audit"
+    else:
+      let n = replaceAllRegex(
+        content,
+        pat,
+        proc(m: RegexMatch): string =
+          "screenshotFiltering:(process.platform===\"linux\"&&globalThis.__cdbCuSharedScreen?.()===!1?globalThis.__linuxExecutor?.capabilities?.screenshotFiltering??\"mask\":" &
+            m.captures[0] & ")," & m.captures[3],
+      )
+      if n == 2:
+        echo "  [OK] 16e enable card: screenshot filtering follows the active backend on Linux (2 sites)"
+        inc changes, 2
+        inc patchesApplied
+      else:
+        echo &"  [FAIL] 16e enable card: {n}/2 rewrites"
+
+  # 16f: the "Entire screen" pseudo-grant for cloud sessions (issue #326).
+  # Upstream's cloud Cowork / Dispatch dispatch context (4.23118.1
+  # d__15XcO) reads the session's grants as `getAllowedApps:()=>G(i.grants)`
+  # and never adds the pseudo-grant: its cloud Computer Use does not run on
+  # Wayland. Our executors do, and on a backend without a hit test upstream's
+  # whole-screen rules need it (the shared screen is the app in front while
+  # Claude's own window is). On Linux the list goes through
+  # globalThis.__cdbCuWithScreenGrant (js/cu_consent.js), which applies the
+  # local rule of upstream's `ye` (D4NaWzj8: tier = the most permissive
+  # explicit grant, nothing without one) only when __cdbCuScreenOnly() - the
+  # same predicate 16d follows. It gets upstream's own grant class, tier order
+  # and screen id, read from `ye` and resolved to the same chunks here. The
+  # second rewrite drops the pseudo-grant where the context stores the
+  # session's grants after an approval (`a.apps=[...t]`), as upstream's local
+  # sessions do (`be`), so it is never kept as a real grant.
+  block:
+    let yePat =
+      re"""function ([\w$]+)\(([\w$]+),([\w$]+)\)\{if\((?:process\.platform==="linux"&&globalThis\.__cdbCuNoScreenGrant\?\.\(\)===!0\|\|)?[\w$]+\.[\w$]+!==[\w$]+\.[\w$]+\|\|\2\.some\(\(?([\w$]+)=>\4\.bundleId===(["'`])com\.anthropic\.cu\.screen\5\)\)?\)return \2;let ([\w$]+)=new ([\w$]+)\.([\w$]+)\(\2,\3\)\.explicitGrants;if\(\6\.length===0\)return \2;let ([\w$]+)=\6\.map\(\(?([\w$]+)=>\10\.tier\?\?(["'`])full\11\)\)?\.reduce\(\(?\(([\w$]+),([\w$]+)\)=>\7\.([\w$]+)\[\12\]>=\7\.\14\[\13\]\?\12:\13\)\)?;return\[\.\.\.\2,\{bundleId:([\w$]+)\.([\w$]+),displayName:(["'`])Entire screen\17"""
+    let ctxPat =
+      re"""(\{sessionId:[\w$]+,skipFirstRequestWarnings:!0,getAllowedApps:\(\)=>)(([\w$]+)\(([\w$]+)\.grants\))(,getGrantFlags:\(\)=>\4\.grants\.flags,getUserDeniedBundleIds:\(\)=>(([\w$]+)\.([\w$]+)\(\)),)"""
+    var yeHits: seq[RegexMatch] = @[]
+    for m in content.findIter(yePat):
+      yeHits.add m
+    var ctxHits: seq[RegexMatch] = @[]
+    for m in content.findIter(ctxPat):
+      ctxHits.add m
+    if yeHits.len != 1:
+      echo &"  [FAIL] 16f upstream's local pseudo-grant rule (`function F(e,r){{if(...)return e;let i=new N.C(e,r).explicitGrants;...displayName:\"Entire screen\"`): {yeHits.len} matches, expected 1 - re-audit"
+    elif ctxHits.len != 1:
+      echo &"  [FAIL] 16f cloud dispatch context (`{{sessionId:r,skipFirstRequestWarnings:!0,getAllowedApps:()=>G(i.grants),getGrantFlags:...,getUserDeniedBundleIds:()=>e.D(),`): {ctxHits.len} matches, expected 1 - re-audit"
+    else:
+      let y = yeHits[0]
+      let fnName = y.captures[0]
+      let (yps, ype) = partSpan(content, y.matchBounds.a)
+      let yePart = content[yps ..< ype]
+      let grantsFile = requiredChunk(yePart, y.captures[6])
+      let screenFile = requiredChunk(yePart, y.captures[14])
+      let grantsTarget = namedPart(content, grantsFile)
+      let screenTarget = namedPart(content, screenFile)
+      let grantsLocal = exportTarget(grantsTarget, y.captures[7])
+      let rankLocal = exportTarget(grantsTarget, y.captures[13])
+      let screenLocal = exportTarget(screenTarget, y.captures[15])
+      # The local sessions' user-denied list, which `ye` is called with.
+      let yeCall = re(
+        """getAllowedApps:\(\)=>""" & escapeRe(fnName) &
+          """\([\w$]+\.getCuAllowedApps\?\.\(\)\?\?\[\],([\w$]+)\.([\w$]+)\(\)\)"""
+      )
+      var deniedLocal = ""
+      var callHits = 0
+      for m in yePart.findIter(yeCall):
+        inc callHits
+        if requiredChunk(yePart, m.captures[0]) == screenFile:
+          deniedLocal = exportTarget(screenTarget, m.captures[1])
+      let c = ctxHits[0]
+      let (cps, cpe) = partSpan(content, c.matchBounds.a)
+      let cloudPart = content[cps ..< cpe]
+      let deniedNs = c.captures[6]
+      let deniedFile = requiredChunk(cloudPart, deniedNs)
+      let cloudDeniedLocal = exportTarget(namedPart(content, deniedFile), c.captures[7])
+      # The cloud chunk's namespace for upstream's grant chunk.
+      var grantsNs: seq[string] = @[]
+      for m in cloudPart.findIter(
+        re(
+          """(?<![\w$.])([\w$]+)=require\(["`]\./""" & escapeRe(grantsFile) &
+            """["`]\)"""
+        )
+      ):
+        grantsNs.add m.captures[0]
+      # The store of the session's grants after an approval, in the same context.
+      let tailEnd = min(c.matchBounds.b + 1 + 2500, cloudPart.len + cps)
+      let ctxTail = content[c.matchBounds.b + 1 ..< tailEnd]
+      let storePat =
+        re"""onAllowedAppsChanged:\(([\w$]+),([\w$]+)\)=>\{[^\n]{0,1200}?(?<![\w$.])([\w$]+)\.apps=\[\.\.\.\1\],\3\.flags=\2,"""
+      var storeHits: seq[RegexMatch] = @[]
+      for m in ctxTail.findIter(storePat):
+        storeHits.add m
+      let classOk =
+        grantsLocal != "" and
+        countMatches(
+          grantsTarget,
+          re(
+            "(?<![\\w$.])" & escapeRe(grantsLocal) & """=class\{kind=(["'`])explicit\1"""
+          ),
+        ) == 1
+      let rankOk =
+        rankLocal != "" and
+        countMatches(
+          grantsTarget,
+          re("(?<![\\w$.])" & escapeRe(rankLocal) & """=\{read:0,click:1,full:2\}"""),
+        ) == 1
+      let screenOk =
+        screenLocal != "" and
+        countMatches(
+          screenTarget,
+          re(
+            "(?<![\\w$.])" & escapeRe(screenLocal) &
+              """=(["'`])com\.anthropic\.cu\.screen\1"""
+          ),
+        ) == 1
+      if grantsFile == "" or screenFile == "":
+        echo &"  [FAIL] 16f {fnName}: its grant class / screen id namespaces resolve to no single chunk ('{grantsFile}' / '{screenFile}') - re-audit"
+      elif not classOk or not rankOk or not screenOk:
+        echo &"  [FAIL] 16f {fnName}: {y.captures[6]}.{y.captures[7]} / .{y.captures[13]} / {y.captures[14]}.{y.captures[15]} are not the explicit grant class / tier order / screen id ('{grantsLocal}' / '{rankLocal}' / '{screenLocal}') - re-audit"
+      elif callHits != 1 or deniedLocal == "" or deniedFile != screenFile or
+          cloudDeniedLocal != deniedLocal:
+        echo &"  [FAIL] 16f cloud context: its user-denied list {c.captures[5]} ('{cloudDeniedLocal}' in '{deniedFile}') is not the one {fnName} gets ({callHits} call(s), '{deniedLocal}') - re-audit"
+      elif grantsNs.len != 1:
+        echo &"  [FAIL] 16f cloud chunk: `N=require(\"./{grantsFile}\")` {grantsNs.len} matches, expected 1 - re-audit"
+      elif storeHits.len != 1:
+        echo &"  [FAIL] 16f cloud context: `onAllowedAppsChanged:(t,n)=>{{...a.apps=[...t],a.flags=n,` {storeHits.len} matches after getAllowedApps, expected 1 - re-audit"
+      else:
+        let gNs = grantsNs[0]
+        let screenExpr = deniedNs & "." & y.captures[15]
+        let sh = storeHits[0]
+        let storeOld =
+          sh.captures[2] & ".apps=[..." & sh.captures[0] & "]," & sh.captures[2] &
+          ".flags=" & sh.captures[1] & ","
+        let storeNew =
+          sh.captures[2] & ".apps=process.platform===\"linux\"?[..." & sh.captures[0] &
+          "].filter(__cuScr=>__cuScr.bundleId!==" & screenExpr & "):[..." &
+          sh.captures[0] & "]," & sh.captures[2] & ".flags=" & sh.captures[1] & ","
+        # Exactly once in the whole staged file, so the literal rewrite below
+        # lands on this context.
+        if countOccurrences(content, storeOld) != 1:
+          echo &"  [FAIL] 16f cloud context: `{storeOld}` is not unique in the bundle - re-audit"
+        else:
+          let ctxOld = c.match
+          let ctxNew =
+            c.captures[0] &
+            "process.platform===\"linux\"&&typeof globalThis.__cdbCuWithScreenGrant==\"function\"?globalThis.__cdbCuWithScreenGrant(" &
+            c.captures[1] & "," & c.captures[5] & "," & gNs & "." & y.captures[7] & "," &
+            gNs & "." & y.captures[13] & "," & screenExpr & "):" & c.captures[1] &
+            c.captures[4]
+          let n1 = replaceLiteralFirst(content, storeOld, storeNew)
+          let n2 = replaceLiteralFirst(content, ctxOld, ctxNew)
+          if n1 == 1 and n2 == 1:
+            echo &"  [OK] 16f cloud screen pseudo-grant: the cloud dispatch context adds \"Entire screen\" by {fnName}'s rule ({gNs}.{y.captures[7]}, {gNs}.{y.captures[13]}, {screenExpr}) when __cdbCuScreenOnly() and stores grants without it (2 sites)"
+            inc changes, 2
+            inc patchesApplied
+          else:
+            echo &"  [FAIL] 16f cloud screen pseudo-grant: {n1 + n2}/2 rewrites"
+
+  # ─── Patch 17f: upstream's "a Claude dialog is open" predicate ─────────
+  # Upstream (4.23118.1, index.chunk-k6x_9PBk.js), installed at module load on
+  # every Wayland session:
+  #   var NJ=0;function Sxi(){let e=u.dialog;for(let t of["showMessageBox",
+  #   "showOpenDialog","showSaveDialog"]){...NJ++,t.finally((()=>{NJ--}))...}}
+  #   function Cxi(){if(NJ>0)throw Error("A Claude dialog is open on the
+  #   screen; ...")}function wxi(){return NJ>0}
+  # wxi is what upstream's own Wayland executor asks in getFrontmostApp
+  # (`nO()?{bundleId:host+" (dialog)",...}`). It is exposed as
+  # globalThis.__cdbCuDialogOpen right after its declaration (Linux only), so
+  # the regular executor answers the same on a backend without a hit test
+  # (issue #326). Nothing is called here. Pre-assert: the counter is the one
+  # the dialog wrapper counts.
+  block:
+    let pat =
+      re"""(function [\w$]+\(\)\{if\(([\w$]+)>0\)throw Error\((["'`])A Claude dialog is open on the screen; wait for the user to answer it before clicking, scrolling or typing\.\3\)\}function ([\w$]+)\(\)\{return \2>0\})"""
+    var hits: seq[RegexMatch] = @[]
+    for m in content.findIter(pat):
+      hits.add m
+    if hits.len != 1:
+      echo &"  [FAIL] 17f dialog-open predicate (`function F(){{if(N>0)throw Error(\"A Claude dialog is open on the screen; ...\")}}function G(){{return N>0}}`): {hits.len} matches, expected 1 - re-audit"
+    else:
+      let counter = hits[0].captures[1]
+      let fn = hits[0].captures[3]
+      let wrapHits = countMatches(
+        content,
+        re(
+          """\[(["'`])showMessageBox\1,\1showOpenDialog\1,\1showSaveDialog\1\]\)\{[^}]{0,200}?""" &
+            escapeRe(counter) & """\+\+,[\w$]+\.finally\(\(?\(\)=>\{""" &
+            escapeRe(counter) & """--\}\)?\)"""
+        ),
+      )
+      if wrapHits != 1:
+        echo &"  [FAIL] 17f dialog-open predicate {fn}: the showMessageBox/showOpenDialog/showSaveDialog wrapper does not count {counter} ({wrapHits} matches, expected 1) - re-audit"
+      else:
+        let n = replaceFirst(
+          content,
+          pat,
+          proc(m: RegexMatch): string =
+            m.captures[0] &
+              "process.platform===\"linux\"&&(globalThis.__cdbCuDialogOpen=" & fn & ");",
+        )
+        if n == 1:
+          echo &"  [OK] 17f dialog-open predicate: {fn} (counter {counter}, counted by upstream's dialog wrapper) exposed as globalThis.__cdbCuDialogOpen on Linux (1 match)"
+          inc changes
+          inc patchesApplied
+        else:
+          echo "  [FAIL] 17f dialog-open predicate: replacement did not apply"
+
+  # ─── Patch 17g: upstream's own-input marker for its Wayland input guard ─
+  # Upstream (4.23118.1, index.chunk-k6x_9PBk.js) installs, at module load and
+  # on Wayland sessions only, a guard on every webContents created after it
+  # (xxi: `before-mouse-event` / `before-input-event` / `input-event`) that
+  # discards input of a kind while Claude itself is injecting that kind:
+  #   function Exi(){Txi||!WO()||(Txi=!0,xxi(),Sxi(),...)}
+  #   async function gxi(e,t){MJ[e].inFlight++;try{return await t()}finally
+  #     {MJ[e].inFlight--,MJ[e].until=performance.now()+mxi}}
+  #   function _xi(e){...let t=MJ[e];return t.inFlight>0||performance.now()<t.until}
+  # Its own Wayland executor wraps each injected motion / button / wheel / key
+  # in gxi, which is what makes its whole-screen click gate (Claude's window in
+  # front = the shared screen) safe: a click that lands in a Claude window is
+  # dropped. Our executors bypass that wrapper. gxi is exposed as
+  # globalThis.__cdbCuMarkInput INSIDE the install branch, so the global exists
+  # exactly when the guard is installed; js/cu_linux_executor.js wraps its
+  # input in it on backends without a hit test and refuses a Claude window in
+  # front when it is missing (issue #326). Pre-asserts: the install branch
+  # calls the guard installer (web-contents-created + before-mouse-event), the
+  # marker counts the map the guard's predicate reads.
+  block:
+    let instPat =
+      re"""(function [\w$]+\(\)\{([\w$]+)\|\|![\w$]+\(\)\|\|\(\2=!0,)(([\w$]+)\(\),[\w$]+\(\),)"""
+    let markPat =
+      re"""async function ([\w$]+)\(([\w$]+),([\w$]+)\)\{([\w$]+)\[\2\]\.inFlight\+\+;try\{return await \3\(\)\}finally\{\4\[\2\]\.inFlight--,\4\[\2\]\.until=performance\.now\(\)\+[\w$]+\}\}"""
+    var inst: seq[RegexMatch] = @[]
+    for m in content.findIter(instPat):
+      inst.add m
+    var marks: seq[RegexMatch] = @[]
+    for m in content.findIter(markPat):
+      marks.add m
+    if marks.len != 1:
+      echo &"  [FAIL] 17g own-input marker (`async function G(e,t){{M[e].inFlight++;try{{return await t()}}finally{{...}}}}`): {marks.len} matches, expected 1 - re-audit"
+    else:
+      let markFn = marks[0].captures[0]
+      let mapName = marks[0].captures[3]
+      let predHits = countMatches(
+        content,
+        re(
+          """function [\w$]+\(([\w$]+)\)\{if\(!\1\)return!1;let ([\w$]+)=""" &
+            escapeRe(mapName) &
+            """\[\1\];return \2\.inFlight>0\|\|performance\.now\(\)<\2\.until\}"""
+        ),
+      )
+      var guardOk = 0
+      var installer = ""
+      for m in inst:
+        let g = m.captures[3]
+        let body = re(
+          "function " & escapeRe(g) &
+            """\(\)\{let [\s\S]{0,1600}?before-mouse-event[\s\S]{0,1200}?\.app\.on\((["'`])web-contents-created\1"""
+        )
+        if countMatches(content, body) == 1:
+          inc guardOk
+          installer = g
+      if predHits != 1:
+        echo &"  [FAIL] 17g own-input marker {markFn}: the guard's predicate does not read {mapName} ({predHits} matches, expected 1) - re-audit"
+      elif inst.len != 1 or guardOk != 1:
+        echo &"  [FAIL] 17g guard install branch (`function F(){{T||!W()||(T=!0,guard(),dialogs(),...`): {inst.len} matches, {guardOk} with the webContents guard, expected 1 - re-audit"
+      else:
+        let n = replaceFirst(
+          content,
+          instPat,
+          proc(m: RegexMatch): string =
+            m.captures[0] & "process.platform===\"linux\"&&(globalThis.__cdbCuMarkInput=" &
+              markFn & ")," & m.captures[2],
+        )
+        if n == 1:
+          echo &"  [OK] 17g own-input marker: {markFn} (counts {mapName}, read by the guard {installer} installs) exposed as globalThis.__cdbCuMarkInput where the guard is installed (1 match)"
+          inc changes
+          inc patchesApplied
+        else:
+          echo "  [FAIL] 17g own-input marker: replacement did not apply"
+
+  # ─── Patch 17c: Stop sharing stops the running turn ───────────────────
+  # Upstream (4.23118.1, index.chunk-k6x_9PBk.js):
+  #   function rbi(){fJ&&abi(fJ,"[cu-wayland] user stopped sharing")}
+  # abi stops the CU lock holder and every app-mode holder through the callback
+  # main's view registers (fJ, the same one upstream's Escape uses). Upstream
+  # hands rbi to its native portal binding (`Ei()?.cuWaylandOnShareEnded?.(rbi)`,
+  # in a function that runs once at module load on Wayland only), which never
+  # fires: our bridges run Computer Use. rbi is exposed as
+  # globalThis.__cdbCuShareEnded right after its declaration (module load,
+  # every session type); the gnome / kwin executors call it the moment the
+  # bridge's stopped-by-user marker appears (js/cu_share_stop.js). The
+  # cuWaylandOnShareEnded site must still pass rbi (fail loud otherwise).
+  # 17c: upstream's "user stopped sharing" abort, exposed at its declaration.
+  block:
+    let sitePat = re"""\.cuWaylandOnShareEnded\?\.\(([\w$]+)\)"""
+    var sites: seq[string] = @[]
+    for m in content.findIter(sitePat):
+      sites.add m.captures[0]
+    if sites.len != 1:
+      echo &"  [FAIL] 17c `.cuWaylandOnShareEnded?.(F)`: {sites.len} matches, expected 1 - re-audit"
+    else:
+      let fn = sites[0]
+      let defPat = re(
+        "(?<=[;}])(function " & escapeRe(fn) &
+          """\(\)\{([\w$]+)&&[\w$]+\(\2,(["'`])\[cu-wayland\] user stopped sharing\3\)\})"""
+      )
+      let defHits = countMatches(content, defPat)
+      if defHits != 1:
+        echo &"  [FAIL] 17c share-ended abort {fn}: `function {fn}(){{A&&abort(A,\"[cu-wayland] user stopped sharing\")}}` {defHits} matches, expected 1 - re-audit"
+      else:
+        let n = replaceFirst(
+          content,
+          defPat,
+          proc(m: RegexMatch): string =
+            m.captures[0] &
+              "process.platform===\"linux\"&&(globalThis.__cdbCuShareEnded=" & fn & ");",
+        )
+        if n == 1:
+          echo &"  [OK] 17c share-ended abort: {fn} (handed to cuWaylandOnShareEnded) exposed as globalThis.__cdbCuShareEnded on Linux (1 match)"
+          inc changes
+          inc patchesApplied
+        else:
+          echo "  [FAIL] 17c share-ended abort: replacement did not apply"
+
+  # ─── Patch 17e: a model Escape is expected, as upstream marks its own ──
+  # Upstream (4.23118.1, index.chunk-k6x_9PBk.js):
+  #   var mJ=0;function ebi(){mJ++,setTimeout((()=>{mJ>0&&mJ--}),100)}
+  #   async function tbi(){return ebi(),()=>void 0}
+  #   function nbi(){if(mJ>0){mJ--,P.debug("[cu-esc] escape absorbed
+  #     (model-synthesized)");return}ibi()}
+  #   async function bbi(e,t){let n=vbi(e)?await tbi():()=>void 0;...}
+  # Upstream's own executor wraps each key / holdKey whose keys are exactly
+  # one Escape in bbi, which bumps mJ for 100 ms, so its X11 Escape grab (nbi)
+  # absorbs that press. Our executors bypass that wrapper: ebi is exposed as
+  # globalThis.__cdbCuExpectEscape right after its declaration (Linux only)
+  # and the executors call it right before they inject a lone Escape. Nothing
+  # is called here. Pre-assert: the grab handler with the `[cu-esc] escape
+  # absorbed` branch decrements the same counter.
+  block:
+    let pat =
+      re"""(?<=[;}])(function ([\w$]+)\(\)\{([\w$]+)\+\+,setTimeout\(\(?\(\)=>\{\3>0&&\3--\}\)?,100\)\})"""
+    var hits: seq[RegexMatch] = @[]
+    for m in content.findIter(pat):
+      hits.add m
+    if hits.len != 1:
+      echo &"  [FAIL] 17e expected-Escape marker (`function F(){{N++,setTimeout((()=>{{N>0&&N--}}),100)}}`): {hits.len} matches, expected 1 - re-audit"
+    else:
+      let fn = hits[0].captures[1]
+      let counter = hits[0].captures[2]
+      let absorbHits = countMatches(
+        content,
+        re(
+          """function [\w$]+\(\)\{if\(""" & escapeRe(counter) & """>0\)\{""" &
+            escapeRe(counter) & """--,[\w$]+\.debug\((["'`])\[cu-esc\] escape absorbed"""
+        ),
+      )
+      if absorbHits != 1:
+        echo &"  [FAIL] 17e expected-Escape marker {fn}: the `[cu-esc] escape absorbed` handler does not read {counter} ({absorbHits} matches, expected 1) - re-audit"
+      else:
+        let n = replaceFirst(
+          content,
+          pat,
+          proc(m: RegexMatch): string =
+            m.captures[0] &
+              "process.platform===\"linux\"&&(globalThis.__cdbCuExpectEscape=" & fn &
+              ");",
+        )
+        if n == 1:
+          echo &"  [OK] 17e expected-Escape marker: {fn} (counter {counter}, read by the grab handler) exposed as globalThis.__cdbCuExpectEscape on Linux (1 match)"
+          inc changes
+          inc patchesApplied
+        else:
+          echo "  [FAIL] 17e expected-Escape marker: replacement did not apply"
+
+  # ─── Patch 17h: Claude's own Escape passes upstream's X11 Escape grab ──
+  # Upstream (4.23118.1, k6x_9PBk; the community patch may have prefixed the
+  # register function with its 17a hook, which this does not depend on):
+  #   function obi(){...if(!(pJ||WO())){mJ=0;try{if(!u.globalShortcut.register("Escape",nbi))...
+  #   function sbi(){...pJ&&(u.globalShortcut.unregister("Escape"),pJ=!1,mJ=0,...)}
+  #   function cbi(){zU.currentHolder&&$yi===0?obi():sbi()}
+  # While upstream's grab is registered (Escape switch off, or its watcher
+  # fell back to the grab) a key grab takes every Escape, the one Claude
+  # injects too: 17e only keeps it from stopping the turn, the app never gets
+  # it. Exposed right after cbi, on Linux only, as globalThis.__cdbCuEscGrab:
+  #   suspend(): drop upstream's grab if it is registered (true) - the
+  #              executor injects the key after one event-loop turn (Chromium
+  #              flushes the ungrab then), then calls
+  #   resume(why): upstream's own lock-change function (cbi) puts back what the
+  #              lock state asks for; a register that failed is tried once
+  #              more, then logged (Escape stops nothing until the next lock).
+  # Pre-asserts: cbi calls the register / unregister pair, the register
+  # function registers "Escape" under the flag, the unregister drops it.
+  block:
+    let lcPat =
+      re"""(?<=[;}])(function ([\w$]+)\(\)\{([\w$]+)\.currentHolder&&([\w$]+)===0\?([\w$]+)\(\):([\w$]+)\(\)\})"""
+    var hits: seq[RegexMatch] = @[]
+    for m in content.findIter(lcPat):
+      hits.add m
+    if hits.len != 1:
+      echo &"  [FAIL] 17h Escape lock-change function (`function C(){{L.currentHolder&&Y===0?R():U()}}`): {hits.len} matches, expected 1 - re-audit"
+    else:
+      let lc = hits[0].captures[1]
+      let lockName = hits[0].captures[2]
+      let yi = hits[0].captures[3]
+      let regFn = hits[0].captures[4]
+      let unregFn = hits[0].captures[5]
+      # The register function's body (brace-balanced) holds upstream's register.
+      let rAt = content.find("function " & regFn & "(){")
+      var rBody = ""
+      if rAt >= 0:
+        var depth = 0
+        var j = content.find('{', rAt)
+        while j < content.len:
+          if content[j] == '{':
+            inc depth
+          elif content[j] == '}':
+            dec depth
+            if depth == 0:
+              break
+          inc j
+        if j < content.len:
+          rBody = content[rAt .. j]
+      let regPat =
+        re"""if\(!\(([\w$]+)\|\|([\w$]+)\(\)\)\)\{([\w$]+)=0;try\{if\(!([\w$]+)\.globalShortcut\.register\(["'`]Escape["'`],([\w$]+)\)\)"""
+      let rm = rBody.find(regPat)
+      if rm.isNone:
+        echo &"  [FAIL] 17h Escape register function {regFn}: no `if(!(F||W())){{N=0;try{{if(!E.globalShortcut.register(\"Escape\",H))` in its body - re-audit"
+      else:
+        let flag = rm.get().captures[0]
+        let el = rm.get().captures[3]
+        let unregHits = countMatches(
+          content,
+          re(
+            """function """ & escapeRe(unregFn) &
+              """\(\)\{(?:process\.platform==="linux"&&globalThis\.__cdbCuEscWatch\?\.disarm\(\);)?""" &
+              escapeRe(flag) & """&&\(""" & escapeRe(el) &
+              """\.globalShortcut\.unregister\(["'`]Escape["'`]\),""" & escapeRe(flag) &
+              """=!1,"""
+          ),
+        )
+        if unregHits != 1:
+          echo &"  [FAIL] 17h Escape unregister function {unregFn}: does not drop \"Escape\" under {flag} ({unregHits} matches, expected 1) - re-audit"
+        else:
+          let n = replaceFirst(
+            content,
+            lcPat,
+            proc(m: RegexMatch): string =
+              m.captures[0] &
+                "process.platform===\"linux\"&&(globalThis.__cdbCuEscGrab={suspend:function(){if(!" &
+                flag & ")return!1;" & el & ".globalShortcut.unregister(\"Escape\");" &
+                flag & "=!1;return!0},resume:function(w){" & lc & "();if(" & flag & "||!" &
+                lockName & ".currentHolder||" & yi &
+                "!==0)return!0;if(globalThis.__cdbCuEscapeAbortEnabled?.()===true&&globalThis.__cdbCuEscWatch?.state?.().armed===true)return!0;" &
+                lc & "();if(" & flag &
+                ")return!0;(globalThis.__cdbDiag||console.warn)(\"[claude-cu] esc-grab: Anthropic's Escape stop key could not be registered again after Claude's own Escape (\"+w+\"); Escape does not stop Computer Use until the next Computer Use turn, Stop in the app and Stop sharing still do\");return!1}});",
+          )
+          if n == 1:
+            echo &"  [OK] 17h Escape grab: {regFn} / {unregFn} (flag {flag}, lock change {lc}) exposed as globalThis.__cdbCuEscGrab on Linux (1 match)"
+            inc changes
+            inc patchesApplied
+          else:
+            echo "  [FAIL] 17h Escape grab: replacement did not apply"
+
+  # ─── Patch 5c: the masked capture's note reaches the model (issue #329) ──
+  # Upstream (5.1231.2, Dd4SYic5) builds the screenshot tool's answer from the
+  # executor's image plus its own notes (other monitors, hidden apps, scale)
+  # and nothing else; zoom answers with the image alone:
+  #   ...f?[{type:"text",text:f}]:[],{type:"image",data:u.base64,mimeType:"image/jpeg"}],screenshot:u}
+  #   ...d?[{type:"text",text:d}]:[],{type:"image",data:c.base64,mimeType:"image/jpeg"}],screenshot:c}
+  #   {content:[{type:"image",data:(await e.executor.zoom(p,g,c.displayId,h)).base64,mimeType:"image/jpeg"}]}
+  # The Linux executor's masked capture leaves a note for the image it
+  # returned (which approved app is covered, and by what; which is not in the
+  # image, and why). globalThis.__cdbCuShotNote(base64) hands it over once,
+  # for that exact image, as text blocks ([] otherwise, and on any other
+  # platform the expression is []). A refusal needs no patch: the executor
+  # throws, and upstream gives the model the error text without an image.
+  # Pre-asserts: both screenshot returns sit in the handler that answers
+  # "No applications are granted for this session.", the zoom return right
+  # after the handler's "take a screenshot before zooming" refusal.
+  block:
+    let shotPat =
+      re"""(?<=\])(,)(\{type:"image",data:([\w$]+)\.base64,mimeType:"image/jpeg"\}\],screenshot:\3\})"""
+    let zoomPat =
+      re"""\{content:\[\{type:"image",data:\((await [\w$]+\.executor\.zoom\([^()]*\))\)\.base64,mimeType:"image/jpeg"\}\]\}"""
+    var shotAt: seq[int] = @[]
+    for m in content.findIter(shotPat):
+      shotAt.add m.matchBounds.a
+    # The refusal nearest before the first return (the string is used twice).
+    let grantAt =
+      if shotAt.len > 0:
+        content.rfind(
+          "\"No applications are granted for this session. Call request_access first.\"",
+          last = shotAt[0],
+        )
+      else:
+        -1
+    var zoomAt: seq[int] = @[]
+    for m in content.findIter(zoomPat):
+      zoomAt.add m.matchBounds.a
+    let zoomGuard = content.find("take a screenshot before zooming")
+    # The handler's two capture calls: executor.resolvePrepareCapture before
+    # the first return, and before the second a helper whose body calls
+    # executor.screenshot({allowedBundleIds:...}).
+    var handlerOk = false
+    if shotAt.len == 2 and grantAt >= 0 and grantAt < shotAt[0] and
+        shotAt[1] - grantAt <= 4000:
+      let rpc =
+        content.find(".executor.resolvePrepareCapture({allowedBundleIds:", grantAt)
+      let between = content[shotAt[0] ..< shotAt[1]]
+      let sc = between.find(re"""=await ([\w$]+)\([\w$]+\.executor,""")
+      if rpc > grantAt and rpc < shotAt[0] and sc.isSome:
+        let helper = sc.get().captures[0]
+        handlerOk =
+          countMatches(
+            content,
+            re(
+              "async function " & escapeRe(helper) &
+                """\([\w$,]+\)\{let [\w$]+=await [\w$]+\.screenshot\(\{allowedBundleIds:"""
+            ),
+          ) == 1
+    if shotAt.len != 2:
+      echo &"  [FAIL] 5c screenshot returns (`...,{{type:\"image\",data:X.base64,mimeType:\"image/jpeg\"}}],screenshot:X}}`): {shotAt.len} matches, expected 2 - re-audit"
+    elif not handlerOk:
+      echo "  [FAIL] 5c screenshot returns are not in the handler that refuses \"No applications are granted for this session.\" - re-audit"
+    elif zoomAt.len != 1:
+      echo &"  [FAIL] 5c zoom return (`{{content:[{{type:\"image\",data:(await E.executor.zoom(...)).base64,...}}]}}`): {zoomAt.len} matches, expected 1 - re-audit"
+    elif zoomGuard < 0 or zoomAt[0] < zoomGuard or zoomAt[0] - zoomGuard > 2500:
+      echo "  [FAIL] 5c zoom return does not follow the zoom handler's \"take a screenshot before zooming\" refusal - re-audit"
+    else:
+      let ns = replaceAllRegex(
+        content,
+        shotPat,
+        proc(m: RegexMatch): string =
+          ",...(process.platform===\"linux\"&&globalThis.__cdbCuShotNote?.(" &
+            m.captures[2] & ".base64)||[])," & m.captures[1],
+      )
+      let nz = replaceFirst(
+        content,
+        zoomPat,
+        proc(m: RegexMatch): string =
+          "{content:(__cdbZ=>[...(process.platform===\"linux\"&&globalThis.__cdbCuShotNote?.(__cdbZ.base64)||[]),{type:\"image\",data:__cdbZ.base64,mimeType:\"image/jpeg\"}])(" &
+            m.captures[0] & ")}",
+      )
+      if ns == 2 and nz == 1:
+        echo "  [OK] 5c mask note: screenshot (2 returns) and zoom answer with globalThis.__cdbCuShotNote's note for their image on Linux"
+        inc changes
+        inc patchesApplied
+      else:
+        echo &"  [FAIL] 5c mask note: replacements did not apply ({ns}/2 screenshot, {nz}/1 zoom)"
+
+  # ─── Patch 5d: a refused teach-step screenshot keeps its text (issue #329) ──
+  # Upstream (5.1231.2) ends teach_step / teach_batch with the screenshot
+  # handler and drops its answer when that is an error:
+  #   async function ha(e,t,n,r){let i=await Ca(t,n,r);return i.isError?B(e):{content:[{type:"text",text:JSON.stringify(e)},...i.content],screenshot:i.screenshot}}
+  # so a masked capture refused with a reason ("no window of the approved apps
+  # can be shown ...") reached the model as the step results alone. On Linux
+  # the error's text follows the step results (still no image). Pre-assert:
+  # the called function is the screenshot handler (it refuses "No
+  # applications are granted for this session.").
+  block:
+    let teachPat =
+      re"""(async function [\w$]+\(([\w$]+),[\w$]+,[\w$]+,[\w$]+\)\{let ([\w$]+)=await ([\w$]+)\([\w$]+,[\w$]+,[\w$]+\);return \3\.isError\?)([\w$]+\(\2\))(:\{content:\[\{type:"text",text:JSON\.stringify\(\2\)\},\.\.\.\3\.content\],screenshot:\3\.screenshot\}\})"""
+    var hits: seq[RegexMatch] = @[]
+    for m in content.findIter(teachPat):
+      hits.add m
+    if hits.len != 1:
+      echo &"  [FAIL] 5d teach-step screenshot answer (`return i.isError?B(e):{{content:[...JSON.stringify(e)...,...i.content],...}}`): {hits.len} matches, expected 1 - re-audit"
+    else:
+      let shotFn = hits[0].captures[3]
+      let isHandler = countMatches(
+        content,
+        re(
+          "async function " & escapeRe(shotFn) &
+            """\([\w$,]+\)\{if\([\w$]+\.grants\.isEmpty\(\)\)return [\w$]+\("No applications are granted for this session\."""
+        ),
+      )
+      if isHandler != 1:
+        echo &"  [FAIL] 5d teach-step: {shotFn} is not the screenshot handler ({isHandler} matches) - re-audit"
+      else:
+        let n = replaceFirst(
+          content,
+          teachPat,
+          proc(m: RegexMatch): string =
+            m.captures[0] &
+              "process.platform===\"linux\"?{content:[{type:\"text\",text:JSON.stringify(" &
+              m.captures[1] & ")},..." & m.captures[2] & ".content]}:" & m.captures[4] &
+              m.captures[5],
+        )
+        if n == 1:
+          echo &"  [OK] 5d teach-step: a refused screenshot ({shotFn}) keeps its text after the step results on Linux"
+          inc changes
+          inc patchesApplied
+        else:
+          echo "  [FAIL] 5d teach-step: replacement did not apply"
+
+  # ─── Patch 5e: a coordinate before any screenshot uses the capture frame ──
+  # Upstream's pixels-mode mapping (every click, scroll, drag, move and teach
+  # anchor of its own dispatch: kwin mode, cloud sessions, teach mode) reads
+  # the model's coordinate in the session's last screenshot; with none (an
+  # app restart in the middle of a session) it divides by the display's
+  # scaleFactor (5.1231.2):
+  #   a.warn("[computer-use] pixels-mode coordinate received with no prior
+  #   screenshot; falling back to /scaleFactor. ...");let s=Math.round(e/
+  #   r.scaleFactor)+r.originX,c=Math.round(t/r.scaleFactor)+r.originY;return
+  #   s>r.originX+r.width||c>r.originY+r.height?Error(`${o} is outside the
+  #   display bounds, ... Take a screenshot first.`):ut(...)
+  # Our capture tiers downscale every screenshot (long edge <= 1568 px, at most
+  # 1.15 MP of the physical size), so that lands short of the target at every
+  # size above that (1430x804 image of a 1920x1080 display at scale 1.6: x/1.6
+  # instead of x*1920/1430). On Linux the active executor's __coldFrame(r, true)
+  # names the frame the next screenshot of r will have, and the point is read
+  # in it; upstream's own bounds test then refuses a point outside that frame
+  # with its own text. asked = true is the real state here: every capture of
+  # upstream's dispatch passes an allowlist (screenshot, zoom and
+  # resolvePrepareCapture all take grants.captureAllowedBundleIds, an array),
+  # so its screenshots are masked wherever the bridge can mask. An executor
+  # whose __coldFrame cannot tell the frame (null: a mask answer not known
+  # yet) yields an infinite point, so the same bounds test refuses it with
+  # "... Take a screenshot first." instead of guessing, as our handler does.
+  # No __coldFrame at all (another platform, an executor without it):
+  # upstream's division, unchanged.
+  block:
+    let pat =
+      re"""(\.warn\((["`])\[computer-use\] pixels-mode coordinate received with no prior screenshot; falling back to /scaleFactor\. Click may be off if downsample is active\.\2\);)let ([\w$]+)=Math\.round\(([\w$]+)/([\w$]+)\.scaleFactor\)\+\5\.originX,([\w$]+)=Math\.round\(([\w$]+)/\5\.scaleFactor\)\+\5\.originY;return \3>\5\.originX\+\5\.width\|\|\6>\5\.originY\+\5\.height\?"""
+    let found = countMatches(content, pat)
+    if found != 1:
+      echo &"  [FAIL] 5e no-screenshot coordinate fallback (`a.warn(\"[computer-use] pixels-mode coordinate received with no prior screenshot; ...\");let s=Math.round(e/r.scaleFactor)+r.originX,...`): {found} matches, expected 1 - re-audit"
+    else:
+      let n = replaceFirst(
+        content,
+        pat,
+        proc(m: RegexMatch): string =
+          let r = m.captures[4]
+          # __cdbCf: a frame, !1 (__coldFrame said it cannot tell: refused
+          # through an infinite point) or null (no __coldFrame: upstream's
+          # division).
+          m.captures[0] &
+            "let __cdbCx=process.platform===\"linux\"?globalThis.__linuxExecutor:null," &
+            "__cdbCf=typeof __cdbCx?.__coldFrame===\"function\"?(__cdbF=>__cdbF&&__cdbF.imgW>0&&__cdbF.imgH>0?__cdbF:!1)(__cdbCx.__coldFrame(" &
+            r & ",!0)):null," & m.captures[2] & "=__cdbCf?Math.round(" & m.captures[3] &
+            "*(" & r & ".width/__cdbCf.imgW))+" & r &
+            ".originX:__cdbCf===!1?1/0:Math.round(" & m.captures[3] & "/" & r &
+            ".scaleFactor)+" & r & ".originX," & m.captures[5] & "=__cdbCf?Math.round(" &
+            m.captures[6] & "*(" & r & ".height/__cdbCf.imgH))+" & r &
+            ".originY:__cdbCf===!1?1/0:Math.round(" & m.captures[6] & "/" & r &
+            ".scaleFactor)+" & r & ".originY;return " & m.captures[2] & ">" & r &
+            ".originX+" & r & ".width||" & m.captures[5] & ">" & r & ".originY+" & r &
+            ".height?",
+      )
+      if n == 1:
+        echo "  [OK] 5e no-screenshot coordinate: read in the Linux executor's capture frame (__coldFrame) on Linux, refused when it cannot tell the frame, upstream's /scaleFactor elsewhere (1 match)"
+        inc changes
+        inc patchesApplied
+      else:
+        echo "  [FAIL] 5e no-screenshot coordinate: replacement did not apply"
 
   if patchesApplied < EXPECTED_PATCHES:
     raise newException(

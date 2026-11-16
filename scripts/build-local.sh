@@ -7,7 +7,7 @@
 # patches, builds a pre-patched tarball, then produces an Arch package with
 # makepkg and optionally installs it.
 #
-# Usage: ./scripts/build-local.sh [--deb PATH | --version X] [--install] [--smoke-test] [--pkgrel N]
+# Usage: ./scripts/build-local.sh [--deb PATH | --version X] [--install] [--smoke-test] [--pkgrel N] [--strict-bridges]
 #
 set -euo pipefail
 
@@ -32,6 +32,7 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 # Parse arguments
 INSTALL_AFTER_BUILD=false
 SKIP_SMOKE_TEST="${SKIP_SMOKE_TEST:-1}"
+REPRODUCIBLE=false
 PKGREL=""
 DEB_PATH=""
 DEB_VERSION=""
@@ -43,6 +44,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --smoke-test)
             SKIP_SMOKE_TEST=0
+            shift
+            ;;
+        --strict-bridges)
+            export CDB_STRICT_BRIDGES=1
+            shift
+            ;;
+        --reproducible)
+            REPRODUCIBLE=true
             shift
             ;;
         --pkgrel|-r)
@@ -65,6 +74,9 @@ while [[ $# -gt 0 ]]; do
             echo "  --version <X>         Download a specific version from the apt repo"
             echo "  --install, -i         Install the package after building"
             echo "  --smoke-test          Run Electron smoke test (skipped by default)"
+            echo "  --reproducible        Compress with gzip -n -9 (byte-reproducible, slower) instead of pigz"
+            echo "  --strict-bridges      Fail instead of warn when a bundled bridge cannot be guaranteed within its glibc floor"
+            echo "                        (env: CDB_STRICT_BRIDGES=1; over-floor bridges are rebuilt in ubuntu:24.04 via docker when usable)"
             echo "  --pkgrel, -r <REL>    Override package release number (default: 1)"
             echo "  --help, -h            Show this help message"
             echo ""
@@ -77,7 +89,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 [--deb PATH | --version X] [--install] [--pkgrel <REL>] [--smoke-test]"
+            echo "Usage: $0 [--deb PATH | --version X] [--install] [--pkgrel <REL>] [--smoke-test] [--reproducible] [--strict-bridges]"
             exit 1
             ;;
     esac
@@ -134,32 +146,36 @@ else
     DEB_ARG="$APT_PACKAGES_URL"
 fi
 
-# Prefer the pre-built static musl x11-bridge if present (the CI/local convention
-# is to ship the musl binary so it runs across distros). build-patched-tarball.sh
-# falls back to `cargo build --release --target x86_64-unknown-linux-musl` otherwise.
-X11_BRIDGE_MUSL="$PROJECT_DIR/../computer-use/x11-bridge/target/x86_64-unknown-linux-musl/release/x11-bridge"
-if [ -z "${X11_BRIDGE_BIN:-}" ] && [ -f "$X11_BRIDGE_MUSL" ]; then
-    export X11_BRIDGE_BIN="$X11_BRIDGE_MUSL"
-    log_info "Using pre-built x11-bridge: $X11_BRIDGE_BIN"
-fi
+# Bridges to bundle. For every bridge whose checkout exists next to this repo we
+# always pass an explicit *_BRIDGE_BIN to build-patched-tarball.sh, so its
+# cargo-on-host fallback (which would bundle a host-glibc binary unchecked) is
+# not reached. Static musl bridges: pre-built from target/<musl>/release.
+# Dynamic bridges (floor glibc 2.39): the pre-built target/release binary only
+# when it is within the floor, else a ubuntu:24.04 container build like CI
+# (docker), else a loud warning (an error with --strict-bridges). See
+# scripts/bridge-glibc.sh.
+# shellcheck source=scripts/bridge-glibc.sh
+source "$SCRIPT_DIR/bridge-glibc.sh"
+CU_DIR="$PROJECT_DIR/../computer-use"
+log_info "Resolving Computer Use bridges (glibc floor check)..."
+cdb_resolve_bridge x11-bridge "$CU_DIR/x11-bridge" \
+    "$CU_DIR/x11-bridge/target/x86_64-unknown-linux-musl/release/x11-bridge" X11_BRIDGE_BIN || exit 1
+cdb_resolve_bridge wlroots-bridge "$CU_DIR/wlroots-bridge" \
+    "$CU_DIR/wlroots-bridge/target/x86_64-unknown-linux-musl/release/wlroots-bridge" WLROOTS_BRIDGE_BIN || exit 1
+cdb_resolve_bridge gnome-portal-bridge "$CU_DIR/gnome-portal-bridge" \
+    "$CU_DIR/gnome-portal-bridge/target/release/gnome-portal-bridge" GNOME_PORTAL_BRIDGE_BIN || exit 1
+cdb_resolve_bridge kwin-portal-bridge "$CU_DIR/kwin-portal-bridge" \
+    "$CU_DIR/kwin-portal-bridge/target/release/kwin-portal-bridge" KWIN_PORTAL_BRIDGE_BIN || exit 1
 
-# Same convention for the two Wayland bridges: prefer pre-built binaries.
-WLROOTS_BRIDGE_MUSL="$PROJECT_DIR/../computer-use/wlroots-bridge/target/x86_64-unknown-linux-musl/release/wlroots-bridge"
-if [ -z "${WLROOTS_BRIDGE_BIN:-}" ] && [ -f "$WLROOTS_BRIDGE_MUSL" ]; then
-    export WLROOTS_BRIDGE_BIN="$WLROOTS_BRIDGE_MUSL"
-    log_info "Using pre-built wlroots-bridge: $WLROOTS_BRIDGE_BIN"
-fi
-
-GNOME_PORTAL_BRIDGE_REL="$PROJECT_DIR/../computer-use/gnome-portal-bridge/target/release/gnome-portal-bridge"
-if [ -z "${GNOME_PORTAL_BRIDGE_BIN:-}" ] && [ -f "$GNOME_PORTAL_BRIDGE_REL" ]; then
-    export GNOME_PORTAL_BRIDGE_BIN="$GNOME_PORTAL_BRIDGE_REL"
-    log_info "Using pre-built gnome-portal-bridge: $GNOME_PORTAL_BRIDGE_BIN"
-fi
-
-KWIN_PORTAL_BRIDGE_REL="$PROJECT_DIR/../computer-use/kwin-portal-bridge/target/release/kwin-portal-bridge"
-if [ -z "${KWIN_PORTAL_BRIDGE_BIN:-}" ] && [ -f "$KWIN_PORTAL_BRIDGE_REL" ]; then
-    export KWIN_PORTAL_BRIDGE_BIN="$KWIN_PORTAL_BRIDGE_REL"
-    log_info "Using pre-built kwin-portal-bridge: $KWIN_PORTAL_BRIDGE_BIN"
+# Compress with pigz when available (about 5x faster than gzip -9). CI calls
+# build-patched-tarball.sh directly without this and keeps byte-reproducible
+# gzip; --reproducible keeps gzip for local builds too.
+if [ "$REPRODUCIBLE" = true ]; then
+    unset CLAUDE_ALLOW_PIGZ
+elif command -v pigz &> /dev/null; then
+    export CLAUDE_ALLOW_PIGZ=1
+else
+    log_info "Install pigz for a faster local build (using gzip)"
 fi
 
 # Build the patched tarball (ingest the .deb)

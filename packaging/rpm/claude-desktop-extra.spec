@@ -196,7 +196,7 @@ cat > %{buildroot}/usr/share/applications/com.anthropic.Claude.desktop << 'DESKT
 Name=Claude
 Comment=Desktop application for Claude.ai
 GenericName=AI Assistant
-Keywords=AI;Chat;Assistant;Claude;Code;LLM;
+Keywords=AI;Chat;Assistant;Code;LLM;
 Exec=claude-desktop %U
 Icon=claude-desktop
 Type=Application
@@ -253,6 +253,28 @@ if [ ! -f "$MIME_SRC" ]; then
     exit 1
 fi
 install -pDm644 "$MIME_SRC" %{buildroot}/usr/share/mime/packages/com.anthropic.Claude.xml
+
+# Opt-in TPM access (cloud Cowork / Dispatch Computer Use) and KVM access (local
+# Cowork VM): the rules, the vhost_vsock modules-load file and their root helpers
+# stay disabled inside the tree (%%files covers them through
+# /usr/lib/claude-desktop/, and __requires_exclude_from keeps the helpers'
+# shebangs out of the generated requires); the helpers' polkit actions are
+# package files so pkexec shows our prompts. No scriptlet touches them.
+UDEV_DIR=%{buildroot}/usr/lib/claude-desktop/resources/linux-udev
+UDEV_POLICY=io.github.patrickjaja.claude-desktop-extra.tpm-access.policy
+UDEV_KVM_POLICY=io.github.patrickjaja.claude-desktop-extra.kvm-access.policy
+for f in 70-claude-desktop-extra-tpm.rules cdb-tpm-access "$UDEV_POLICY" \
+        70-claude-desktop-extra-kvm.rules claude-desktop-extra-vsock.conf cdb-kvm-access "$UDEV_KVM_POLICY"; do
+    if [ ! -f "$UDEV_DIR/$f" ]; then
+        echo "ERROR: resources/linux-udev/$f missing from the tarball - rebuild it" >&2
+        exit 1
+    fi
+done
+chmod 0755 "$UDEV_DIR" "$UDEV_DIR/cdb-tpm-access" "$UDEV_DIR/cdb-kvm-access"
+chmod 0644 "$UDEV_DIR/70-claude-desktop-extra-tpm.rules" "$UDEV_DIR/$UDEV_POLICY" \
+    "$UDEV_DIR/70-claude-desktop-extra-kvm.rules" "$UDEV_DIR/claude-desktop-extra-vsock.conf" "$UDEV_DIR/$UDEV_KVM_POLICY"
+install -pDm644 "$UDEV_DIR/$UDEV_POLICY" %{buildroot}/usr/share/polkit-1/actions/$UDEV_POLICY
+install -pDm644 "$UDEV_DIR/$UDEV_KVM_POLICY" %{buildroot}/usr/share/polkit-1/actions/$UDEV_KVM_POLICY
 
 %post
 # Ensure chrome-sandbox has SUID root (required by Chromium's setuid sandbox)
@@ -350,3 +372,5 @@ fi
 /usr/share/gnome-shell/search-providers/com.anthropic.Claude.search-provider.ini
 /usr/share/dbus-1/services/com.anthropic.Claude.SearchProvider.service
 /usr/share/mime/packages/com.anthropic.Claude.xml
+/usr/share/polkit-1/actions/io.github.patrickjaja.claude-desktop-extra.tpm-access.policy
+/usr/share/polkit-1/actions/io.github.patrickjaja.claude-desktop-extra.kvm-access.policy

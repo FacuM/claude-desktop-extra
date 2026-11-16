@@ -213,11 +213,11 @@ const FIXTURE_BARE = dialog(`
 const DRIVER = String.raw`
 var SVGNS = "http://www.w3.org/2000/svg";
 var ICON_SEL = '[data-cds="Icon"]';
-var LABELS = ["Themes", "Community", "Models", "Anthropic", "Deployment"];
+var LABELS = ["Themes", "Community", "Cowork (Linux)", "Models", "Anthropic", "Deployment"];
 // Upstream's nav column is narrow and truncates, so the long names are
 // shortened there and carried in a tooltip instead. The panels keep the full
 // name in their h1 - asserted in featuresPanel()/modelsPanel()/flagsPanel() below.
-var TOOLTIPS = { Community: "Community Features", Models: "Custom models", Anthropic: "Anthropic Features" };
+var TOOLTIPS = { Community: "Community Features", "Cowork (Linux)": "Cowork and Computer Use on Linux", Models: "Custom models", Anthropic: "Anthropic Features" };
 
 function navbox() { return document.getElementById("navbox"); }
 
@@ -255,6 +255,18 @@ function labelSpans(control) {
 
 // The Themes panel: the 91 real palettes are grouped, so a built-in like mario
 // cannot get lost in the middle of the community ones.
+
+// Headline contract shared by every Extra page: the label sits in .cdbx-sec-t on a
+// .cdbx-sec-h (the one selector the accent/sheen style hangs on), and a count
+// badge is a separate .cdbx-sec-n span, never the label itself.
+function headlineContract(root, what) {
+  const heads = Array.from(root.querySelectorAll(".cdbx-sec-h")).filter(function (h) { return h.querySelector(".cdbx-sec-t"); });
+  ok(heads.length > 0 && heads.every(function (h) {
+    return h.firstElementChild.classList.contains("cdbx-sec-t") &&
+      Array.from(h.querySelectorAll(".cdbx-sec-n")).every(function (n) { return !n.classList.contains("cdbx-sec-t") && n.parentElement === h; });
+  }), what + ": headlines are .cdbx-sec-h > .cdbx-sec-t (+ separate .cdbx-sec-n badge), " + heads.length + " checked");
+}
+
 function sections() {
   const host = document.querySelector(".cdbx-sections");
   const out = [];
@@ -416,6 +428,110 @@ async function featuresPanel(featuresItem) {
        "the state line follows the flip: " + cmRow.querySelector(".cdbx-state").textContent);
   }
 
+  // The "Settings > Extra > Models" words are an inline link that opens our Models
+  // page in the same dialog; the strings behind the row (search haystack) stay plain.
+  {
+    const LINK = "Settings > Extra > Models";
+    const cur0 = function (it) { return it.getAttribute("aria-current") === "page" || !!it.querySelector('[aria-current="page"]'); };
+    const rowOf = function (p) { return p.querySelector(cmSel).closest(".cdbx-row"); };
+    const links = function (n) { return Array.prototype.slice.call(n.querySelectorAll(".cdbx-link")); };
+    const cmRow = rowOf(panel);
+    const noteLinks = links(cmRow.querySelector(".cdbx-note"));
+    ok(noteLinks.length === 1 && noteLinks[0].textContent === LINK,
+       "Custom models note: exactly one .cdbx-link reading " + LINK + " (" + noteLinks.length + ")");
+    ok(noteLinks.length === 1 && /^Adds models from .* set them up in $/.test(
+         cmRow.querySelector(".cdbx-note").firstChild.textContent) &&
+       /Applies live\.$/.test(cmRow.querySelector(".cdbx-note").textContent) &&
+       cmRow.querySelector(".cdbx-note").textContent.indexOf("set them up in " + LINK + ". Applies live.") > 0,
+       "the note text reads the same as before");
+    ok(noteLinks.length === 1 && (noteLinks[0].tagName === "BUTTON" || noteLinks[0].tagName === "A") &&
+       noteLinks[0].tabIndex >= 0, "the link is focusable");
+    ok(links(cmRow.querySelector(".cdbx-state")).length === 0, "configured: the state line carries no link");
+    const otherLinks = links(panel).filter(function (l) { return !cmRow.contains(l); });
+    ok(otherLinks.length === 0, "no other row grew a link (" + otherLinks.length + ")");
+    const sbox = panel.querySelector(".cdbx-search");
+    sbox.value = "endpoint"; sbox.dispatchEvent(new Event("input", { bubbles: true }));
+    await sleep(30);
+    ok(cmRow.closest(".cdbx-list").style.display !== "none", "the filter 'endpoint' still matches the Custom models row");
+    sbox.value = ""; sbox.dispatchEvent(new Event("input", { bubbles: true }));
+    await sleep(30);
+
+    window.__customModelsState = { ok: true, enabled: false, configured: false, lockedByJsonc: false, source: "default", surfaces: ["code"], models: 0, providers: [] };
+    window.__cmConfig = { ok: true, enabled: false, configured: false, lockedByJsonc: false, source: "default",
+      surfaces: ["code"], models: 0, providers: [], paths: {} };
+    featuresItem.click();
+    await sleep(120);
+    const p2 = document.querySelector(".cdbx-panel");
+    const r2 = rowOf(p2);
+    const sl = links(r2.querySelector(".cdbx-state"));
+    ok(sl.length === 1 && sl[0].textContent === LINK && r2.querySelector(".cdbx-state").textContent ===
+       "off - no model configured yet (" + LINK + ")",
+       "nothing configured: the state line carries the link: " + r2.querySelector(".cdbx-state").textContent);
+
+    const modelsItemEl = ourItems()[3];
+    const cmNow = function () { return document.querySelector(cmSel); };
+    ok(cur0(ourItems()[1]) && !cur0(modelsItemEl), "before: the Community item holds aria-current=page, Models does not");
+    const cmBefore = cmNow().getAttribute("aria-checked"), callsBefore = (window.__customModelsCalls || []).length;
+    // Space: opens only via the native click on keyup, so keydown alone must do nothing
+    const spaceEv = new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true });
+    links(r2.querySelector(".cdbx-note"))[0].dispatchEvent(spaceEv);
+    await sleep(100);
+    ok(document.querySelector(".cdbx-panel .cdbx-h1").textContent === "Community Features" &&
+       cmNow().getAttribute("aria-checked") === cmBefore && (window.__customModelsCalls || []).length === callsBefore,
+       "Space keydown on the link opens nothing and flips nothing");
+    // click
+    links(r2.querySelector(".cdbx-note"))[0].click();
+    await sleep(150);
+    let np = document.querySelector(".cdbx-panel");
+    ok(!!np && np.querySelector(".cdbx-h1").textContent === "Custom models",
+       "clicking the note link opens the Models panel: " + (np && np.querySelector(".cdbx-h1").textContent));
+    const cur = function (it) { return it.getAttribute("aria-current") === "page" || !!it.querySelector('[aria-current="page"]'); };
+    ok(cur(modelsItemEl) && !cur(ourItems()[1]),
+       "and selectOurs moved aria-current=page from the Community item to the Models item");
+    ok(cmBefore === "false" && window.__customModelsCalls.length === callsBefore,
+       "clicking the note link did not flip the Custom models switch");
+    // Enter on the state-line link
+    featuresItem.click();
+    await sleep(120);
+    const r3 = rowOf(document.querySelector(".cdbx-panel"));
+    const sl3 = links(r3.querySelector(".cdbx-state"))[0];
+    sl3.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await sleep(150);
+    np = document.querySelector(".cdbx-panel");
+    ok(!!np && np.querySelector(".cdbx-h1").textContent === "Custom models",
+       "pressing Enter on the state-line link opens the Models panel too");
+    ok(window.__customModelsCalls.length === callsBefore, "and Enter did not call customModelsSet either");
+    featuresItem.click();
+    await sleep(120);
+    ok(document.querySelector(cmSel).getAttribute("aria-checked") === cmBefore, "the switch is still as it was after both link uses");
+    window.__customModelsState = null;
+    featuresItem.click();
+    await sleep(120);
+  }
+
+  const author = panel.querySelector('#cdbx-autofix-authors');
+  ok(!!author, "renders trusted-author list editor");
+  if (author) {
+    const row = author.closest(".cdbx-row"), save = row.querySelector("button");
+    ok(author.value === "", "additional trust list defaults empty");
+    ok(!!row.querySelector('label[for="cdbx-autofix-authors"]'), "editor has an accessible label");
+    ok(/^Lets Auto-fix also handle PRs opened by other GitHub users or bots\./.test(row.querySelector(".cdbx-note").textContent) &&
+       /only the signed-in gh user counts/.test(row.textContent), "editor explains the scope in plain words");
+    author.value = "github.com/my-app[bot]\nghe.example/human";
+    save.click(); save.click();
+    await sleep(60);
+    ok(window.__authorCalls.length === 1 && window.__authorCalls[0].join(" ") === "github.com/my-app[bot] ghe.example/human",
+       "list save serializes identities and suppresses duplicate submissions");
+    ok(/2 additional trusted author/.test(row.textContent), "saved status reports exact list size");
+    ok(!restartUp(row), "list applies without restart");
+    author.value = ""; save.click(); await sleep(60);
+    ok(window.__authorCalls[1].length === 0, "empty save revokes additional authors");
+    author.value = "invalid"; save.click(); await sleep(60);
+    ok(/Could not save trusted authors/.test(row.textContent) && author.value === "invalid" && !save.disabled,
+       "failed save retains draft and reports error for retry");
+    author.value = "";
+  }
+
   // --- Load large sessions in full: opt-in, NOT live, numbers shown but not edited
   const tlSel = '.cdbx-switch[aria-label="load large Code sessions in full"]';
   const tl = panel.querySelector(tlSel);
@@ -428,11 +544,10 @@ async function featuresPanel(featuresItem) {
     ok(tl.getAttribute("aria-checked") === "false", "off by default (opt-in)");
     ok(!tl.disabled, "enabled when the .jsonc does not lock it");
     ok(tlState() === "off - Anthropic's limits", "the off state says Anthropic's limits apply: " + tlState());
-    ok(/browser screenshots/.test(tlNote), "the note names what it is for (long sessions with browser screenshots)");
-    ok(/exactly as Anthropic ships them/.test(tlNote), "the note promises off leaves Anthropic's limits as shipped");
+    ok(/^Opens very large sessions in full/.test(tlNote), "the note leads with what it does for the user");
+    ok(/off keeps Anthropic's limits/.test(tlNote), "the note promises off leaves Anthropic's limits as shipped");
     ok(/Takes effect after a restart/.test(tlNote), "the note says it needs a restart");
-    ok(/by default/.test(tlNote) && /adjustable in claude-desktop-extra\.jsonc/.test(tlNote),
-       "the note says the 256/192 are defaults and can be adjusted in the config file (file only, no GUI field)");
+    ok(!/256|192/.test(tlNote), "the visible note carries no byte figures (they are search keywords)");
     ok(tlNote.length < 700, "the note stays within the length range of the other rows (" + tlNote.length + " chars)");
     ok(!tlRow.querySelector("input"), "no number field in the row: the numbers stay in the file");
 
@@ -454,6 +569,94 @@ async function featuresPanel(featuresItem) {
     ok(!restartUp(tlRow), "and takes its Restart now away again");
     ok(tlToast() === "Large sessions off - no restart needed",
        "...and so does its toast, from the main side's pendingRestart: " + tlToast());
+  }
+
+  // --- Auto-fix notices (ready to merge, comments after merge): opt-in, live, says its cost
+  {
+    const afSel = '.cdbx-switch[aria-label="Auto-fix notices: ready to merge, comments after merge"]';
+    const af = panel.querySelector(afSel);
+    ok(!!af, "renders the Auto-fix notices switch");
+    if (af) {
+      const afRow = af.closest(".cdbx-row");
+      const afNote = afRow.querySelector(".cdbx-note").textContent;
+      ok(afRow.querySelector(".cdbx-id").textContent === "Auto-fix notices: ready to merge, comments after merge",
+         "titled Auto-fix notices: ready to merge, comments after merge");
+      ok(afRow.parentElement.parentElement.firstElementChild.textContent === "Pull requests",
+         "under the Pull requests subheading");
+      ok(af.getAttribute("aria-checked") === "false" && !af.disabled, "off by default (opt-in), not locked");
+      ok(/^Tells the Code session when a PR with Auto-fix on is ready to merge/.test(afNote) &&
+         /one GitHub read per Auto-fix PR/.test(afNote) && /one model turn per notice/.test(afNote),
+         "the note says what it costs: " + afNote);
+      ok(/never merges/.test(afNote) && /Applies live/.test(afNote), "the note says it never merges and applies live");
+      ok(/new comments after it merges/.test(afNote) && /never merges/.test(afNote),
+         "the note covers post-merge comments and that it never merges: " + afNote);
+      af.click();
+      await sleep(60);
+      ok((window.__afmrCalls || []).length === 1 && window.__afmrCalls[0] === true,
+         "clicking it calls autoFixMergeReadySet(true) exactly once: " + JSON.stringify(window.__afmrCalls));
+      ok(af.getAttribute("aria-checked") === "true", "the switch reflects the write");
+      af.click();
+      await sleep(60);
+      ok(af.getAttribute("aria-checked") === "false", "and flips back");
+    }
+  }
+
+  // --- Native merged-PR auto-archive grace: presets/custom and validation.
+  {
+    const preset = panel.querySelector('#cdbx-archive-grace-preset');
+    const custom = panel.querySelector('#cdbx-archive-grace-custom');
+    ok(!!preset && !!custom, "archive grace renders labeled preset/custom controls");
+    if (preset && custom) {
+      const row = preset.closest('.cdbx-row');
+      const save = row.querySelector('button');
+      ok(preset.value === '0' && custom.hidden, "archive delay defaults to native immediate behavior");
+      ok(preset.labels.length === 1 && custom.labels.length === 1, "both grace fields have accessible labels");
+      ok([...preset.options].map(o => o.value).join(',') === '0,5,15,30,60,custom', "conventional presets and custom are available");
+      preset.value = '15'; preset.dispatchEvent(new Event('change')); save.click(); await sleep(60);
+      ok(window.__archiveGraceCalls.join(',') === '15', "preset saves minutes once");
+      preset.value = 'custom'; preset.dispatchEvent(new Event('change'));
+      ok(!custom.hidden && !custom.disabled, "custom field is shown and enabled");
+      custom.value = '1.5'; save.click(); await sleep(30);
+      ok(window.__archiveGraceCalls.length === 1 && /whole number/.test(row.querySelector('.cdbx-state').textContent), "fractional minutes rejected without IPC");
+      custom.value = '10081'; save.click(); await sleep(30);
+      ok(window.__archiveGraceCalls.length === 1, "custom bound enforced");
+      custom.value = '42'; save.click(); await sleep(60);
+      ok(window.__archiveGraceCalls.join(',') === '15,42' && preset.value === 'custom' && custom.value === '42', "custom minutes save and remain visible");
+      preset.value = '0'; preset.dispatchEvent(new Event('change')); save.click(); await sleep(60);
+      ok(window.__archiveGraceCalls.join(',') === '15,42,0' && custom.hidden, "immediate preset clears delay");
+    }
+  }
+
+  // --- Code: native dialog with "Allow always" for starting other sessions.
+  // Opt-in switch plus a forget button; the page can never add an approval.
+  {
+    const ssSel = '.cdbx-switch[aria-label="use a native dialog with Allow always for starting other sessions"]';
+    const ss = panel.querySelector(ssSel);
+    ok(!!ss, "renders the session-start dialog switch");
+    if (ss) {
+      const ssRow = ss.closest(".cdbx-row");
+      const ssNote = ssRow.querySelector(".cdbx-note").textContent;
+      ok(ssRow.querySelector(".cdbx-id").textContent === "Native dialog with 'Allow always' for starting other sessions",
+         "titled Native dialog with 'Allow always' for starting other sessions");
+      ok(ssRow.parentElement.parentElement.firstElementChild.textContent === "Code", "directly under the Code group, not Pull requests");
+      ok(ss.getAttribute("aria-checked") === "false" && !ss.disabled, "off by default (opt-in), not locked");
+      ok(/^Asks with a system dialog/.test(ssNote) && /Allow always/.test(ssNote) &&
+         /Off \(the default\)/.test(ssNote) && /forgets every/.test(ssNote) && /Applies live/.test(ssNote),
+         "the note states the dialog, default, switch-off forgets and live: " + ssNote);
+      const forget = Array.from(ssRow.querySelectorAll("button")).find(function (b) { return b.textContent === "Forget remembered approvals"; });
+      ok(!!forget && !forget.disabled, "two remembered approvals -> an enabled forget button");
+      ok(/2 project\/destination approvals remembered/.test(ssRow.textContent), "the row counts scoped approvals, not distinct projects");
+      if (forget) {
+        forget.click();
+        await sleep(60);
+        ok(window.__ssForgets === 1 && forget.disabled && /No remembered approvals/.test(ssRow.textContent),
+           "forget uses its own bridge call and the row reflects it live");
+      }
+      ss.click();
+      await sleep(60);
+      ok(JSON.stringify(window.__ssCalls || []) === "[true]", "clicking calls sessionStartAlwaysAllowSet(true) once: " + JSON.stringify(window.__ssCalls));
+      ok(ss.getAttribute("aria-checked") === "true", "the switch reflects the write");
+    }
   }
 
   // --- non-Anthropic gateway models: read at startup, so the same per-row
@@ -812,6 +1015,29 @@ async function featuresPanel(featuresItem) {
   // Transparent window is both: its switch needs a restart, its slider is live,
   // and its note has to say each.
   const MIXED_ROWS = ["Transparent window"];
+  // Computer Use has its own entry now: none of its rows is left here. The one
+  // exception is the community switch "Escape stops Computer Use" under its own
+  // Computer Use group headline: without exactly that row and that headline,
+  // no "Computer Use" text may appear anywhere in Community Features.
+  (function () {
+    const copy = panel.cloneNode(true);
+    let escRows = 0, cuHeads = 0;
+    Array.prototype.forEach.call(copy.querySelectorAll(".cdbx-row"), function (r) {
+      const id = r.querySelector(".cdbx-id");
+      if (id && id.textContent === "Escape stops Computer Use") { escRows++; r.remove(); }
+    });
+    Array.prototype.forEach.call(copy.querySelectorAll(".cdbx-group"), function (g) {
+      if (g.firstElementChild && g.firstElementChild.textContent === "Computer Use") {
+        cuHeads++;
+        const sub = g.children[1];
+        g.firstElementChild.remove();
+        if (sub && sub.textContent === "Computer Use on Linux") sub.remove();
+      }
+    });
+    ok(escRows === 1 && cuHeads === 1 && !/Computer Use/.test(copy.textContent) &&
+       !Array.prototype.some.call(panel.querySelectorAll(".cdbx-sec-t"), function (n) { return /Computer Use|Options/.test(n.textContent); }),
+       "no Computer Use text in Community Features except the one Escape switch row and its group headline (" + escRows + " row, " + cuHeads + " headline)");
+  })();
   const rowNotes = Array.from(panel.querySelectorAll(".cdbx-row")).map(function (r) {
     return {
       title: r.querySelector(".cdbx-id").textContent,
@@ -849,18 +1075,58 @@ async function featuresPanel(featuresItem) {
     ok(document.activeElement === box, "the filter has the caret when the panel opens, ready to type into");
     ok(/^Filter \d+ features by name or description$/.test(box.placeholder),
        "which says what it filters: " + box.placeholder);
-    const heads = Array.from(panel.querySelectorAll(".cdbx-sec-h"));
-    const visible = function () {
-      return heads.filter(function (h) { return h.style.display !== "none"; })
-        .map(function (h) { return h.textContent; });
+    // Group headlines: four, in order, with the Pull requests subgroup under Code.
+    const groupNodes = Array.from(panel.querySelectorAll(".cdbx-group"));
+    const topGroups = groupNodes.filter(function (g) { return !g.classList.contains("cdbx-group-sub"); });
+    const gtitle = function (g) { return g.firstElementChild.textContent; };
+    ok(topGroups.map(gtitle).join("|") === "Code|App and window|Models and 3P|Computer Use",
+       "four group headlines in order: " + topGroups.map(gtitle).join("|"));
+    ok(topGroups.map(function (g) { return g.children[1].textContent; }).join("|") ===
+       "Code tab: panels, files, diffs and sessions|Look and behavior of the app window, tray and theme|Extra models and gateway options|Computer Use on Linux",
+       "each headline has its one-line subtitle");
+    const subGroup = groupNodes.filter(function (g) { return g.classList.contains("cdbx-group-sub"); });
+    ok(subGroup.length === 1 && gtitle(subGroup[0]) === "Pull requests" && subGroup[0].parentElement === topGroups[0] &&
+       subGroup[0].children[1].textContent === "Auto-fix and auto-archive for your GitHub PRs",
+       "Pull requests is the one subgroup, inside Code, with its subtitle");
+    ok(groupNodes.every(function (g) { return g.firstElementChild.classList.contains("cdbx-grouphdr"); }) &&
+       subGroup[0].firstElementChild.classList.contains("cdbx-grouphdr-sub"),
+       "every Community group headline carries cdbx-grouphdr, the subgroup also cdbx-grouphdr-sub");
+    ok(Array.from(panel.querySelectorAll(".cdbx-grouphdr")).length === groupNodes.length &&
+       Array.from(panel.querySelectorAll(".cdbx-sec-h:not(.cdbx-grouphdr)")).every(function (h) { return !h.closest(".cdbx-group"); }),
+       "no other heading carries the class");
+    const titlesIn = function (g, own) {
+      return Array.from(g.querySelectorAll(".cdbx-row .cdbx-id")).filter(function (n) {
+        return !own || n.closest(".cdbx-group") === g;
+      }).map(function (n) { return n.textContent; });
     };
-    ok(visible().length === heads.length, "every row is visible before typing");
+    ok(titlesIn(topGroups[0], true).join("|") === "Panel tabs|Files quick open|Diff view modes|Load large sessions in full|Native dialog with 'Allow always' for starting other sessions|Jira issue tracker",
+       "Code rows in order, the session dialog before the subgroup: " + titlesIn(topGroups[0], true).join("|"));
+    ok(titlesIn(subGroup[0]).join("|") === "Trusted Auto-fix PR authors|Auto-fix notices: ready to merge, comments after merge|Auto-archive delay after a PR merges or closes",
+       "Pull requests rows: " + titlesIn(subGroup[0]).join("|"));
+    // The harness bridge has no tray or developer-tools halves, so those two rows are skipped here.
+    const appOrder = ["Hide window controls", "Native titlebar", "Transparent window", "Always use the white tray icon", "Theme picker", "Frosted message input", "Frost only the input field", "Developer tools"];
+    ok(titlesIn(topGroups[1]).join("|") === appOrder.filter(function (t) { return titlesIn(topGroups[1]).indexOf(t) >= 0; }).join("|") &&
+       titlesIn(topGroups[1]).length >= 4,
+       "App and window rows in order: " + titlesIn(topGroups[1]).join("|"));
+    ok(titlesIn(topGroups[2]).join("|") === "Custom models|Allow non-Anthropic models",
+       "Models and 3P rows: " + titlesIn(topGroups[2]).join("|"));
+    ok(!panel.querySelector(".cdbx-row ~ .cdbx-sec-h, .cdbx-list > .cdbx-sec-h") &&
+       Array.from(panel.querySelectorAll(".cdbx-sec-t")).length === 0,
+       "no per-row section label is left");
+
+    const heads = groupNodes;
+    const visible = function () {
+      return heads.filter(function (h) { return h.style.display !== "none"; }).map(gtitle);
+    };
+    ok(visible().length === heads.length, "every group is visible before typing");
+    // The trusted-authors row is a list editor, not a switch, so count switches rather than heads.
+    const switchesBefore = panel.querySelectorAll(".cdbx-switch").length;
 
     await type("panel tabs");
-    ok(visible().join(",") === "Layout",
-       "a title match leaves only that section: " + visible().join(","));
+    ok(visible().join(",") === "Code",
+       "a title match leaves only its group: " + visible().join(","));
     ok(!!panel.querySelector(".cdbx-row .cdbx-id"), "the matching row is still in the DOM");
-    ok(panel.querySelectorAll(".cdbx-switch").length === heads.length,
+    ok(panel.querySelectorAll(".cdbx-switch").length === switchesBefore,
        "no row was re-rendered - all switches survive the filter (" +
        panel.querySelectorAll(".cdbx-switch").length + ")");
     ok(window.__panelTabsCalls.length === 1 && window.__pickerCalls.length === 2,
@@ -868,21 +1134,29 @@ async function featuresPanel(featuresItem) {
        JSON.stringify(window.__panelTabsCalls) + JSON.stringify(window.__pickerCalls));
 
     await type("ctrl+shift+t");
-    ok(visible().join(",") === "Shortcuts",
+    ok(visible().join(",") === "App and window",
        "a note match works too: " + visible().join(","));
 
-    await type("source control");
-    ok(visible().join(",") === "Source control", "so does a section match: " + visible().join(","));
+    // Words that only live in a row's note or keywords still find it.
+    await type("gallery");
+    ok(visible().join(",") === "App and window", "a word only in the note or keywords finds its row: " + visible().join(","));
+    await type("keep this session");
+    ok(visible().join(",") === "Code,Pull requests", "a word only in the archive-delay note finds it, under Code and Pull requests: " + visible().join(","));
+    await type("deepseek");
+    ok(visible().join(",") === "Models and 3P",
+       "a word in the model rows opens only Models and 3P: " + visible().join(","));
+    await type("pull requests");
+    ok(visible().join(",") === "", "a headline alone is not searchable text: " + visible().join(","));
 
     await type("no such feature");
-    ok(visible().length === 0, "a needle nothing matches hides every row");
+    ok(visible().length === 0, "a needle nothing matches hides every row and every group headline");
     const empty = panel.querySelector(".cdbx-empty");
     ok(!!empty && empty.style.display !== "none" &&
        empty.textContent === "No feature matches that filter.",
        "and the empty state says so");
 
     await type("");
-    ok(visible().length === heads.length, "clearing the filter brings every row back");
+    ok(visible().length === heads.length, "clearing the filter brings every group and row back");
     ok(panel.querySelector(".cdbx-empty").style.display === "none", "and hides the empty state");
   }
 
@@ -894,9 +1168,22 @@ async function featuresPanel(featuresItem) {
   await sleep(30);
   window.__panelTabsState = { ok: true, enabled: true, lockedByJsonc: true, source: "jsonc-locked" };
   window.__pickerState = { ok: true, enabled: false, lockedByJsonc: true };
+  window.__archiveGraceState = { ok: true, minutes: 30, lockedByJsonc: true, warning: null };
   featuresItem.click();
   await sleep(120);
   const panel2 = document.querySelector(".cdbx-panel");
+  {
+    const preset2 = panel2 && panel2.querySelector('#cdbx-archive-grace-preset');
+    ok(!!preset2, "the archive delay row renders again after remounting the panel");
+    if (preset2) {
+      const row2 = preset2.closest('.cdbx-row'), line = row2.querySelector('.cdbx-state').textContent;
+      ok(preset2.value === '30' && preset2.disabled && row2.querySelector('button').disabled,
+         "a .jsonc-locked archive delay shows its value with the preset and Save disabled");
+      ok(line === "30 minutes after confirmation - set in claude-desktop-extra.jsonc; edit that file to change this",
+         "and the state line names the file to edit: " + line);
+    }
+    window.__archiveGraceState = null;
+  }
   const tabs2 = panel2 && panel2.querySelector(tabsSel);
   ok(!!tabs2, "the panel tabs switch renders again after remounting the panel");
   if (tabs2) {
@@ -954,6 +1241,100 @@ async function featuresPanel(featuresItem) {
     window.__tlState = undefined;
   }
   window.__pickerState = { ok: true, enabled: true, lockedByJsonc: null };
+
+  // The downstream Windows build carries this page; there the Escape switch's
+  // main side answers "Linux only": the row hides, and so does the "Computer
+  // Use" group it was the only row of (no empty headline left behind).
+  {
+    window.__cuEscState = { ok: false, error: "Escape stops Computer Use is Linux only" };
+    featuresItem.click();
+    await sleep(150);
+    const wp = document.querySelector(".cdbx-panel");
+    const heads = Array.from(wp.querySelectorAll(".cdbx-group")).filter(function (g) { return g.style.display !== "none"; })
+      .map(function (g) { return g.firstElementChild.textContent; });
+    const escRow = Array.from(wp.querySelectorAll(".cdbx-row .cdbx-id")).some(function (n) { return n.textContent === "Escape stops Computer Use"; });
+    ok(heads.indexOf("Computer Use") < 0 && !escRow && heads.join("|") === "Code|Pull requests|App and window|Models and 3P",
+       "win32 ('Linux only'): no Escape row and no 'Computer Use' headline; the other groups stay: " + heads.join("|"));
+    window.__cuEscState = undefined;
+    featuresItem.click();
+    await sleep(150);
+    const lp = document.querySelector(".cdbx-panel");
+    ok(Array.from(lp.querySelectorAll(".cdbx-group")).some(function (g) { return g.style.display !== "none" && g.firstElementChild.textContent === "Computer Use"; }),
+       "Linux again: the Computer Use group is back");
+  }
+  // Jira issue tracker: the i beside the token label holds the scope list (hover or focus shows it,
+  // a click pins it, Escape or a click outside closes it); Test connection reports one line per feature.
+  featuresItem.click();
+  await sleep(150);
+  const jiraToken = document.getElementById("cdbx-jira-token");
+  ok(!!jiraToken, "renders the Jira card");
+  if (jiraToken) {
+    const field = jiraToken.closest(".cdbx-jira-field");
+    const info = field && field.querySelector('button[aria-label="Which scopes the token needs"]');
+    const pop = info && document.getElementById(info.getAttribute("aria-controls") || "");
+    ok(!!info && !!pop, "the token label has an i that controls a scope popover");
+    if (info && pop) {
+      const shown = function () { return !pop.hidden && info.getAttribute("aria-expanded") === "true"; };
+      ok(!shown(), "the scope popover starts hidden");
+      info.parentElement.dispatchEvent(new MouseEvent("mouseenter"));
+      ok(shown(), "hover shows it");
+      info.parentElement.dispatchEvent(new MouseEvent("mouseleave"));
+      ok(!shown(), "leaving hides it");
+      info.dispatchEvent(new FocusEvent("focus"));
+      ok(shown(), "keyboard focus shows it");
+      ok(pop.firstElementChild && pop.firstElementChild.textContent === "A classic token needs no scopes. A scoped token needs these:",
+         "it opens with the classic-token line: " + (pop.firstElementChild && pop.firstElementChild.textContent));
+      const groups = Array.prototype.map.call(pop.querySelectorAll(".cdbx-jira-scope-group"), function (g) {
+        return g.querySelector(".cdbx-jira-scope-name").textContent + ": " + Array.prototype.map.call(g.querySelectorAll("code"), function (c) { return c.textContent; }).join(" ");
+      });
+      ok(groups.join(" | ") === "Basic: read:jira-work read:jira-user write:jira-work | Board and Backlog: read:board-scope:jira-software read:project:jira | Scrum boards only, untested: read:sprint:jira-software",
+         "the groups come from pref:read: " + groups.join(" | "));
+      info.dispatchEvent(new FocusEvent("blur"));
+      ok(!shown(), "blur hides it while not pinned");
+      info.click();
+      ok(shown(), "a click pins it");
+      info.dispatchEvent(new FocusEvent("blur"));
+      ok(shown(), "a pinned popover stays on blur, so the scope names can be selected");
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      ok(!shown(), "Escape closes it");
+      info.click();
+      pop.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+      ok(shown(), "a click inside the popover keeps it");
+      document.body.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+      ok(!shown(), "a click outside closes it");
+    }
+    const card = jiraToken.closest(".cdbx-row");
+    const testBtn = Array.prototype.filter.call(card.querySelectorAll("button"), function (b) { return b.textContent === "Test connection"; })[0];
+    testBtn.click();
+    await sleep(80);
+    const state = card.querySelector(".cdbx-jira-form .cdbx-state");
+    ok(state.textContent === "Connected as Ada · scoped token", "the head line names the token type: " + state.textContent);
+    const lines = Array.prototype.map.call(card.querySelectorAll(".cdbx-jira-checks li"), function (li) { return li.getAttribute("data-state") + " " + li.textContent; });
+    ok(lines.join(" | ") === "ok Tickets: OK | failed Board and Backlog: Probably missing read:board-scope:jira-software (inferred). The list groups by status instead. | not-checked Board view columns: Not checked: no project with a board",
+       "one line per feature: " + lines.join(" | "));
+    // Save with a new site and no token: main clears the token (pref:set answers with pref:read's
+    // shape and tokenSet false), and the card says so instead of "saved".
+    const view = function (site, tokenSet) {
+      return { ok: true, enabled: true, locked: false, site: site, email: "dev@example.com", tokenSet: tokenSet, keyringOk: true, keyringBackend: "gnome_libsecret",
+        template: "", defaultTemplate: "Work on {{key}}", scopes: [] };
+    };
+    const saveBtn = Array.prototype.filter.call(card.querySelectorAll("button"), function (b) { return b.textContent === "Save site, email and token"; })[0];
+    const siteIn = document.getElementById("cdbx-jira-site");
+    window.__jiraSets = [];
+    window.__jiraSetRes = view("https://acme.atlassian.net", true);
+    saveBtn.click();
+    await sleep(80);
+    ok(JSON.stringify(window.__jiraSets) === JSON.stringify([{ site: "https://acme.atlassian.net", email: "dev@example.com" }]), "Save sends site and email, no token: " + JSON.stringify(window.__jiraSets));
+    ok(state.textContent === "Token saved, encrypted by the system keyring.", "the same site keeps the token: " + state.textContent);
+    siteIn.value = "https://other.atlassian.net";
+    window.__jiraSetRes = view("https://other.atlassian.net", false);
+    saveBtn.click();
+    await sleep(80);
+    ok(state.textContent === "The site changed, so the saved token was cleared. Enter the API token for https://other.atlassian.net and save again.",
+       "a new site says the token was cleared: " + state.textContent);
+    ok(window.__jiraSets.length === 2 && !("token" in window.__jiraSets[1]), "no extra IPC: one pref:set per save");
+    window.__jiraSetRes = null;
+  }
 }
 
 // Anthropic Features: everything that used to sit below our own switches -
@@ -967,13 +1348,13 @@ async function featuresPanel(featuresItem) {
 // with the whole cuBackground* bridge, a .jsonc lock makes the row AND the page
 // read-only, the user's own desktop is listed but never selectable or probed,
 // and previews are taken only on request.
-async function cubgPanel(featuresItem) {
+async function cubgPanel(cuItem) {
   const SW = '.cdbx-switch[aria-label="let Computer Use work on a background display instead of your desktop"]';
   const base = window.__cubgBase;
   async function remount() {
     document.getElementById("row-account").click();
     await sleep(20);
-    featuresItem.click();
+    cuItem.click();
     await sleep(50);
     return document.querySelector(".cdbx-panel");
   }
@@ -1046,12 +1427,13 @@ async function cubgPanel(featuresItem) {
      "an older preload without the whole cuBackground* bridge gets no row");
   window.cdbExtra.cuBackgroundProbe = savedProbe;
 
-  // The downstream Windows build: the main side answers "Linux only".
+  // The downstream Windows build: the main side answers "Linux only". The
+  // whole Computer Use entry is absent there (the "windows" fixture pins the
+  // nav to Models alone); the row must still hide itself on that answer.
   window.__cubgState = { ok: false, error: "Computer Use on a background display is Linux only" };
   panel = await remount();
-  ok(!panel.querySelector(SW) && !/background display/.test(panel.textContent) &&
-     !/Computer Use$/m.test(Array.prototype.map.call(panel.querySelectorAll(".cdbx-sec-t"), function (n) { return n.textContent; }).join("\n")),
-     "a 'Linux only' read hides the row and its section heading");
+  ok(!panel.querySelector(SW) && !/background display/.test(panel.textContent),
+     "a 'Linux only' read hides the row");
 
   // Locked by the hand-edited .jsonc: switch disabled, page read-only.
   window.__cubgState = Object.assign({}, base, { enabled: true, lockedByJsonc: true, source: "jsonc",
@@ -1194,9 +1576,965 @@ async function cubgPanel(featuresItem) {
   ok(!!st2 && /not running/.test(st2.textContent) && /refuses to act/.test(st2.textContent) && st2.classList.contains("cdbx-warn"),
      "on but not running: the status says Computer Use refuses: " + (st2 ? st2.textContent : ""));
 
+  ok(document.querySelector(".cdbx-cubg-back").textContent === "Back to Cowork (Linux)", "the setup page's Back says where it goes");
   document.querySelector(".cdbx-cubg-back").click();
   await sleep(40);
-  ok(!!document.querySelector(".cdbx-panel " + SW), "Back returns to the feature list");
+  ok(!!document.querySelector(".cdbx-panel " + SW) && document.querySelector(".cdbx-panel .cdbx-h1").textContent === "Cowork (Linux)",
+     "Back returns to the Cowork (Linux) page");
+}
+
+// Computer Use: its own Extra entry. Pinned here: the page is the status
+// block (no Back, no Details indirection) at the top, then the Options
+// heading with the two switches, every row word comes from the read and an
+// unknown status never shows as OK, each action appears only when the read
+// offers it, the pkexec actions show main's exact command and what it changes
+// (in a closed "What this does") before anything runs, the actions call their
+// channel with no argument and re-read afterwards, and a failed Enable shows
+// the command to run instead.
+// "Escape stops Computer Use": one setting, two rows - Community Features (its
+// own Computer Use group) and the Cowork (Linux) page's Computer Use Options,
+// next to "Ask before Computer Use controls an app". Each page reads it when
+// drawn, so a flip on one page shows on the other.
+async function escTwoPages(featuresItem, cuItem) {
+  const ESC_SW = '.cdbx-switch[aria-label="Escape stops Computer Use"]';
+  const ASK_SW = '.cdbx-switch[aria-label="ask before Computer Use controls an app"]';
+  const BG_SW = '.cdbx-switch[aria-label="let Computer Use work on a background display instead of your desktop"]';
+  const open = async function (item) { document.getElementById("row-account").click(); await sleep(20); item.click(); await sleep(150); return document.querySelector(".cdbx-panel"); };
+  const before = function (a, b) { return !!a && !!b && !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING); };
+  window.__cuEscState = undefined;
+  window.__cuEscCalls = [];
+  let cu = await open(cuItem);
+  let sw = cu.querySelector(ESC_SW);
+  const row = sw && sw.closest(".cdbx-row");
+  ok(!!row && row.querySelector(".cdbx-id").textContent === "Escape stops Computer Use", "Computer Use page: the Escape row is there, same title");
+  ok(!!sw && sw.getAttribute("aria-checked") === "false" && /^off - /.test(row.querySelector(".cdbx-state").textContent), "  off by default");
+  ok(!!sw && sw.closest("[data-cdbx-section]") && sw.closest("[data-cdbx-section]").getAttribute("data-cdbx-section") === "cu" &&
+     before(cu.querySelector(ASK_SW), sw) && before(sw, cu.querySelector(BG_SW)),
+     "  under Computer Use -> Options, after the ask switch and before the background display");
+  ok(!!row && /Applies live, from the next Computer Use task/.test(row.querySelector(".cdbx-note").textContent), "  the same note (applies live)");
+  if (sw) { sw.click(); await sleep(60); }
+  ok(JSON.stringify(window.__cuEscCalls) === "[true]" && sw.getAttribute("aria-checked") === "true", "  clicking it calls cuEscSet(true)");
+  let cf = await open(featuresItem);
+  let csw = cf.querySelector(ESC_SW);
+  ok(!!csw && csw.getAttribute("aria-checked") === "true", "Community Features shows the flip made on the Computer Use page");
+  if (csw) { csw.click(); await sleep(60); }
+  cu = await open(cuItem);
+  sw = cu.querySelector(ESC_SW);
+  ok(JSON.stringify(window.__cuEscCalls) === "[true,false]" && !!sw && sw.getAttribute("aria-checked") === "false", "and the Computer Use page shows the flip made on Community Features");
+  window.__cuEscState = { ok: true, enabled: true, lockedByJsonc: true };
+  cu = await open(cuItem);
+  sw = cu.querySelector(ESC_SW);
+  ok(!!sw && sw.disabled && /set in claude-desktop-extra\.jsonc/.test(sw.closest(".cdbx-row").querySelector(".cdbx-state").textContent), "a .jsonc value locks it on the Computer Use page too");
+  window.__cuEscState = { ok: false, error: "Escape stops Computer Use is Linux only" };
+  cu = await open(cuItem);
+  ok(!cu.querySelector(ESC_SW) && !!cu.querySelector(ASK_SW), "a 'Linux only' answer hides only this row on the Computer Use page");
+  window.__cuEscState = undefined;
+  window.__cuEscCalls = [];
+}
+
+// "Drawn cursor in the glow": Anthropic's flag 1916550538 as a row of the
+// Cowork (Linux) page's Computer Use section. It must go through the very
+// channels the Anthropic page uses (flagsSet(id, bool) / flagsUnset(id)),
+// show the same state, delete the key when cleared, and the Anthropic page
+// must show whatever was done on it - and the other way round.
+async function drawnCursorRow(cuItem, flagsItem) {
+  const ID = "1916550538";
+  const SW = '.cdbx-switch[aria-label="Anthropic flag ' + ID + ': drawn cursor in the glow"]';
+  const BG_SW = '.cdbx-switch[aria-label="let Computer Use work on a background display instead of your desktop"]';
+  const AX_SW = '.cdbx-switch[aria-label="let Computer Use read app controls through the accessibility service"]';
+  const real = {};
+  ["flagsCatalog", "flagsRead", "flagsSet", "flagsUnset"].forEach(function (k) { real[k] = window.cdbExtra[k]; });
+  const realCus = window.__cusState;
+  const calls = [];
+  const st = { server: {}, effective: {}, overridesJson: {}, overridesJsonc: {} };
+  let catalog = [{ id: ID, note: "Computer Use glow when Claude has the pointer: default value of the glow preference (cu-glow)", valueFlag: false, warn: "" },
+    { id: "1001", note: "Cowork sandbox sessions on the desktop", valueFlag: false, warn: "" }];
+  window.cdbExtra.flagsCatalog = function () { return Promise.resolve({ ok: true, count: catalog.length, entries: catalog }); };
+  window.cdbExtra.flagsRead = function () {
+    return Promise.resolve({ ok: true, storeSeen: true, server: JSON.parse(JSON.stringify(st.server)),
+      effective: JSON.parse(JSON.stringify(st.effective)), overridesJson: JSON.parse(JSON.stringify(st.overridesJson)),
+      overridesJsonc: JSON.parse(JSON.stringify(st.overridesJsonc)), builtins: {},
+      paths: { json: "/home/u/.config/Claude/claude-desktop-extra.json", jsonc: "/home/u/.config/Claude/claude-desktop-extra.jsonc", userData: "/home/u/.config/Claude" } });
+  };
+  // Same effect as the main side's writer: set stores the value, unset deletes the key.
+  window.cdbExtra.flagsSet = function (id, value) { calls.push("set:" + id + ":" + typeof value + ":" + value); st.overridesJson[id] = value; return Promise.resolve({ ok: true }); };
+  window.cdbExtra.flagsUnset = function (id) { calls.push("unset:" + id + ":" + arguments.length); delete st.overridesJson[id]; return Promise.resolve({ ok: true }); };
+  const open = async function (item) { document.getElementById("row-account").click(); await sleep(20); item.click(); await sleep(150); return document.querySelector(".cdbx-panel"); };
+  const anthropicRow = function (panel) {
+    return Array.from(panel.querySelectorAll(".cdbx-list .cdbx-row")).filter(function (r) { return r.querySelector(".cdbx-id").textContent === ID; })[0] || null;
+  };
+  const before = function (a, b) { return !!a && !!b && !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING); };
+  try {
+    // --- follow Anthropic: no override, the account serves it off
+    st.server[ID] = { on: false, value: false };
+    st.effective[ID] = { on: false, value: false };
+    window.__cusState = Object.assign({}, realCus, { screenshots: { session: "GNOME X11" } });
+    let cu = await open(cuItem);
+    let sw = cu.querySelector(SW);
+    let row = sw && sw.closest(".cdbx-row");
+    ok(!!row, "Computer Use section: the drawn-cursor row is there");
+    if (!row) return;
+    ok(!!row.closest('[data-cdbx-section="cu"]') && before(cu.querySelector(AX_SW), sw) && before(cu.querySelector(BG_SW), sw),
+       "  inside Computer Use, after our own switches");
+    ok(row.querySelector(".cdbx-id").textContent === "Drawn cursor in the glowAnthropic flag " + ID, "  titled, with the flag id: " + row.querySelector(".cdbx-id").textContent);
+    const notes = Array.from(row.querySelectorAll(".cdbx-note")).map(function (n) { return n.textContent; }).join(" ");
+    ok(/GrowthBook flag 1916550538, not a switch of this package/.test(notes) && /thin rim/.test(notes) && /arrow glides to each click target/.test(notes) &&
+       /about half a second per click/.test(notes), "  says what it is and does");
+    ok(/wherever the glow is shown: X11 with a compositing manager, and sway, Hyprland, niri, KDE Plasma and GNOME \(Wayland\) when the bundled bridge draws the glow/.test(notes) &&
+       /none on a background display, on X11 without a compositing manager, or with the glow switched off/.test(notes),
+       "  says where it has an effect and where none");
+    ok(/re-read on every flag load \(startup, about hourly, account changes\)/.test(notes) && /restart Claude Desktop/.test(notes) && !/applies live/i.test(notes),
+       "  says when a change applies, as the flag file does");
+    ok(!/\u2014/.test(row.textContent), "  no U+2014 dash");
+    ok(sw.getAttribute("aria-checked") === "false" && /^off - off for your account$/.test(row.querySelector(".cdbx-state").textContent) && !row.querySelector(".cdbx-clear"),
+       "  follows Anthropic by default: off for your account, no override, no clear button: " + row.querySelector(".cdbx-state").textContent);
+    ok(row.querySelector(".cdbx-note.cdbx-hide") && row.querySelector("[data-cdbx-flag-session]").classList.contains("cdbx-hide"), "  no session note on an X11 session");
+
+    // --- write through it: same channel, same payload as the Anthropic page
+    sw.click();
+    await sleep(60);
+    ok(calls.join("|") === "set:" + ID + ":boolean:true" && sw.getAttribute("aria-checked") === "true", "  clicking forces it on: flagsSet(id, true): " + calls.join("|"));
+    ok(/^on - your override \(true\), applies after a restart \(off right now\)$/.test(row.querySelector(".cdbx-state").textContent) && !!row.querySelector(".cdbx-clear"), "  state line shows the override and that the running app is still off, clear appears: " + row.querySelector(".cdbx-state").textContent);
+    ok(!!row.querySelector(".cdbx-aside .cdbx-btn, .cdbx-row-aside .cdbx-btn") && !row.querySelector(".cdbx-row-aside .cdbx-btn").classList.contains("cdbx-hide"), "  Restart now is offered after a change");
+
+    // the Anthropic page shows it
+    let fl = await open(flagsItem);
+    let arow = anthropicRow(fl);
+    ok(!!arow && arow.querySelector(".cdbx-switch").getAttribute("aria-checked") === "true" && /your override \(true\), applies after a restart \(off right now\)/.test(arow.querySelector(".cdbx-state").textContent) && !!arow.querySelector(".cdbx-clear"),
+       "the Anthropic page shows the override made on the Computer Use page, with the restart tail");
+
+    // --- forced off from the Computer Use page
+    cu = await open(cuItem);
+    sw = cu.querySelector(SW);
+    ok(!!sw && sw.getAttribute("aria-checked") === "true", "the Computer Use page shows the saved override when drawn again");
+    sw.click();
+    await sleep(60);
+    ok(calls[calls.length - 1] === "set:" + ID + ":boolean:false" && sw.getAttribute("aria-checked") === "false" &&
+       /^off - your override \(false\)$/.test(sw.closest(".cdbx-row").querySelector(".cdbx-state").textContent), "  clicking again forces it off (running app off too, so no tail): flagsSet(id, false)");
+    fl = await open(flagsItem);
+    arow = anthropicRow(fl);
+    ok(!!arow && arow.querySelector(".cdbx-switch").getAttribute("aria-checked") === "false" && /your override \(false\)/.test(arow.querySelector(".cdbx-state").textContent),
+       "the Anthropic page shows the forced-off state");
+
+    // --- clear removes the key; the account's value is back on both pages
+    st.server[ID] = { on: true, value: true };
+    cu = await open(cuItem);
+    sw = cu.querySelector(SW);
+    row = sw.closest(".cdbx-row");
+    const clear = row.querySelector(".cdbx-clear");
+    ok(!!clear && sw.getAttribute("aria-checked") === "false", "a forced-off flag over an account that serves it on: off, clear offered");
+    clear.click();
+    await sleep(60);
+    ok(calls[calls.length - 1] === "unset:" + ID + ":1" && !(ID in st.overridesJson), "  clear calls flagsUnset(id) and the key is gone: " + calls[calls.length - 1]);
+    ok(sw.getAttribute("aria-checked") === "false" || sw.getAttribute("aria-checked") === "true", "  switch still there");
+    st.effective[ID] = { on: true, value: true };
+    cu = await open(cuItem);
+    sw = cu.querySelector(SW);
+    row = sw.closest(".cdbx-row");
+    ok(sw.getAttribute("aria-checked") === "true" && /^on - on for your account$/.test(row.querySelector(".cdbx-state").textContent) && !row.querySelector(".cdbx-clear"),
+       "after a re-draw it follows Anthropic again: on for your account, no clear");
+    fl = await open(flagsItem);
+    arow = anthropicRow(fl);
+    ok(!!arow && arow.querySelector(".cdbx-switch").getAttribute("aria-checked") === "true" && /on for your account/.test(arow.querySelector(".cdbx-state").textContent) && !arow.querySelector(".cdbx-clear"),
+       "the Anthropic page agrees");
+
+    // --- an override made on the Anthropic page shows on the Computer Use page
+    arow.querySelector(".cdbx-switch").click();
+    await sleep(60);
+    ok(calls[calls.length - 1] === "set:" + ID + ":boolean:false", "the Anthropic page writes through the same channel and payload shape: " + calls[calls.length - 1]);
+    cu = await open(cuItem);
+    sw = cu.querySelector(SW);
+    ok(!!sw && sw.getAttribute("aria-checked") === "false" && /your override \(false\)/.test(sw.closest(".cdbx-row").querySelector(".cdbx-state").textContent) && !!sw.closest(".cdbx-row").querySelector(".cdbx-clear"),
+       "the Computer Use page shows an override made on the Anthropic page");
+
+    // --- revisit: the switch shows the SAVED override, not the running value
+    async function revisit(label, running, saved) {
+      st.server[ID] = { on: running, value: running };
+      st.effective[ID] = { on: running, value: running };
+      st.overridesJson[ID] = saved;
+      const tail = running === saved ? "" : ", applies after a restart (" + (running ? "on" : "off") + " right now)";
+      const want = (saved ? "on" : "off") + " - your override (" + saved + ")" + tail;
+      // Computer Use page: shows the override, one click writes the opposite
+      let c = await open(cuItem);
+      let w = c.querySelector(SW);
+      let r = w.closest(".cdbx-row");
+      ok(w.getAttribute("aria-checked") === String(saved) && r.querySelector(".cdbx-state").textContent === want,
+         label + ": Computer Use row shows the saved override and the tail: " + r.querySelector(".cdbx-state").textContent);
+      const n = calls.length;
+      w.click();
+      await sleep(60);
+      ok(calls.length === n + 1 && calls[n] === "set:" + ID + ":boolean:" + (!saved), label + ": one click writes the opposite: " + calls.slice(n).join("|"));
+      // clearing returns to the account value
+      st.overridesJson[ID] = saved;
+      c = await open(cuItem);
+      w = c.querySelector(SW);
+      w.closest(".cdbx-row").querySelector(".cdbx-clear").click();
+      await sleep(60);
+      ok(!(ID in st.overridesJson) && w.getAttribute("aria-checked") === String(st.server[ID].on) &&
+         /for your account$/.test(w.closest(".cdbx-row").querySelector(".cdbx-state").textContent), label + ": clear drops the key and shows the account value");
+      // Anthropic page: same
+      st.overridesJson[ID] = saved;
+      st.effective[ID] = { on: running, value: running };
+      let f = await open(flagsItem);
+      let a = anthropicRow(f);
+      ok(a.querySelector(".cdbx-switch").getAttribute("aria-checked") === String(saved) && a.querySelector(".cdbx-state").textContent === want.replace(/^(on|off) - /, ""),
+         label + ": Anthropic page shows the saved override and the tail: " + a.querySelector(".cdbx-state").textContent);
+      const m2 = calls.length;
+      a.querySelector(".cdbx-switch").click();
+      await sleep(60);
+      ok(calls.length === m2 + 1 && calls[m2] === "set:" + ID + ":boolean:" + (!saved), label + ": Anthropic page: one click writes the opposite");
+      delete st.overridesJson[ID];
+    }
+    await revisit("override true, running off", false, true);
+    await revisit("override false, running on", true, false);
+    // store not loaded: the running value is unknown, plain wording
+    st.server = {}; st.effective = {}; st.overridesJson[ID] = true;
+    cu = await open(cuItem);
+    ok(cu.querySelector(SW).getAttribute("aria-checked") === "true" && cu.querySelector(SW).closest(".cdbx-row").querySelector(".cdbx-state").textContent === "on - your override (true)",
+       "store not loaded: the switch shows the override, plain wording");
+    delete st.overridesJson[ID];
+    st.server[ID] = { on: false, value: false };
+    st.effective[ID] = { on: false, value: false };
+
+    // --- a hand-edited .jsonc locks it
+    st.overridesJsonc[ID] = true;
+    cu = await open(cuItem);
+    sw = cu.querySelector(SW);
+    ok(!!sw && sw.disabled && /set in claude-desktop-extra\.jsonc/.test(sw.closest(".cdbx-row").querySelector(".cdbx-state").textContent), "a flag set in the .jsonc locks the switch");
+    delete st.overridesJsonc[ID];
+
+    // --- a failed write says so and changes nothing
+    window.cdbExtra.flagsSet = function () { return Promise.resolve({ ok: false, error: "cannot write x" }); };
+    cu = await open(cuItem);
+    sw = cu.querySelector(SW);
+    const was = sw.getAttribute("aria-checked");
+    sw.click();
+    await sleep(60);
+    ok(sw.getAttribute("aria-checked") === was && /Could not save 1916550538: cannot write x/.test((document.querySelector(".cdbx-toast") || {}).textContent || ""),
+       "a refused write is toasted and the switch stays");
+
+    // --- the session note: where no glow (or no drawn cursor) is drawn
+    window.__cusState = Object.assign({}, realCus, { screenshots: { session: "KDE Wayland", kwin: true, glow: "kwin" } });
+    cu = await open(cuItem);
+    row = cu.querySelector(SW).closest(".cdbx-row");
+    let sn = row.querySelector("[data-cdbx-flag-session]");
+    ok(!sn.classList.contains("cdbx-hide") && /^This session \(KDE Wayland\) shows no drawn cursor: the KDE bridge draws its own glow, without one\.$/.test(sn.textContent) && !!cu.querySelector(SW),
+       "KDE Wayland: the row stays and says its bridge's own glow has none: " + sn.textContent);
+    window.__cusState = Object.assign({}, realCus, { screenshots: { session: "sway (Wayland)", glow: "none" } });
+    cu = await open(cuItem);
+    sn = cu.querySelector(SW).closest(".cdbx-row").querySelector("[data-cdbx-flag-session]");
+    ok(!sn.classList.contains("cdbx-hide") && /^This session \(sway \(Wayland\)\) shows no drawn cursor: no glow is drawn here\.$/.test(sn.textContent),
+       "a Wayland row without the overlay says no glow is drawn: " + sn.textContent);
+    window.__cusState = Object.assign({}, realCus, { screenshots: { session: "sway (Wayland)", glow: "overlay" } });
+    cu = await open(cuItem);
+    sn = cu.querySelector(SW).closest(".cdbx-row").querySelector("[data-cdbx-flag-session]");
+    ok(sn.classList.contains("cdbx-hide"), "a Wayland row whose bridge draws the overlay: no note");
+    window.__cusState = Object.assign({}, realCus, { screenshots: { session: "KDE Wayland", kwin: true, glow: "overlay" } });
+    cu = await open(cuItem);
+    sn = cu.querySelector(SW).closest(".cdbx-row").querySelector("[data-cdbx-flag-session]");
+    ok(sn.classList.contains("cdbx-hide"), "KDE Wayland whose bridge hands the glow to the overlay: no note");
+
+    // --- the build does not know the flag: no row
+    catalog = [{ id: "1001", note: "x", valueFlag: false, warn: "" }];
+    cu = await open(cuItem);
+    ok(!cu.querySelector(SW) && !!cu.querySelector(AX_SW), "a catalog without the flag leaves no row");
+    catalog = [{ id: ID, note: "n", valueFlag: false, warn: "" }];
+    window.cdbExtra.flagsRead = function () { return Promise.resolve({ ok: false, error: "Linux only" }); };
+    cu = await open(cuItem);
+    ok(!cu.querySelector(SW) && !!cu.querySelector(AX_SW), "a 'Linux only' answer removes only this row");
+  } finally {
+    Object.keys(real).forEach(function (k) { window.cdbExtra[k] = real[k]; });
+    window.__cusState = realCus;
+  }
+}
+
+// "Show the glow while Claude uses the computer": our switch on the Computer
+// Use page, on by default, directly above the drawn-cursor row; off tells the
+// drawn-cursor row it needs the glow; a session line from main's glow fact.
+async function cuGlowRow(cuItem) {
+  const GSW = '.cdbx-switch[aria-label="show the glow while Claude uses the computer"]';
+  const DSW = '.cdbx-switch[aria-label="Anthropic flag 1916550538: drawn cursor in the glow"]';
+  const AX_SW = '.cdbx-switch[aria-label="let Computer Use read app controls through the accessibility service"]';
+  const realCus = window.__cusState;
+  const open = async function () { document.getElementById("row-account").click(); await sleep(20); cuItem.click(); await sleep(150); return document.querySelector(".cdbx-panel"); };
+  const before = function (a, b) { return !!a && !!b && !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING); };
+  const toastText = function () { const t = document.querySelector(".cdbx-toast"); return t ? t.textContent : ""; };
+  const real = { flagsCatalog: window.cdbExtra.flagsCatalog, flagsRead: window.cdbExtra.flagsRead };
+  window.cdbExtra.flagsCatalog = function () { return Promise.resolve({ ok: true, count: 1, entries: [{ id: "1916550538", note: "n", valueFlag: false, warn: "" }] }); };
+  window.cdbExtra.flagsRead = function () { return Promise.resolve({ ok: true, storeSeen: true, server: {}, effective: {}, overridesJson: {}, overridesJsonc: {}, builtins: {}, paths: {} }); };
+  try {
+    window.__cuGlowState = { ok: true, enabled: true, lockedByJsonc: null };
+    window.__cuGlowSets = [];
+    window.__cusState = Object.assign({}, realCus, { screenshots: { session: "GNOME X11", glow: "x11" } });
+    let cu = await open();
+    let sw = cu.querySelector(GSW);
+    const row = sw && sw.closest(".cdbx-row");
+    ok(!!row, "glow switch: the row is on the Computer Use page");
+    if (!row) return;
+    const drawn = cu.querySelector(DSW);
+    const nextRow = row.closest(".cdbx-list").nextElementSibling;
+    ok(!!row.closest('[data-cdbx-section="cu"]') && before(cu.querySelector(AX_SW), sw) && before(sw, drawn) && !!nextRow && nextRow.contains(drawn),
+       "  inside Computer Use, directly above the drawn-cursor row");
+    ok(row.querySelector(".cdbx-id").textContent === "Show the glow while Claude uses the computer", "  titled: " + row.querySelector(".cdbx-id").textContent);
+    const note = row.querySelector(".cdbx-note").textContent;
+    ok(/Off: no glow, rim or drawn cursor; Computer Use itself works the same/.test(note) && /Applies from the next Computer Use task/.test(note) &&
+       /sway, Hyprland, niri and KDE Plasma \(Wayland\) show it when the bundled bridge can draw it/.test(note) &&
+       /A KDE bridge without the glow overlay keeps drawing its own glow/.test(note), "  says what off does, when it applies, and the older-KDE-bridge exception");
+    ok(!/\u2014/.test(row.textContent), "  no U+2014 dash");
+    ok(sw.getAttribute("aria-checked") === "true" && /^on - the glow shows while Claude uses the computer$/.test(row.querySelector(".cdbx-state").textContent),
+       "  on by default: " + row.querySelector(".cdbx-state").textContent);
+    const gs = row.querySelector("[data-cdbx-glow-session]");
+    ok(!!gs && !gs.classList.contains("cdbx-hide") && /^On this session \(GNOME X11\) Anthropic's own glow is shown/.test(gs.textContent), "  X11 session line: " + (gs && gs.textContent));
+    ok(drawn.closest(".cdbx-row").querySelector("[data-cdbx-flag-session]").classList.contains("cdbx-hide"), "  glow on, X11: the drawn-cursor row has no note");
+    sw.click();
+    await sleep(60);
+    ok(JSON.stringify(window.__cuGlowSets) === "[false]" && sw.getAttribute("aria-checked") === "false" && /^off - no glow, rim or drawn cursor$/.test(row.querySelector(".cdbx-state").textContent),
+       "  clicking it writes false: " + JSON.stringify(window.__cuGlowSets));
+    ok(/No glow from the next Computer Use task/.test(toastText()), "  with its toast: " + toastText());
+    const dn = drawn.closest(".cdbx-row").querySelector("[data-cdbx-flag-session]");
+    ok(!dn.classList.contains("cdbx-hide") && /^The drawn cursor needs the glow, which is off/.test(dn.textContent), "  the drawn-cursor row now says it needs the glow: " + dn.textContent);
+    sw.click();
+    await sleep(60);
+    ok(dn.classList.contains("cdbx-hide") && sw.getAttribute("aria-checked") === "true", "  back on: the note goes away");
+    // Drawn again with the glow off (read from main): the note is there at once.
+    window.__cuGlowState = { ok: true, enabled: false, lockedByJsonc: null };
+    cu = await open();
+    ok(!cu.querySelector(DSW).closest(".cdbx-row").querySelector("[data-cdbx-flag-session]").classList.contains("cdbx-hide"), "  off from main: the drawn-cursor note shows when drawn");
+    // Session lines.
+    for (const [facts, re] of [
+      [{ session: "sway (Wayland)", glow: "overlay" }, /^On this session \(sway \(Wayland\)\) the bundled bridge draws the glow\.$/],
+      [{ session: "sway (Wayland)", glow: "none" }, /^On this session \(sway \(Wayland\)\) no glow is shown: the bridge for this desktop does not draw it\.$/],
+      [{ session: "KDE Wayland", kwin: true, glow: "kwin" }, /^On this session \(KDE Wayland\) the KDE bridge draws its own glow while it shares the screen; this switch does not turn that one off \(a kwin-portal-bridge with the glow overlay hands it over\)\.$/],
+      [{ session: "KDE Wayland", kwin: true, glow: "overlay" }, /^On this session \(KDE Wayland\) the bundled bridge draws the glow\.$/],
+    ]) {
+      window.__cusState = Object.assign({}, realCus, { screenshots: facts });
+      cu = await open();
+      const n = cu.querySelector(GSW).closest(".cdbx-row").querySelector("[data-cdbx-glow-session]");
+      ok(!n.classList.contains("cdbx-hide") && re.test(n.textContent), "  session line (" + facts.glow + "): " + n.textContent);
+    }
+    window.__cusState = Object.assign({}, realCus, { screenshots: { session: "sway (Wayland)", glow: "unknown" } });
+    cu = await open();
+    ok(cu.querySelector(GSW).closest(".cdbx-row").querySelector("[data-cdbx-glow-session]").classList.contains("cdbx-hide"), "  unknown: no session line");
+    // Locked by the .jsonc, and the win32 refusal.
+    window.__cuGlowState = { ok: true, enabled: false, lockedByJsonc: true };
+    cu = await open();
+    sw = cu.querySelector(GSW);
+    ok(!!sw && sw.getAttribute("aria-checked") === "false" && /set in claude-desktop-extra\.jsonc/.test(sw.closest(".cdbx-row").querySelector(".cdbx-state").textContent), "  a .jsonc false locks it off and says where");
+    window.__cuGlowState = { ok: false, error: "the Computer Use glow switch is Linux only" };
+    cu = await open();
+    ok(!cu.querySelector(GSW) && !!cu.querySelector(AX_SW), "  a Linux-only refusal hides only this row");
+  } finally {
+    window.cdbExtra.flagsCatalog = real.flagsCatalog;
+    window.cdbExtra.flagsRead = real.flagsRead;
+    window.__cuGlowState = { ok: true, enabled: true, lockedByJsonc: null };
+    window.__cusState = realCus;
+  }
+}
+
+async function cusPanel(cuItem) {
+  async function remount() {
+    document.getElementById("row-account").click();
+    await sleep(20);
+    cuItem.click();
+    await sleep(60);
+    return document.querySelector(".cdbx-panel");
+  }
+  function btn(root, text) {
+    return Array.prototype.filter.call(root.querySelectorAll(".cdbx-btn"), function (b) { return b.textContent === text; })[0] || null;
+  }
+  function row(key) { return document.querySelector('.cdbx-panel .cdbx-cus-row[data-cus="' + key + '"]'); }
+  function word(key) { const r = row(key); const w = r && r.querySelector(".cdbx-cus-st"); return w ? w.textContent : ""; }
+  function toastText() { const t = document.querySelector(".cdbx-toast"); return t ? t.textContent : ""; }
+  function pres(root) { return Array.prototype.map.call(root.querySelectorAll(".cdbx-cubg-pre"), function (p) { return p.textContent; }); }
+  function setState(rows, actions) {
+    window.__cusState = { ok: true, rows: rows, actions: Object.assign({ tpmEnable: null, tpmDisable: null, restart: false,
+      resetScreenSharing: false, tssCommand: null }, actions || {}) };
+  }
+  const okRows = window.__cusRows(
+    { status: "ok", fact: "/dev/tpmrm0 accessible", note: "n" },
+    { status: "ok", fact: "device keyed, computer tools offered", note: "n" });
+  const PK_EN = window.__cusPkEnable;
+  const PK_DIS = window.__cusPkDisable;
+  const BG_SW = '.cdbx-switch[aria-label="let Computer Use work on a background display instead of your desktop"]';
+  const AX_SW = '.cdbx-switch[aria-label="let Computer Use read app controls through the accessibility service"]';
+
+  // --- the page: needs TPM access, the pkexec button offered
+  window.__cusCalls = { read: 0, enable: 0, disable: 0, reset: 0 };
+  window.__cubgState = Object.assign({}, window.__cubgBase);
+  setState(window.__cusRows(), { tpmEnable: PK_EN });
+  let panel = await remount();
+  ok(!!panel && !!panel.querySelector(".cdbx-cus"), "the Cowork (Linux) entry opens the status block directly");
+  if (!panel || !panel.querySelector(".cdbx-cus")) return;
+  ok(panel.querySelector(".cdbx-h1").textContent === "Cowork (Linux)", "titled Cowork (Linux)");
+  {
+    const secs = Array.prototype.map.call(panel.querySelectorAll("[data-cdbx-section]"), function (n) {
+      return n.getAttribute("data-cdbx-section") + ":" + n.querySelector(".cdbx-sec-t").textContent; });
+    ok(secs.join("|") === "cloud:Cloud Cowork|local:Local Cowork VM|cu:Computer Use",
+       "three sections in order, each with its heading: " + secs.join("|"));
+    // "How Cowork chooses where a task runs": closed, above the sections.
+    const help = panel.querySelector("details.cdbx-cus-help");
+    const firstSec = panel.querySelector("[data-cdbx-section]");
+    ok(!!help && help.open === false && help.querySelector("summary").textContent === "How Cowork chooses where a task runs" &&
+       !!(help.compareDocumentPosition(firstSec) & Node.DOCUMENT_POSITION_FOLLOWING),
+       "a closed help block 'How Cowork chooses where a task runs' sits above the three sections");
+    const hl = help ? Array.prototype.map.call(help.querySelectorAll(":scope > div.cdbx-note:not(.cdbx-cus-help-links)"), function (n) { return n.textContent; }) : [];
+    ok(hl.length === 5 && /^Cloud: Anthropic's cloud VM/.test(hl[0]) && /device key/.test(hl[0]) && /^Local: the VM on this computer/.test(hl[1]) &&
+       /only option in 3P mode/.test(hl[1]) && /"Connected"/.test(hl[2]) && /"Only on this computer"/.test(hl[2]) &&
+       /toggle \(Beta\)/.test(hl[3]) && /local folder or Space, Dispatch/.test(hl[3]) && /"Continue in cloud\.\.\."/.test(hl[3]) &&
+       /"Cowork in the cloud"/.test(hl[4]) && /"Chat and Cowork unified"/.test(hl[4]) && /"Computer access"/.test(hl[4]) &&
+       /"Require trusted devices"/.test(hl[4]) && hl.every(function (t) { return !/\u2014/.test(t); }),
+       "1P: cloud, local, the header icon, switching and the admin settings: " + hl.length);
+    const links = help ? Array.prototype.map.call(help.querySelectorAll("a.cdbx-cus-help-link"), function (a) {
+      return a.textContent + "=" + a.getAttribute("href") + "|" + a.target + "|" + a.rel; }) : [];
+    ok(links.join(" ; ") === [
+      "Admin settings - Cowork=https://claude.ai/admin-settings/cowork|_blank|noopener noreferrer",
+      "Admin settings - Capabilities=https://claude.ai/admin-settings/capabilities|_blank|noopener noreferrer",
+      "docs/cowork.md=https://github.com/patrickjaja/claude-desktop-extra/blob/master/docs/cowork.md#how-cowork-chooses-cloud-or-local|_blank|noopener noreferrer"].join(" ; "),
+       "three fixed links, each opening a new window: " + links.join(" ; "));
+    help.open = true;
+    window.__cusCalls.read--;
+    btn(panel, "Re-check").click();
+    await sleep(60);
+    ok(help.isConnected && help.open === true, "a re-read keeps the help block and whether it is open");
+    help.open = false;
+  }
+  {
+    const inSec = function (key) { const r = row(key); const w = r && r.closest("[data-cdbx-section]"); return w ? w.getAttribute("data-cdbx-section") : null; };
+    ok(inSec("tpm") === "cloud" && inSec("cloud") === "cloud" && inSec("desktop") === "cu",
+       "device key and cloud rows under Cloud Cowork, this desktop under Computer Use");
+    ok(!!panel.querySelector('[data-cdbx-section="local"] .cdbx-cus-old'),
+       "an older main side without local VM rows: one line saying so, no invented rows");
+  }
+  ok(!!btn(panel, "Re-check") && !panel.querySelector(".cdbx-cubg-back") && !btn(panel, "Details"),
+     "it has Re-check, and no Back or Details button");
+  ok(window.__cusCalls.read === 1,
+     "opening it reads the status once: " + JSON.stringify(window.__cusCalls));
+  ok(["desktop", "tpm", "cloud"].every(function (k) { return !!row(k); }), "three rows: desktop, TPM, cloud");
+  ok(row("desktop").querySelector(".cdbx-id").firstChild.textContent === "This desktop" &&
+     row("tpm").querySelector(".cdbx-id").firstChild.textContent === "Device key (TPM)" &&
+     row("cloud").querySelector(".cdbx-id").firstChild.textContent === "Cloud Cowork and Dispatch", "with their titles");
+  ok(word("desktop") === "OK" && word("tpm") === "Needs action" && word("cloud") === "Needs action",
+     "status words from the read: " + [word("desktop"), word("tpm"), word("cloud")].join("|"));
+  ok(row("tpm").querySelector(".cdbx-cus-fact").textContent === "present, no access for this user (root:tss 660)",
+     "the fact line is the main side's");
+
+  // --- while the single read runs: spinner + text, the 2 s note, gone after
+  // resolve and after reject. setTimeout is captured, not waited for.
+  {
+    const realRead = window.cdbExtra.cuStatusRead;
+    const readsBefore = window.__cusCalls.read;
+    const realSetTimeout = window.setTimeout;
+    const realClearTimeout = window.clearTimeout;
+    const timers = [];
+    window.setTimeout = function (fn, ms) { if (ms === 2000) { timers.push({ fn: fn, ms: ms, live: true }); return -timers.length; } return realSetTimeout.apply(window, arguments); };
+    window.clearTimeout = function (id) { if (id < 0 && timers[-id - 1]) timers[-id - 1].live = false; else realClearTimeout.call(window, id); };
+    const waitEl = function () { return document.querySelector(".cdbx-cus .cdbx-cus-wait"); };
+    for (const outcome of ["resolve", "reject"]) {
+      timers.length = 0;
+      let settle;
+      window.cdbExtra.cuStatusRead = function () { window.__cusCalls.read++; return new Promise(function (res, rej) { settle = outcome === "resolve" ? function () { res(window.__cusState); } : function () { rej(new Error("boom")); }; }); };
+      const p = await remount();
+      const w = waitEl();
+      ok(!!w && !!w.querySelector(".cdbx-spin") && w.textContent === "Checking this desktop...",
+         outcome + ": pending read shows a spinner and 'Checking this desktop...': " + (w && w.textContent));
+      ok(!!w && w.getAttribute("role") === "status" && w.getAttribute("aria-busy") === "true", outcome + ": the wait line is role=status, aria-busy");
+      ok(btn(p, "Re-check").disabled === true, outcome + ": Re-check stays disabled while pending");
+      ok(timers.length === 1 && timers[0].live, outcome + ": exactly one 2 s timer armed (" + timers.length + ")");
+      timers[0].fn();
+      ok(waitEl().textContent === "Checking this desktop... This can take up to 8 seconds.", outcome + ": after 2 s the note is appended: " + waitEl().textContent);
+      settle();
+      await sleep(30);
+      ok(!waitEl() && !document.querySelector(".cdbx-cus .cdbx-spin"), outcome + ": spinner gone after the read " + outcome + "s");
+      ok(outcome === "resolve" ? !!row("tpm") : /The status is unavailable: boom/.test(document.querySelector(".cdbx-cus").textContent),
+         outcome + ": " + (outcome === "resolve" ? "rows drawn" : "error shown"));
+    }
+    // The read finishing before 2 s clears the timer (no stale note later).
+    timers.length = 0;
+    let early;
+    window.cdbExtra.cuStatusRead = function () { window.__cusCalls.read++; return new Promise(function (res) { early = function () { res(window.__cusState); }; }); };
+    await remount();
+    ok(timers.length === 1 && timers[0].live, "fast read: the 2 s timer is armed");
+    early();
+    await sleep(30);
+    ok(timers[0].live === false && !waitEl(), "fast read: the timer is cleared and the spinner gone when the read finishes first");
+    window.cdbExtra.cuStatusRead = realRead;
+    window.setTimeout = realSetTimeout;
+    window.clearTimeout = realClearTimeout;
+    panel = await remount();
+    window.__cusCalls.read = readsBefore;
+  }
+
+  // Order: status block, then the one Options heading, then background
+  // display, then read app controls.
+  const heads = Array.prototype.map.call(panel.querySelectorAll(".cdbx-sec-t"), function (n) { return n.textContent; });
+  ok(heads.join("|") === "Cloud Cowork|Local Cowork VM|Computer Use|Options",
+     "the three section headings, then Options: " + heads.join("|"));
+  headlineContract(panel, "Cowork (Linux) page");
+  const optsHead = Array.prototype.filter.call(panel.querySelectorAll(".cdbx-sec-h"), function (h) { return h.textContent === "Options"; })[0];
+  const bg = panel.querySelector(BG_SW);
+  const ax = panel.querySelector(AX_SW);
+  const before = function (a, b) { return !!a && !!b && !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING); };
+  ok(before(row("cloud"), optsHead) && before(row("desktop"), optsHead) && before(optsHead, bg) && before(bg, ax),
+     "status rows, then Options, then the background display switch, then the read app controls switch");
+  ok(!!optsHead && optsHead.closest("[data-cdbx-section]") && optsHead.closest("[data-cdbx-section]").getAttribute("data-cdbx-section") === "cu" &&
+     !!bg && bg.closest("[data-cdbx-section]") === optsHead.closest("[data-cdbx-section]"),
+     "Options and the switches sit inside the Computer Use section");
+  ok(!!ax && ax.closest(".cdbx-row").querySelector(".cdbx-id .cdbx-exp").textContent === "Experimental",
+     "read app controls renders here with its Experimental badge");
+
+  // --- "Ask before Computer Use controls an app": first under Options, on by
+  // default, no badge; the switch writes a plain boolean. The remounts below
+  // read the status again; the read count is restored after them.
+  const readsBeforeAsk = window.__cusCalls.read;
+  {
+    const ASK_SW = '.cdbx-switch[aria-label="ask before Computer Use controls an app"]';
+    let ask = panel.querySelector(ASK_SW);
+    ok(!!ask && before(optsHead, ask) && before(ask, bg), "the ask switch is the first Options row, before the background display switch");
+    const askRow = ask && ask.closest(".cdbx-row");
+    ok(!!askRow && askRow.querySelector(".cdbx-id").textContent === "Ask before Computer Use controls an app" && !askRow.querySelector(".cdbx-exp"),
+       "titled as decided, without an Experimental badge");
+    ok(!!ask && ask.getAttribute("aria-checked") === "true" && /^on - Claude asks which apps it may control/.test(askRow.querySelector(".cdbx-state").textContent),
+       "on by default: " + (askRow ? askRow.querySelector(".cdbx-state").textContent : "-"));
+    ok(!!askRow && /approve them in a card/.test(askRow.querySelector(".cdbx-note").textContent) && /Off: every app can be controlled without asking/.test(askRow.querySelector(".cdbx-note").textContent),
+       "the note says what on and off do");
+    window.__cuAskSets = [];
+    if (ask) { ask.click(); await sleep(60); }
+    ok(JSON.stringify(window.__cuAskSets) === "[false]" && ask.getAttribute("aria-checked") === "false",
+       "clicking it writes false and turns the switch off: " + JSON.stringify(window.__cuAskSets));
+    ok(/Computer Use controls apps without asking/.test(toastText()), "with its toast: " + toastText());
+    window.__cuAskState = { ok: true, enabled: false, lockedByJsonc: true };
+    panel = await remount();
+    ask = panel.querySelector(ASK_SW);
+    ok(!!ask && ask.getAttribute("aria-checked") === "false" && /set in claude-desktop-extra\.jsonc/.test(ask.closest(".cdbx-row").querySelector(".cdbx-state").textContent),
+       "a .jsonc false locks it off and says where");
+    window.__cuAskState = { ok: false, error: "Computer Use app approval is Linux only" };
+    panel = await remount();
+    ok(!panel.querySelector(ASK_SW) && !!panel.querySelector(BG_SW), "a Linux-only refusal (win32 main side) hides only this row");
+    window.__cuAskState = { ok: true, enabled: true, lockedByJsonc: null };
+  }
+
+  // --- the screenshot status line under "This desktop", from main's facts
+  {
+    const shots = function () { const n = row("desktop") && row("desktop").querySelector(".cdbx-cus-shots"); return n ? n.textContent : null; };
+    const cases = [
+      [{ ask: true, kwin: false, filtering: "filtered", session: "X11" }, /^Screenshots show only approved apps\.$/, "filtered"],
+      [{ ask: true, kwin: false, filtering: "whole", session: "GNOME Wayland" }, /^On this session \(GNOME Wayland\) screenshots show the whole screen, including apps you did not approve\.$/, "whole"],
+      [{ ask: false, kwin: false, filtering: "filtered", session: "X11" }, /Ask before Computer Use controls an app is off/, "off"],
+      [{ ask: true, kwin: true, filtering: "filtered", session: "KDE Wayland" }, /^Screenshots show only approved apps \(on this KDE session Claude always asks/, "filtered"],
+      [{ ask: true, kwin: false, filtering: "unknown", session: "" }, /^Screenshots: unknown/, "unknown"],
+      // O3: what the wlroots mask does not cover is named
+      [{ ask: true, kwin: false, filtering: "filtered", gaps: ["popups", "layer_shell_top_overlay"], session: "sway" }, /^Screenshots show only approved apps\. Not covered on this desktop: popup menus, panels and overlays\.$/, "filtered"],
+      // Issue #329: Hyprland's per-window capture gaps leave something out of the image
+      [{ ask: true, kwin: false, filtering: "filtered", gaps: ["popups_outside_window", "xwayland_unmanaged"], session: "Hyprland" }, /^Screenshots show only approved apps\. Left out of screenshots here: an approved app's own menus where they reach past its window; XWayland menus and tooltips that cannot be matched to an approved window\.$/, "filtered"]
+    ];
+    for (const [facts, re, attr] of cases) {
+      window.__cusState = { ok: true, rows: window.__cusRows(), actions: { tpmEnable: PK_EN }, screenshots: facts };
+      panel = await remount();
+      const t = shots();
+      const n = row("desktop") && row("desktop").querySelector(".cdbx-cus-shots");
+      ok(t !== null && re.test(t) && n.getAttribute("data-filtering") === attr,
+         "status line for " + JSON.stringify(facts) + ": " + t);
+    }
+    window.__cusState = { ok: true, rows: window.__cusRows(), actions: { tpmEnable: PK_EN } };
+    panel = await remount();
+    ok(shots() === null, "an older main side (no screenshots fact) draws no line");
+  }
+  window.__cusCalls.read = readsBeforeAsk;
+
+  const sec = row("tpm").querySelector(".cdbx-cus-sec");
+  const enable = btn(row("tpm"), "Enable TPM access");
+  ok(!!enable && !!sec && /active local seat/.test(sec.textContent) && /clearing it/.test(sec.textContent) &&
+     /tpm2_changeauth -c lockout/.test(sec.textContent) && /docs\/computer-use\.md/.test(sec.textContent),
+     "Enable TPM access is offered with the full security text and the docs reference");
+  // The exact command, always visible; the rest in a closed "What this does".
+  const pk = row("tpm").querySelector('.cdbx-cus-pk[data-verb="enable"]');
+  ok(!!pk && pres(pk)[0] === PK_EN.command && /also run in a terminal yourself/.test(pk.querySelector(".cdbx-note").textContent),
+     "the exact command main runs, copyable, and that you may run it yourself: " + (pk ? pres(pk)[0] : ""));
+  const what = pk && pk.querySelector("details.cdbx-cus-what");
+  ok(!!what && what.open === false && what.querySelector("summary").textContent === "What this does",
+     "the rest sits in a closed What this does");
+  const wp = what ? pres(what) : [];
+  ok(wp.indexOf(PK_EN.link + " -> " + PK_EN.target) >= 0 && wp.indexOf(PK_EN.rule) >= 0 && wp.indexOf(PK_EN.apply) >= 0 &&
+     wp.indexOf(PK_EN.undo) >= 0 && wp.indexOf(PK_EN.undoManual) >= 0,
+     "What this does: the link and its target, the rule, the udev reload and trigger, the disable command and the manual undo: " + wp.join(" || ").replace(/\n/g, " / "));
+  ok(!!what && /Disable TPM access/.test(what.textContent) && /without logging out/.test(what.textContent),
+     "and says how to undo it and that it applies now");
+  const cus = panel.querySelector(".cdbx-cus");
+  ok(!btn(cus, "Disable TPM access") && !btn(cus, "Restart now") && !btn(cus, "Reset screen sharing") &&
+     !row("tpm").querySelector('.cdbx-cus-pk[data-verb="disable"]') &&
+     Array.prototype.every.call(panel.querySelectorAll(".cdbx-cus .cdbx-cubg-code"), function (c) { return !!c.closest(".cdbx-cus-pk"); }),
+     "and nothing the read did not offer");
+  ok(/claude-desktop --diagnose/.test(panel.querySelector(".cdbx-cus-foot").textContent), "the footer names claude-desktop --diagnose");
+
+  window.__cusEnable = { ok: true, changed: true, message: "cdb-tpm-access: enabled (a -> b)" };
+  enable.click();
+  await sleep(60);
+  ok(window.__cusCalls.enable === 1, "Enable calls cuStatusTpmEnable once, with no argument (" + window.__cusCalls.enable + ")");
+  ok(window.__cusCalls.read === 2, "and re-reads afterwards (" + window.__cusCalls.read + ")");
+  ok(/cdb-tpm-access: enabled/.test(toastText()), "the toast carries the helper's line: " + toastText());
+  ok(!!panel.querySelector(BG_SW), "a status re-read leaves the switches in place");
+
+  window.__cusEnable = { ok: false, code: "cancelled", error: "authentication was cancelled", command: null };
+  btn(row("tpm"), "Enable TPM access").click();
+  await sleep(60);
+  ok(toastText() === "Not changed: authentication was cancelled", "cancelled: says nothing changed: " + toastText());
+  ok(!panel.querySelector(".cdbx-cus-fail"), "cancelled: no command block");
+
+  window.__cusEnable = { ok: false, code: "declined", error: "Enable was not confirmed", command: null };
+  btn(row("tpm"), "Enable TPM access").click();
+  await sleep(60);
+  ok(toastText() === "Not changed: Enable TPM access was not confirmed", "declined in main's dialog: says so: " + toastText());
+  ok(!panel.querySelector(".cdbx-cus-fail"), "declined: no command block");
+  window.__cusEnable = { ok: false, code: "cooldown", error: "the last Enable was declined or failed - try again in 28 s", command: null };
+  btn(row("tpm"), "Enable TPM access").click();
+  await sleep(60);
+  ok(toastText() === "Not changed: the last Enable was declined or failed - try again in 28 s", "cooldown: main's reason, verbatim: " + toastText());
+  ok(!panel.querySelector(".cdbx-cus-fail"), "cooldown: no command block");
+
+  window.__cusEnable = { ok: false, code: "no-agent", error: "no polkit authentication agent answered",
+    command: "sudo /usr/lib/claude-desktop/resources/linux-udev/cdb-tpm-access enable" };
+  btn(row("tpm"), "Enable TPM access").click();
+  await sleep(60);
+  const fail = row("tpm").querySelector(".cdbx-cus-fail");
+  ok(!!fail && /no polkit authentication agent/.test(fail.textContent) &&
+     pres(row("tpm")).indexOf("sudo /usr/lib/claude-desktop/resources/linux-udev/cdb-tpm-access enable") >= 0,
+     "no agent: the error and the command to run instead: " + pres(row("tpm")).join("|").replace(/\n/g, " / "));
+  btn(panel, "Re-check").click();
+  await sleep(60);
+  ok(!row("tpm").querySelector(".cdbx-cus-fail"), "Re-check clears the failure block");
+
+  // --- an older main side: a pkexec action without the command gets the button only
+  setState(window.__cusRows(), { tpmEnable: { kind: "pkexec" } });
+  panel = await remount();
+  ok(!!btn(row("tpm"), "Enable TPM access") && !row("tpm").querySelector(".cdbx-cus-pk"),
+     "a pkexec action with no command: the button, and no invented command block");
+
+  // --- commands instead of the button
+  setState(window.__cusRows(), { tpmEnable: { kind: "command", text: "printf rule | sudo tee /etc/udev/rules.d/x", where: "here" } });
+  panel = await remount();
+  ok(!btn(panel, "Enable TPM access") && pres(row("tpm")).indexOf("printf rule | sudo tee /etc/udev/rules.d/x") >= 0 &&
+     /in a terminal/.test(row("tpm").querySelector(".cdbx-cus-cmd").textContent) && !!row("tpm").querySelector(".cdbx-cus-sec"),
+     "a command Enable: the command block (with the security sentence), no button");
+  setState(window.__cusRows(), { tpmEnable: { kind: "command", text: "x", where: "host" } });
+  panel = await remount();
+  ok(/on the host/.test(row("tpm").querySelector(".cdbx-cus-cmd").textContent), "a container: the command says to run it on the host");
+  setState(window.__cusRows(), { tpmEnable: { kind: "nixos", text: "programs.claude-desktop-extra.tpmAccess.enable = true;" } });
+  panel = await remount();
+  ok(/NixOS configuration/.test(row("tpm").querySelector(".cdbx-cus-cmd").textContent) &&
+     row("tpm").querySelector(".cdbx-cubg-pre").textContent === "programs.claude-desktop-extra.tpmAccess.enable = true;" &&
+     !btn(panel, "Enable TPM access"), "NixOS: the module option, no button");
+  setState(window.__cusRows({ status: "action", fact: "rule enabled, but this session got no access", note: "n" }),
+    { tssCommand: "sudo usermod -aG tss \"$USER\"" });
+  panel = await remount();
+  ok(row("tpm").querySelector(".cdbx-cubg-pre").textContent === "sudo usermod -aG tss \"$USER\"" && !btn(panel, "Enable TPM access"),
+     "no access through the rule: the tss command");
+
+  // --- everything OK, our link present: Disable, with its command
+  window.__cusCalls.disable = 0;
+  setState(okRows, { tpmDisable: PK_DIS });
+  panel = await remount();
+  ok(word("desktop") === "OK" && word("tpm") === "OK" && word("cloud") === "OK", "all OK when the read says so");
+  const dis = btn(row("tpm"), "Disable TPM access");
+  ok(!!dis && !btn(panel, "Enable TPM access") && !row("tpm").querySelector(".cdbx-cus-sec"),
+     "our link: Disable TPM access, no Enable and no security sentence");
+  const dpk = row("tpm").querySelector('.cdbx-cus-pk[data-verb="disable"]');
+  const dwhat = dpk && dpk.querySelector("details.cdbx-cus-what");
+  ok(!!dpk && pres(dpk)[0] === PK_DIS.command && !!dwhat && dwhat.open === false &&
+     pres(dwhat).indexOf(PK_DIS.link) >= 0 && pres(dwhat).indexOf(PK_DIS.apply) >= 0 && /clears the access entry right away; it takes effect after restarting Claude, no relogin or reboot/.test(dwhat.textContent),
+     "Disable: main's exact command, and What this does names the link it removes, the udev reload and that the access entry is cleared (restart, no relogin)");
+  if (dis) { dis.click(); await sleep(60); }
+  ok(window.__cusCalls.disable === 1 && toastText() === "Done: cdb-tpm-access: disabled", "Disable calls its channel once: " + toastText());
+  setState(okRows, { tpmDisable: { kind: "command", text: "sudo rm -f /etc/udev/rules.d/x", where: "here" } });
+  panel = await remount();
+  ok(!btn(panel, "Disable TPM access") && /turn TPM access off/.test(row("tpm").querySelector(".cdbx-cus-cmd").textContent),
+     "a command Disable: the command block, no button");
+
+  // --- both actions always: the one that cannot act is greyed with its reason, its command stays
+  {
+    const OFF_EN = "Already enabled - the rule link is installed";
+    const OFF_DIS = "Nothing to remove - no rule link from this package is installed";
+    const matrix = [
+      { n: "enable live, disable off (pkexec)", en: PK_EN, dis: Object.assign({}, PK_DIS, { disabled: OFF_DIS }), enOff: null, disOff: OFF_DIS, pk: true },
+      { n: "enable off, disable live (pkexec)", en: Object.assign({}, PK_EN, { disabled: OFF_EN }), dis: PK_DIS, enOff: OFF_EN, disOff: null, pk: true },
+      { n: "both off (pkexec, foreign file)", en: Object.assign({}, PK_EN, { disabled: "Another file is installed" }), dis: Object.assign({}, PK_DIS, { disabled: OFF_DIS }),
+        enOff: "Another file is installed", disOff: OFF_DIS, pk: true }
+    ];
+    for (const c of matrix) {
+      setState(okRows, { tpmEnable: c.en, tpmDisable: c.dis });
+      panel = await remount();
+      const be = btn(row("tpm"), "Enable TPM access"), bd = btn(row("tpm"), "Disable TPM access");
+      ok(!!be && !!bd, c.n + ": both buttons present");
+      ok(be && be.disabled === !!c.enOff && bd && bd.disabled === !!c.disOff, c.n + ": only the no-op one is greyed");
+      const notes = Array.prototype.map.call(row("tpm").querySelectorAll(".cdbx-cus-off"), function (x) { return x.getAttribute("data-verb") + ":" + x.textContent; });
+      ok(notes.join("|") === [c.enOff ? "enable:" + c.enOff : null, c.disOff ? "disable:" + c.disOff : null].filter(Boolean).join("|"),
+         c.n + ": one-line reason for each greyed button: " + notes.join("|"));
+      ok(be && bd && (!c.enOff || be.title === c.enOff) && (!c.disOff || bd.title === c.disOff), c.n + ": the reason is also the tooltip");
+      ok(!!row("tpm").querySelector('.cdbx-cus-pk[data-verb="enable"] details.cdbx-cus-what') &&
+         !!row("tpm").querySelector('.cdbx-cus-pk[data-verb="disable"] details.cdbx-cus-what') &&
+         pres(row("tpm")).indexOf(PK_EN.command) >= 0 && pres(row("tpm")).indexOf(PK_DIS.command) >= 0,
+         c.n + ": both command blocks and both What this does stay");
+      window.__cusCalls.enable = 0; window.__cusCalls.disable = 0;
+      if (be && be.disabled) be.click();
+      if (bd && bd.disabled) bd.click();
+      await sleep(40);
+      ok(window.__cusCalls.enable === 0 && window.__cusCalls.disable === 0, c.n + ": a greyed button calls nothing");
+    }
+    // Command variants: reason line plus the command, whatever the environment.
+    const variants = [
+      { n: "command fallback", en: { kind: "command", text: "sudo tee-rule", where: "here", disabled: OFF_EN }, dis: { kind: "command", text: "sudo rm-rule", where: "here" } },
+      { n: "NixOS", en: { kind: "nixos", text: "programs.claude-desktop-extra.tpmAccess.enable = true;", disabled: OFF_EN }, dis: { kind: "command", text: "sudo rm-rule", where: "here", disabled: OFF_DIS } },
+      { n: "AppImage", en: { kind: "command", text: "sudo tee-rule", where: "here" }, dis: { kind: "command", text: "sudo rm-rule", where: "here", disabled: OFF_DIS } }
+    ];
+    for (const v of variants) {
+      setState(okRows, { tpmEnable: v.en, tpmDisable: v.dis });
+      panel = await remount();
+      const ps = pres(row("tpm"));
+      ok(ps.indexOf(v.en.text) >= 0 && ps.indexOf(v.dis.text) >= 0 && !btn(panel, "Enable TPM access") && !btn(panel, "Disable TPM access"),
+         v.n + ": both commands shown, no buttons");
+      const texts = Array.prototype.map.call(row("tpm").querySelectorAll(".cdbx-cus-off"), function (x) { return x.textContent; });
+      ok(texts.join("|") === [v.en.disabled, v.dis.disabled].filter(Boolean).join("|"), v.n + ": reasons shown for the no-op ones: " + texts.join("|"));
+    }
+    // Needs-action row text for the leftover seat ACL stays what main sends.
+    setState(window.__cusRows({ status: "action", fact: "accessible for this session - no rule installed, access ends when you log out", note: "n" }),
+      { tpmEnable: PK_EN, tpmDisable: Object.assign({}, PK_DIS, { disabled: OFF_DIS }) });
+    panel = await remount();
+    ok(word("tpm") === "Needs action" && /access ends when you log out/.test(row("tpm").textContent) &&
+       !btn(row("tpm"), "Enable TPM access").disabled && btn(row("tpm"), "Disable TPM access").disabled,
+       "ACL leftover: Needs action, Enable live, Disable greyed");
+  }
+
+  // --- Restart now and Reset screen sharing
+  setState(window.__cusRows({ status: "action", fact: "accessible now - restart Claude to use it", note: "n" }), { restart: true });
+  panel = await remount();
+  ok(!!btn(row("tpm"), "Restart now") && !!btn(row("cloud"), "Restart now") && !btn(row("desktop"), "Restart now"),
+     "restart owed: Restart now on the TPM and cloud rows");
+  window.__cusCalls.reset = 0;
+  setState(okRows, { resetScreenSharing: true });
+  panel = await remount();
+  const rs = btn(row("desktop"), "Reset screen sharing");
+  ok(!!rs, "a session bridge: Reset screen sharing on the desktop row");
+  if (rs) { rs.click(); await sleep(60); }
+  ok(window.__cusCalls.reset === 1 && toastText() === "KWin screen sharing: forgot the remembered choice.",
+     "Reset runs once and toasts the launcher's lines verbatim: " + toastText());
+
+  // --- never a false OK
+  setState({ desktop: { status: "unknown", fact: "x11-bridge doctor gave no status (timeout)", note: "n" },
+    tpm: { status: "OK", fact: "spoofed", note: "n" } }, {});
+  panel = await remount();
+  ok(word("desktop") === "Unknown" && word("tpm") === "Unknown" && word("cloud") === "Unknown",
+     "unknown, unrecognised and missing statuses all render Unknown: " + [word("desktop"), word("tpm"), word("cloud")].join("|"));
+  window.__cusState = { ok: false, error: "main.log: EACCES" };
+  panel = await remount();
+  ok(!panel.querySelector(".cdbx-cus-row") && /unavailable: main\.log: EACCES/.test(panel.querySelector(".cdbx-cus .cdbx-error").textContent),
+     "a failed read shows the error and no rows");
+  ok(!!panel.querySelector(BG_SW), "and the switches are still there");
+  window.__cusState = { ok: true, rows: window.__cusRows(), actions: { tpmEnable: PK_EN } };
+
+  // --- an older preload: no status block, the switches keep their heading
+  const savedRead = window.cdbExtra.cuStatusRead;
+  delete window.cdbExtra.cuStatusRead;
+  panel = await remount();
+  ok(!panel.querySelector(".cdbx-cus") && !btn(panel, "Re-check") &&
+     /does not expose the Computer Use status bridge/.test(panel.querySelector(".cdbx-error").textContent),
+     "an older preload: no status block, no Re-check, and says why");
+  ok(!!panel.querySelector(BG_SW) && Array.prototype.some.call(panel.querySelectorAll(".cdbx-sec-t"), function (n) { return n.textContent === "Options"; }),
+     "and the switches still render under Options");
+  window.cdbExtra.cuStatusRead = savedRead;
+
+  // --- Local Cowork VM: the four rows, the KVM actions, 3P ------------------
+  const LOCAL = function (kvm, vsock, tools, vmr) {
+    return Object.assign(window.__cusRows(), {
+      kvm: kvm || { status: "ok", fact: "/dev/kvm accessible", note: "k" },
+      vsock: vsock || { status: "ok", fact: "/dev/vhost-vsock accessible", note: "v" },
+      vmTools: tools || { status: "ok", fact: "QEMU, OVMF and virtiofsd found", note: "t" },
+      vm: vmr || { status: "na", fact: "not running", note: "m" } });
+  };
+  const KPK_EN = window.__cusKvmPkEnable;
+  const KPK_DIS = window.__cusKvmPkDisable;
+  const inLocal = function (key) { const r = row(key); return !!r && !!r.closest('[data-cdbx-section="local"]'); };
+  setState(LOCAL(), {});
+  panel = await remount();
+  ok(["kvm", "vsock", "vmTools", "vm"].every(inLocal), "four local VM rows under Local Cowork VM");
+  ok(row("kvm").querySelector(".cdbx-id").firstChild.textContent === "KVM (/dev/kvm)" &&
+     row("vsock").querySelector(".cdbx-id").firstChild.textContent === "VM socket (/dev/vhost-vsock)" &&
+     row("vmTools").querySelector(".cdbx-id").firstChild.textContent === "QEMU, OVMF and virtiofsd" &&
+     row("vm").querySelector(".cdbx-id").firstChild.textContent === "Local VM", "with their titles");
+  ok(!panel.querySelector('[data-cdbx-section="local"] .cdbx-cus-old'), "no 'older main side' line when the rows are there");
+  // The four KVM states the main side reports.
+  const kstates = [
+    ["missing", { status: "na", fact: "missing - enable virtualization (VT-x / AMD-V) in the firmware settings", note: "k" }, null, "Not available"],
+    ["no_permission", { status: "action", fact: "no permission (root:kvm 660)", note: "k" }, null, "Needs action"],
+    ["vsock_module_missing", null, { status: "action", fact: "module not loaded (vhost_vsock)", note: "v" }, "OK"],
+    ["ok", null, null, "OK"]
+  ];
+  for (const [n, k, v, kw] of kstates) {
+    setState(LOCAL(k, v), n === "vsock_module_missing" ? { vsockCommand: "sudo modprobe vhost_vsock" } : {});
+    window.__cusState.vm = { atStart: null, now: n, running: false };
+    panel = await remount();
+    ok(word("kvm") === kw && row("kvm").querySelector(".cdbx-cus-fact").textContent === (k ? k.fact : "/dev/kvm accessible"),
+       n + ": the KVM row says " + kw + " with main's fact");
+    if (n === "vsock_module_missing") {
+      ok(word("vsock") === "Needs action" && pres(row("vsock")).indexOf("sudo modprobe vhost_vsock") >= 0,
+         n + ": the vhost-vsock row offers the modprobe command");
+    }
+  }
+  // Enable KVM access: button, security text, exact command, What this does.
+  window.__cusCalls.kvmEnable = 0; window.__cusCalls.kvmDisable = 0;
+  setState(LOCAL({ status: "action", fact: "no permission (root:kvm 660)", note: "k" }),
+    { kvmEnable: KPK_EN, kvmDisable: Object.assign({}, KPK_DIS, { disabled: "Nothing to remove - no link from this package is installed" }),
+      kvmGroupCommand: "sudo usermod -aG kvm \"$USER\"" });
+  panel = await remount();
+  const ken = btn(row("kvm"), "Enable KVM access");
+  const kdis = btn(row("kvm"), "Disable KVM access");
+  ok(!!ken && !ken.disabled && !!kdis && kdis.disabled, "Enable KVM access live, Disable greyed with its reason");
+  ok(/only to \/dev\/kvm and \/dev\/vhost-vsock/.test(row("kvm").querySelector(".cdbx-cus-sec").textContent) &&
+     /docs\/cowork\.md/.test(row("kvm").querySelector(".cdbx-cus-sec").textContent), "with the KVM security text");
+  const kpk = row("kvm").querySelector('.cdbx-cus-pk[data-verb="enable"][data-access="kvm"]');
+  const kwhat = kpk && kpk.querySelector("details.cdbx-cus-what");
+  const kwp = kwhat ? pres(kwhat) : [];
+  ok(!!kpk && pres(kpk)[0] === KPK_EN.command && /^Enable KVM access runs this command/.test(kpk.querySelector(".cdbx-note").textContent),
+     "the exact KVM command main runs");
+  ok(!!kwhat && kwhat.open === false && kwp.indexOf(KPK_EN.link + " -> " + KPK_EN.target) >= 0 && kwp.indexOf(KPK_EN.rule) >= 0 &&
+     kwp.indexOf(KPK_EN.mlink + " -> " + KPK_EN.mtarget) >= 0 && kwp.indexOf(KPK_EN.apply) >= 0 && kwp.indexOf(KPK_EN.undo) >= 0 &&
+     kwp.indexOf(KPK_EN.undoManual) >= 0 && /restart it afterwards/.test(kwhat.textContent),
+     "What this does: both links, the rule, modprobe + udev, the restart note and the undo: " + kwp.join(" || ").replace(/\n/g, " / "));
+  ok(pres(row("kvm")).indexOf("sudo usermod -aG kvm \"$USER\"") >= 0 && /no logind/.test(row("kvm").textContent),
+     "the kvm group as the manual alternative without a local seat");
+  ok(!btn(row("tpm"), "Enable KVM access") && !!row("tpm"), "the KVM actions never appear on the TPM row");
+  window.__cusKvmEnable = { ok: true, changed: true, message: "cdb-kvm-access: enabled (a -> b; c -> d)" };
+  const readsBeforeK = window.__cusCalls.read;
+  ken.click();
+  await sleep(60);
+  ok(window.__cusCalls.kvmEnable === 1 && window.__cusCalls.enable === 0, "Enable calls cuStatusKvmEnable once, with no argument, not the TPM channel");
+  ok(window.__cusCalls.read === readsBeforeK + 1 && /cdb-kvm-access: enabled/.test(toastText()), "then re-reads and toasts the helper's line: " + toastText());
+  window.__cusKvmEnable = { ok: false, code: "declined", error: "Enable was not confirmed", command: null };
+  btn(row("kvm"), "Enable KVM access").click();
+  await sleep(60);
+  ok(toastText() === "Not changed: Enable KVM access was not confirmed" && !panel.querySelector(".cdbx-cus-fail"), "declined: says so, no command block");
+  window.__cusKvmEnable = { ok: false, code: "helper-6", error: "cdb-kvm-access: links done, but modprobe vhost_vsock failed",
+    command: "sudo /usr/lib/claude-desktop/resources/linux-udev/cdb-kvm-access enable" };
+  btn(row("kvm"), "Enable KVM access").click();
+  await sleep(60);
+  const kfail = row("kvm").querySelector(".cdbx-cus-fail");
+  ok(!!kfail && /modprobe vhost_vsock failed/.test(kfail.textContent) && !row("tpm").querySelector(".cdbx-cus-fail") &&
+     pres(row("kvm")).indexOf("sudo /usr/lib/claude-desktop/resources/linux-udev/cdb-kvm-access enable") >= 0,
+     "a failed KVM Enable: the error and the command under the KVM row, not the TPM row");
+  // Restart after access was fixed (upstream caches its probe per run).
+  setState(LOCAL({ status: "action", fact: "accessible now - restart Claude so local Cowork can use it", note: "k" }), { vmRestart: true });
+  panel = await remount();
+  ok(!!btn(row("kvm"), "Restart now") && !btn(row("tpm"), "Restart now"), "vmRestart: Restart now on the KVM row only");
+  // NixOS / command variants, and an older preload without the KVM methods.
+  setState(LOCAL(), { kvmEnable: { kind: "nixos", text: "programs.claude-desktop-extra.kvmAccess.enable = true;" } });
+  panel = await remount();
+  ok(pres(row("kvm")).indexOf("programs.claude-desktop-extra.kvmAccess.enable = true;") >= 0 && !btn(panel, "Enable KVM access"), "NixOS: the module option, no button");
+  const savedKE = window.cdbExtra.cuStatusKvmEnable;
+  delete window.cdbExtra.cuStatusKvmEnable;
+  setState(LOCAL(), { kvmEnable: KPK_EN });
+  panel = await remount();
+  ok(!btn(panel, "Enable KVM access") && pres(row("kvm")).indexOf(KPK_EN.command) >= 0 && !!row("tpm"),
+     "an older preload without the KVM methods: the command to run, no button, the rest of the page intact");
+  window.cdbExtra.cuStatusKvmEnable = savedKE;
+  // 3P: main marks the device key and cloud rows; nothing TPM is offered.
+  setState(LOCAL(), {});
+  window.__cusState.mode = "3p";
+  window.__cusState.rows.tpm = { status: "na", fact: "Not used in 3P mode", note: "n" };
+  window.__cusState.rows.cloud = { status: "na", fact: "Not used in 3P mode", note: "n" };
+  panel = await remount();
+  ok(word("tpm") === "Not available" && row("tpm").querySelector(".cdbx-cus-fact").textContent === "Not used in 3P mode" &&
+     row("cloud").querySelector(".cdbx-cus-fact").textContent === "Not used in 3P mode" && !btn(panel, "Enable TPM access") &&
+     word("kvm") === "OK", "3P: Not used in 3P mode on the cloud section, the local VM section live");
+  {
+    const help = panel.querySelector("details.cdbx-cus-help");
+    const hl = help ? Array.prototype.map.call(help.querySelectorAll(":scope > div.cdbx-note:not(.cdbx-cus-help-links)"), function (n) { return n.textContent; }) : [];
+    const links = help ? Array.prototype.map.call(help.querySelectorAll("a"), function (a) { return a.getAttribute("href"); }) : [];
+    ok(hl.length === 2 && /^Local: the VM on this computer/.test(hl[0]) && hl[1] === "Cloud Cowork is not available in 3P mode." &&
+       links.length === 1 && /docs\/cowork\.md#how-cowork-chooses-cloud-or-local$/.test(links[0]) && !/admin-settings/.test(help.textContent + links.join()),
+       "3P help: the local line, cloud not available, no admin links: " + hl.join(" | ") + " / " + links.join());
+  }
+  window.__cusState = { ok: true, rows: window.__cusRows(), actions: { tpmEnable: PK_EN } };
+}
+
+// The deep link (window.__cdbExtraOpen, used by the Cowork header icon): with
+// the settings dialog mounted it opens Cowork (Linux) at the asked section;
+// without it, it asks main to navigate (cdb-extra:open-settings) and the next
+// mount within 10 s finishes the job; a stale pending entry is dropped; a
+// failed navigation says where to go by hand.
+async function deepLink() {
+  function toastText() { const t = document.querySelector(".cdbx-toast"); return t ? t.textContent : ""; }
+  function h1() { const n = document.querySelector(".cdbx-panel .cdbx-h1"); return n ? n.textContent : ""; }
+  function focusedSection() {
+    const a = document.activeElement;
+    const w = a && a.closest ? a.closest("[data-cdbx-section]") : null;
+    return a && a.classList && a.classList.contains("cdbx-sec-h") && w ? w.getAttribute("data-cdbx-section") : null;
+  }
+  ok(typeof window.__cdbExtraOpen === "function", "the page defines window.__cdbExtraOpen");
+  if (typeof window.__cdbExtraOpen !== "function") return;
+  window.__cusState = { ok: true, rows: window.__cusRows(), actions: { tpmEnable: window.__cusPkEnable } };
+  window.__openCalls = 0;
+  window.cdbExtra.extraOpenSettings = function () { window.__openCalls += arguments.length ? 100 : 1; return Promise.resolve(window.__openAnswer || { ok: true }); };
+
+  // mounted: opens at once, scrolled to the section, its heading focused
+  document.getElementById("row-account").click();
+  await sleep(20);
+  let r = window.__cdbExtraOpen("cu", "local");
+  await sleep(60);
+  ok(r === true && h1() === "Cowork (Linux)" && focusedSection() === "local" && window.__openCalls === 0,
+     "mounted: opens Cowork (Linux) at the Local Cowork VM section without asking main: " + [r, h1(), focusedSection(), window.__openCalls].join("|"));
+  r = window.__cdbExtraOpen("cu", "cloud");
+  await sleep(60);
+  ok(r === true && focusedSection() === "cloud", "and at the Cloud Cowork section: " + focusedSection());
+  r = window.__cdbExtraOpen("cu", "<img src=x>");
+  await sleep(60);
+  ok(r === true && h1() === "Cowork (Linux)" && focusedSection() === null, "an unknown section opens the page at the top");
+  ok(window.__cdbExtraOpen("nope", "cu") === false && window.__cdbExtraOpen("", "") === false, "an unknown kind is refused");
+
+  // not mounted: main navigates, the next mount opens the section. Upstream
+  // renders a NEW dialog each time settings opens: a clean clone stands in.
+  document.getElementById("row-account").click();
+  await sleep(20);
+  let dlg = document.querySelector('[role="dialog"]');
+  const host = dlg.parentNode;
+  const blank = dlg.cloneNode(true);
+  Array.prototype.forEach.call(blank.querySelectorAll(".cdbx-group,.cdbx-item,.cdbx-panel"), function (n) { n.remove(); });
+  function close() { const d = document.querySelector('[role="dialog"]'); if (d) d.remove(); }
+  function mount() { host.appendChild(blank.cloneNode(true)); }
+  close();
+  await sleep(40);
+  window.cdbExtra.extraOpenSettings = function () {
+    window.__openCalls += arguments.length ? 100 : 1;
+    mount(); // what upstream's settings route does: a settings dialog mounts
+    return Promise.resolve({ ok: true });
+  };
+  r = window.__cdbExtraOpen("cu", "cu");
+  ok(r === true && !!window.__cdbExtraPending && window.__cdbExtraPending.kind === "cu" && window.__cdbExtraPending.section === "cu",
+     "not mounted: a pending entry is queued");
+  await sleep(400);
+  ok(window.__openCalls === 1 && h1() === "Cowork (Linux)" && focusedSection() === "cu" && window.__cdbExtraPending === null,
+     "main is asked once with no argument; the mount opens the Computer Use section and clears the entry: " +
+     [window.__openCalls, h1(), focusedSection()].join("|"));
+
+  // a stale pending entry is dropped on the next mount
+  close();
+  await sleep(40);
+  window.__cdbExtraPending = { kind: "cu", section: "local", at: Date.now() - 20000 };
+  mount();
+  await sleep(400);
+  ok(!!document.querySelector(".cdbx-item") && !document.querySelector(".cdbx-panel") && window.__cdbExtraPending === null,
+     "a pending entry older than 10 s is ignored and cleared");
+
+  // navigation unavailable: toast the manual path, clear the entry
+  close();
+  await sleep(40);
+  window.cdbExtra.extraOpenSettings = function () { return Promise.resolve({ ok: false, error: "settings navigation unavailable" }); };
+  r = window.__cdbExtraOpen("cu", "local");
+  await sleep(60);
+  ok(r === true && toastText() === "Open Settings -> Extra -> Cowork (Linux)" && window.__cdbExtraPending === null,
+     "navigation unavailable: the manual path as a toast: " + toastText());
+  delete window.cdbExtra.extraOpenSettings;
+  ok(window.__cdbExtraOpen("cu", "local") === false && toastText() === "Open Settings -> Extra -> Cowork (Linux)",
+     "an older preload without the bridge method: false, and the manual path");
+  mount();
+  await sleep(300);
 }
 
 async function modelsPanel(modelsItem) {
@@ -1802,6 +3140,7 @@ async function deployPanel(deployItem) {
   const clearAll = panel.querySelector(".cdbx-sec-act");
   ok(!!clearAll, "the configuration section has a clear-all button");
   ok(!clearAll.classList.contains("cdbx-hide"), "shown, because keys are set");
+  headlineContract(panel, "Deployment page");
   const count = panel.querySelector(".cdbx-sec-h .cdbx-sec-n").textContent;
   ok(/^\d+ set$/.test(count), "next to how many keys are set: " + count);
   clearAll.click();
@@ -1891,19 +3230,74 @@ async function themesPanel(themesItem) {
   themesItem.click();
   await sleep(80);
   ok(!!document.querySelector(".cdbx-sections"), "the Themes panel renders sections");
+  ok(Array.from(document.querySelectorAll('.cdbx-sec-h .cdbx-sec-t')).filter(e => e.textContent === 'Message input appearance').length === 1,
+     "both appearance controls share one Message input appearance heading");
+  const compact = document.querySelector('.cdbx-switch[aria-label="Frost only the input field"]');
+  ok(!!compact && !compact.disabled, "compact frost switch is available in Themes");
+  if (compact) {
+    const initial=compact.getAttribute("aria-checked"); compact.click(); await sleep(20);
+    ok(compact.getAttribute("aria-checked")!==initial, "compact frost toggles live");
+    compact.click(); await sleep(20);
+    ok(compact.getAttribute("aria-checked")===initial, "outer frost can be restored");
+  }
+  const reply = document.querySelector('.cdbx-switch[aria-label="Frosted message input"]');
+  ok(!!reply && !reply.disabled, "reply surroundings switch is available in Themes");
+  if (reply) {
+    const initial=reply.getAttribute("aria-checked");
+    reply.click(); await sleep(20);
+    ok(reply.getAttribute("aria-checked")!==initial, "reply surroundings can be toggled live");
+    reply.click(); await sleep(20);
+    ok(reply.getAttribute("aria-checked")===initial, "reply surroundings can be restored");
+  }
+  {
+    const origComposerRead = window.cdbExtra.transparentChatComposerRead;
+    const origFieldRead = window.cdbExtra.frostedReplyFieldRead;
+    window.cdbExtra.transparentChatComposerRead = function () {
+      return Promise.resolve({ ok: false, error: "message input appearance is Linux only" });
+    };
+    window.cdbExtra.frostedReplyFieldRead = function () {
+      return Promise.resolve({ ok: false, error: "message input appearance is Linux only" });
+    };
+    document.getElementById("row-account").click();
+    await sleep(30);
+    themesItem.click();
+    await sleep(80);
+    ok(!document.querySelector('.cdbx-switch[aria-label="Frosted message input"]') &&
+       !document.querySelector('.cdbx-switch[aria-label="Frost only the input field"]') &&
+       Array.from(document.querySelectorAll('.cdbx-sec-h .cdbx-sec-t')).every(e => e.textContent !== 'Message input appearance'),
+       "win32 ('Linux only'): message input appearance rows and heading are hidden");
+    window.cdbExtra.transparentChatComposerRead = origComposerRead;
+    window.cdbExtra.frostedReplyFieldRead = origFieldRead;
+    document.getElementById("row-account").click();
+    await sleep(30);
+    themesItem.click();
+    await sleep(80);
+  }
+
   ok(!document.querySelector(".cdbx-panel .cdbx-switch[aria-label=\"show the Code tab's side panels as tabs instead of a split layout\"]"),
      "the panel tabs switch is NOT in the Themes panel");
 
+  headlineContract(document.querySelector(".cdbx-sections"), "Themes gallery");
+  {
+    const h = document.querySelector(".cdbx-sections .cdbx-sec-h");
+    const before = document.querySelector(".cdbx-panel").innerHTML.replace(/ cdbx-sheen-play/g, "");
+    h.querySelector(".cdbx-sec-t").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    ok(h.classList.contains("cdbx-sheen-play"), "a click on a headline label adds cdbx-sheen-play");
+    ok(document.querySelector(".cdbx-panel").innerHTML.replace(/ cdbx-sheen-play/g, "") === before &&
+       document.querySelectorAll(".cdbx-sheen-play").length === 1, "and changes nothing else");
+    h.dispatchEvent(new window.Event("animationend"));
+    ok(!h.classList.contains("cdbx-sheen-play"), "animationend removes it again");
+  }
   const secs = sections();
-  ok(labels() === "Your themes:1 | Gaming:3 | Common:5 | More:1",
+  ok(labels() === "Your themes:1 | Gaming & Shows:3 | Common:5 | More:1",
      "section order and counts: " + labels());
   ok(secs.length === 4, "four sections for this list (" + secs.length + ")");
 
   const gaming = secs[1];
-  ok(gaming.cards.indexOf("Mario") >= 0, "the built-in mario is under Gaming, not lost in Common");
-  ok(gaming.cards.indexOf("Zelda") >= 0, "a community gaming palette is under Gaming");
-  ok(gaming.cards.indexOf("My-neon") >= 0, "a user gaming theme is under Gaming");
-  ok(gaming.cards.join(",") === "Mario,My-neon,Zelda", "Gaming is alphabetical: " + gaming.cards.join(","));
+  ok(gaming.cards.indexOf("Mario") >= 0, "the built-in mario is under Gaming & Shows, not lost in Common");
+  ok(gaming.cards.indexOf("Zelda") >= 0, "a community gaming palette is under Gaming & Shows");
+  ok(gaming.cards.indexOf("My-neon") >= 0, "a user gaming theme is under Gaming & Shows");
+  ok(gaming.cards.join(",") === "Mario,My-neon,Zelda", "Gaming & Shows is alphabetical: " + gaming.cards.join(","));
   ok(secs[0].cards.join(",") === "My-own", "Your themes holds the non-gaming custom theme only");
   // Built-in and community share one section: the packaging tier is not
   // something a user picks a theme by.
@@ -1926,12 +3320,14 @@ async function themesPanel(themesItem) {
   await type("nord");
   ok(labels() === "Common:1", "filtering to one theme leaves one section: " + labels());
   await type("gaming");
-  ok(labels() === "Gaming:3", "the filter also matches the category: " + labels());
+  ok(labels() === "Gaming & Shows:3", "the filter also matches the category: " + labels());
+  await type("shows");
+  ok(labels() === "Gaming & Shows:3", "the filter also matches 'shows' for Gaming & Shows: " + labels());
   await type("zzzz");
   ok(labels() === "", "no section heading survives a filter that matches nothing");
   ok(!!document.querySelector(".cdbx-panel .cdbx-empty"), "the empty message is shown instead");
   await type("");
-  ok(labels() === "Your themes:1 | Gaming:3 | Common:5 | More:1",
+  ok(labels() === "Your themes:1 | Gaming & Shows:3 | Common:5 | More:1",
      "clearing the filter brings every section back");
 
   // The config file we write is a link, not just text - and it must be the file
@@ -1966,7 +3362,7 @@ async function themesPanel(themesItem) {
   await sleep(40);
   ok(window.__revealCalls.indexOf("config-jsonc:open") >= 0,
      "and the link follows it too: " + window.__revealCalls.join(","));
-  ok(labels() === "Your themes:1 | Gaming:3 | Common:5 | More:1",
+  ok(labels() === "Your themes:1 | Gaming & Shows:3 | Common:5 | More:1",
      "the sections survive a re-render after apply");
 
   // The overlay row: what themeOverlay merges over the picked theme, above the
@@ -2016,7 +3412,7 @@ async function themesPanel(themesItem) {
     ok(!!row && row.querySelector(".cdbx-id").textContent === "Overlay: My-own",
        "the row names the new overlay: " + (row ? row.querySelector(".cdbx-id").textContent : "no row"));
     ok(/active \+ overlay/.test(activeBadge()), "and the badge is back: " + activeBadge());
-    ok(labels() === "Your themes:1 | Gaming:3 | Common:5 | More:1",
+    ok(labels() === "Your themes:1 | Gaming & Shows:3 | Common:5 | More:1",
        "the sections survive the overlay re-render");
   }
 }
@@ -2303,10 +3699,16 @@ async function run() {
     if (kind === "real") {
       await themesPanel(items[0]);
       await featuresPanel(items[1]);
-      await cubgPanel(items[1]);
-      await modelsPanel(items[2]);
-      await flagsPanel(items[3]);
-      await deployPanel(items[4]);
+      await cubgPanel(items[2]);
+      await cusPanel(items[2]);
+      await escTwoPages(items[1], items[2]);
+      await modelsPanel(items[3]);
+      await flagsPanel(items[4]);
+      await drawnCursorRow(items[2], items[4]);
+      await cuGlowRow(items[2]);
+      await deployPanel(items[5]);
+      // Last: it re-mounts the nav, so the items above are stale afterwards.
+      await deepLink();
     }
     return;
   }
@@ -2641,6 +4043,56 @@ window.__cubgBase = { ok: true, present: false, enabled: false, config: null, va
   lockedByJsonc: null, source: "default", path: "/home/u/.config/Claude/claude-desktop-extra.json", own: { display: ":0", wayland: null } };
 window.__cubgState = Object.assign({}, window.__cubgBase);
 window.__cubgCalls = { set: [], thumb: [], probe: [], test: 0 };
+// Computer Use status: the read,
+// and what each action answers. Calls are counted so the page's reads can be
+// pinned. The pkexec actions carry main's command and what it changes.
+window.__cusRows = function (tpm, cloud) {
+  return {
+    desktop: { status: "ok", fact: "X11 - x11-bridge 0.4.0 ready", note: "Claude's Code sessions see and control your screen through this." },
+    tpm: tpm || { status: "action", fact: "present, no access for this user (root:tss 660)", note: "Claude keeps this computer's device identity key in the TPM." },
+    cloud: cloud || { status: "action", fact: "device keyless (row_pk_no_row) - TPM not accessible, see above", note: "Cloud tasks reach this screen only through a keyed device." }
+  };
+};
+window.__cusPkEnable = { kind: "pkexec",
+  command: "/usr/bin/pkexec /usr/lib/claude-desktop/resources/linux-udev/cdb-tpm-access enable",
+  link: "/etc/udev/rules.d/70-claude-desktop-extra-tpm.rules",
+  apply: "udevadm control --reload\\nudevadm trigger --action=change --subsystem-match=tpmrm",
+  target: "/usr/lib/claude-desktop/resources/linux-udev/70-claude-desktop-extra-tpm.rules",
+  rule: 'SUBSYSTEM=="tpmrm", KERNEL=="tpmrm[0-9]*", ACTION!="remove", TAG+="uaccess"',
+  undo: "/usr/bin/pkexec /usr/lib/claude-desktop/resources/linux-udev/cdb-tpm-access disable",
+  undoManual: "sudo rm -f /etc/udev/rules.d/70-claude-desktop-extra-tpm.rules && sudo udevadm control --reload" };
+window.__cusPkDisable = { kind: "pkexec",
+  command: "/usr/bin/pkexec /usr/lib/claude-desktop/resources/linux-udev/cdb-tpm-access disable",
+  link: "/etc/udev/rules.d/70-claude-desktop-extra-tpm.rules",
+  apply: "udevadm control --reload\\nudevadm trigger --action=change --subsystem-match=tpmrm" };
+window.__cusKvmPkEnable = { kind: "pkexec",
+  command: "/usr/bin/pkexec /usr/lib/claude-desktop/resources/linux-udev/cdb-kvm-access enable",
+  link: "/etc/udev/rules.d/70-claude-desktop-extra-kvm.rules",
+  apply: "modprobe vhost_vsock\\nudevadm control --reload\\nudevadm trigger --action=change --subsystem-match=misc --sysname-match=kvm --sysname-match=vhost-vsock",
+  mlink: "/etc/modules-load.d/claude-desktop-extra-vsock.conf",
+  target: "/usr/lib/claude-desktop/resources/linux-udev/70-claude-desktop-extra-kvm.rules",
+  rule: 'SUBSYSTEM=="misc", KERNEL=="kvm", ACTION!="remove", TAG+="uaccess"\\nSUBSYSTEM=="misc", KERNEL=="vhost-vsock", ACTION!="remove", TAG+="uaccess"',
+  mtarget: "/usr/lib/claude-desktop/resources/linux-udev/claude-desktop-extra-vsock.conf",
+  mconf: "vhost_vsock",
+  undo: "/usr/bin/pkexec /usr/lib/claude-desktop/resources/linux-udev/cdb-kvm-access disable",
+  undoManual: "sudo rm -f /etc/udev/rules.d/70-claude-desktop-extra-kvm.rules /etc/modules-load.d/claude-desktop-extra-vsock.conf && sudo udevadm control --reload" };
+window.__cusKvmPkDisable = { kind: "pkexec",
+  command: "/usr/bin/pkexec /usr/lib/claude-desktop/resources/linux-udev/cdb-kvm-access disable",
+  link: "/etc/udev/rules.d/70-claude-desktop-extra-kvm.rules", apply: "udevadm control --reload",
+  mlink: "/etc/modules-load.d/claude-desktop-extra-vsock.conf" };
+window.__cusKvmEnable = { ok: true, changed: true, message: "cdb-kvm-access: enabled" };
+window.__cusKvmDisable = { ok: true, changed: true, message: "cdb-kvm-access: disabled" };
+window.__cuAxState = { ok: true, enabled: false, lockedByJsonc: null };
+window.__cuAskState = { ok: true, enabled: true, lockedByJsonc: null };
+window.__cuAskSets = [];
+window.__cuGlowState = { ok: true, enabled: true, lockedByJsonc: null };
+window.__cuGlowSets = [];
+window.__cusState = { ok: true, rows: window.__cusRows(), actions: { tpmEnable: window.__cusPkEnable, tpmDisable: null,
+  restart: false, resetScreenSharing: false, tssCommand: null } };
+window.__cusCalls = { read: 0, enable: 0, disable: 0, reset: 0, kvmEnable: 0, kvmDisable: 0 };
+window.__cusEnable = { ok: true, changed: true, message: "cdb-tpm-access: enabled (/etc/udev/rules.d/70-claude-desktop-extra-tpm.rules -> /usr/lib/claude-desktop/resources/linux-udev/70-claude-desktop-extra-tpm.rules)" };
+window.__cusDisable = { ok: true, changed: true, message: "cdb-tpm-access: disabled" };
+window.__cusReset = { ok: true, lines: ["KWin screen sharing: forgot the remembered choice."] };
 window.__cubgProbe = function (k, d) {
   if (d === ":99") return { ok: true, kind: k, display: d, running: true, supported: true, reason: null,
     screens: [{ id: "screen", width: 1280, height: 800 }], size: { width: 1280, height: 800 }, windows: 2,
@@ -2658,6 +4110,10 @@ window.__cubgProbe = function (k, d) {
   return { ok: true, kind: k, display: d, running: false, supported: false, reason: "not running: Connection refused", restrictions: [] };
 };
 window.cdbExtra = {
+  frostedReplyFieldRead: function () { return Promise.resolve({ok:true, enabled:!!window.__frostedField}); },
+  frostedReplyFieldSet: function (on) { window.__frostedField=on; return Promise.resolve({ok:true}); },
+  transparentChatComposerRead: function () { return Promise.resolve({ok:true, enabled:!!window.__transparentReply}); },
+  transparentChatComposerSet: function (on) { window.__transparentReply=on; return Promise.resolve({ok:true}); },
   themesList: stub({ ok: true, entries: window.__themes, active: "mario",
     configPath: "/home/u/.config/Claude/claude-desktop-extra.jsonc",
     savePath: "/home/u/.config/Claude/claude-desktop-extra.json" }),
@@ -2720,6 +4176,14 @@ window.cdbExtra = {
   // Load large sessions in full. Without these two the row is silently skipped
   // (renderToggleRow answers nothing when its bridge half is missing), so a
   // harness that omits them would pass while never rendering the row.
+  sessionStartAlwaysAllowRead: function () { return Promise.resolve({ ok: true, enabled: window.__ssOn === true, lockedByJsonc: null, grants: window.__ssGrants === undefined ? 2 : window.__ssGrants }); },
+  sessionStartAlwaysAllowSet: function (enabled) { window.__ssCalls = (window.__ssCalls || []).concat([enabled]); window.__ssOn = enabled; return Promise.resolve({ ok: true, enabled: enabled }); },
+  sessionStartAlwaysAllowForget: function () { window.__ssGrants = 0; window.__ssForgets = (window.__ssForgets || 0) + 1; return Promise.resolve({ ok: true, enabled: window.__ssOn === true, grants: 0 }); },
+  autoFixAuthorRead: function () { return Promise.resolve({ ok: true, entries: [], lockedByJsonc: false }); },
+  autoFixAuthorSet: function (entries) {
+    (window.__authorCalls || (window.__authorCalls = [])).push(entries);
+    return Promise.resolve(entries.indexOf("invalid") !== -1 ? { ok: false, error: "Invalid host/login" } : { ok: true, entries: entries });
+  },
   transcriptLimitsRead: function () { return Promise.resolve(window.__tlState || { ok: true, enabled: false, lockedByJsonc: false, source: "default", mainMiB: 256, subagentMiB: 192, activeNow: false, activeMainMiB: null, activeSubagentMiB: null, pendingRestart: false }); },
   // Answers pendingRestart the way the main side does: owed while the saved
   // switch differs from what the running app was started with (activeNow).
@@ -2750,6 +4214,19 @@ window.cdbExtra = {
   diffViewsSet: function (enabled) {
     window.__diffViewsCalls.push(enabled);
     return Promise.resolve({ ok: true, enabled: enabled, path: "/tmp/diff-views.json", nudged: true });
+  },
+  autoArchiveGraceRead: function () { return Promise.resolve(window.__archiveGraceState || { ok: true, minutes: 0, lockedByJsonc: null }); },
+  autoArchiveGraceSet: function (minutes) { window.__archiveGraceCalls = (window.__archiveGraceCalls || []).concat([minutes]); return Promise.resolve({ ok: true, minutes: minutes }); },
+  // Wake Auto-fix sessions when a PR is ready to merge: opt-in, live.
+  autoFixMergeReadyRead: function () { return Promise.resolve(window.__afmrState || { ok: true, enabled: false, lockedByJsonc: null }); },
+  autoFixMergeReadySet: function (enabled) { window.__afmrCalls = (window.__afmrCalls || []).concat([enabled]); return Promise.resolve({ ok: true, enabled: enabled, path: "/tmp/afmr.json" }); },
+  // Escape stops Computer Use: the one Computer Use row in Community Features (opt-in).
+  cuEscRead: function () { return Promise.resolve(window.__cuEscState || { ok: true, enabled: false, lockedByJsonc: null }); },
+  cuEscSet: function (enabled) {
+    window.__cuEscCalls = (window.__cuEscCalls || []).concat([enabled]);
+    // One stored setting behind both rows (Community Features and Computer Use).
+    window.__cuEscState = { ok: true, enabled: enabled === true, lockedByJsonc: null };
+    return Promise.resolve({ ok: true, enabled: enabled, path: "/tmp/cu-esc.json" });
   },
   pickerRead: function () { return Promise.resolve(window.__pickerState); },
   pickerSet: function (enabled) {
@@ -2815,6 +4292,27 @@ window.cdbExtra = {
       xfwm4: "/usr/bin/xfwm4", openbox: null, i3: null, x11vnc: null, wayvnc: null, xclip: "/usr/bin/xclip", xsel: null,
       "wl-copy": null, "wl-paste": null, xprop: "/usr/bin/xprop" } });
   },
+  cuAxRead: function () { return Promise.resolve(window.__cuAxState); },
+  cuAskRead: function () { return Promise.resolve(window.__cuAskState); },
+  cuGlowRead: function () { return Promise.resolve(window.__cuGlowState); },
+  cuGlowSet: function (v) { window.__cuGlowSets.push(v); window.__cuGlowState = Object.assign({}, window.__cuGlowState, { enabled: v === true }); return Promise.resolve({ ok: true, enabled: v === true }); },
+  cuAskSet: function (v) { window.__cuAskSets.push(v); window.__cuAskState = Object.assign({}, window.__cuAskState, { enabled: v === true }); return Promise.resolve({ ok: true, enabled: v === true }); },
+  cuAxSet: function (v) { window.__cuAxState = Object.assign({}, window.__cuAxState, { enabled: v === true }); return Promise.resolve({ ok: true, enabled: v === true }); },
+  cuStatusRead: function () { window.__cusCalls.read++; return Promise.resolve(window.__cusState); },
+  cuStatusTpmEnable: function () { window.__cusCalls.enable += arguments.length ? 100 : 1; return Promise.resolve(window.__cusEnable); },
+  cuStatusTpmDisable: function () { window.__cusCalls.disable += arguments.length ? 100 : 1; return Promise.resolve(window.__cusDisable); },
+  cuStatusResetScreenSharing: function () { window.__cusCalls.reset += arguments.length ? 100 : 1; return Promise.resolve(window.__cusReset); },
+  cuStatusKvmEnable: function () { window.__cusCalls.kvmEnable = (window.__cusCalls.kvmEnable || 0) + (arguments.length ? 100 : 1); return Promise.resolve(window.__cusKvmEnable); },
+  cuStatusKvmDisable: function () { window.__cusCalls.kvmDisable = (window.__cusCalls.kvmDisable || 0) + (arguments.length ? 100 : 1); return Promise.resolve(window.__cusKvmDisable); },
+  jiraPrefRead: stub({ ok: true, enabled: true, locked: false, site: "https://acme.atlassian.net", email: "dev@example.com", tokenSet: true, keyringOk: true,
+    keyringBackend: "gnome_libsecret", template: "", defaultTemplate: "Work on {{key}}",
+    scopes: [{ name: "Basic", scopes: ["read:jira-work", "read:jira-user", "write:jira-work"] }, { name: "Board and Backlog", scopes: ["read:board-scope:jira-software", "read:project:jira"] },
+      { name: "Scrum boards only, untested", scopes: ["read:sprint:jira-software"] }] }),
+  jiraPrefSet: function (f) { window.__jiraSets = (window.__jiraSets || []).concat([f]); return Promise.resolve(window.__jiraSetRes || { ok: true }); },
+  jiraPrefTest: stub({ ok: true, displayName: "Ada", token: "scoped", checks: [
+    { feature: "Tickets", state: "ok", text: "OK" },
+    { feature: "Board and Backlog", state: "failed", text: "Probably missing read:board-scope:jira-software (inferred). The list groups by status instead." },
+    { feature: "Board view columns", state: "not-checked", text: "Not checked: no project with a board" }] }),
   diag: function (m) { diags.push(String(m)); return Promise.resolve({ ok: true }); }
 };
 </script>
@@ -2869,10 +4367,10 @@ for (const [name, fixture] of scenarios) {
   try {
     // Virtual time, so the budget costs no wall clock: it only has to cover the
     // sum of the driver's sleep() calls in the longest scenario.
-    // 15 s since the background-display setup page tests (issue #300).
+    // 30 s: the background-display setup page tests (issue #300), the Models link tests and the drawn-cursor row tests.
     dump = execFileSync(CHROMIUM, [
       "--headless", "--disable-gpu", "--no-sandbox", "--hide-scrollbars",
-      "--window-size=1000,700", "--virtual-time-budget=15000",
+      "--window-size=1000,700", "--virtual-time-budget=30000",
       "--dump-dom", "file://" + file
     ], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] });
   } catch (e) {

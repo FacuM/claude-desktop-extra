@@ -31,6 +31,19 @@ vm.runInNewContext(readFileSync(join(ROOT, "js/extra_settings_bridge.js"), "utf8
 ok(exposed && exposed.name === "cdbExtra", "the bridge exposes cdbExtra");
 const api = exposed.api;
 
+calls.length = 0;
+api.sessionStartAlwaysAllowRead(); api.sessionStartAlwaysAllowSet("yes"); api.sessionStartAlwaysAllowSet(true); api.sessionStartAlwaysAllowForget();
+ok(JSON.stringify(calls) === '[["cdb-session-start:read"],["cdb-session-start:set",false],["cdb-session-start:set",true],["cdb-session-start:revoke"]]',
+   "session-start dialog switch: read, boolean-coerced set and forget through fixed channels only");
+ok(Object.keys(api).filter(function (k) { return /^sessionStart/.test(k); }).sort().join(",") ===
+   "sessionStartAlwaysAllowForget,sessionStartAlwaysAllowRead,sessionStartAlwaysAllowSet",
+   "no bridge call can add a remembered session-start approval");
+
+calls.length = 0;
+api.autoFixAuthorRead(); api.autoFixAuthorSet(["github.com/my-app[bot]"]); api.autoFixAuthorSet(true);
+ok(calls.map(c => c[0]).join(" ") === "cdb-autofix-author:read cdb-autofix-author:set cdb-autofix-author:set", "trusted-author editor uses fixed channels");
+ok(calls[1][1][0] === "github.com/my-app[bot]" && calls[2][1] === null, "bridge forwards a list, never translates the legacy boolean into trust");
+
 // --- custom models: every field the panel sends must reach the channel ---------
 {
   calls.length = 0;
@@ -87,6 +100,33 @@ const api = exposed.api;
   ok(m.agent === false && m.agentName === "12" && m.agentDescription === "" && m.agentPrompt === "p" && !("extra" in m),
      "model-set forwards the sub-agent fields as strings and a boolean, nothing else");
 }
+{
+  calls.length = 0;
+  api.autoFixMergeReadyRead(); api.autoFixMergeReadySet("yes"); api.autoFixMergeReadySet(true);
+  ok(JSON.stringify(calls) === '[["cdb-autofix-merge-ready:read"],["cdb-autofix-merge-ready:set",false],["cdb-autofix-merge-ready:set",true]]',
+     "the Auto-fix ready-to-merge methods hit their fixed channels with a boolean only: " + JSON.stringify(calls));
+}
+{
+  // Cowork (Linux): KVM access, the header icon's facts and the settings deep
+  // link. Fixed channels, and every page argument is dropped.
+  calls.length = 0;
+  api.cuStatusKvmEnable("/bin/sh", "-c", "id"); api.cuStatusKvmDisable("x"); api.cuStatusIcon({ a: 1 }); api.extraOpenSettings("/settings/../admin");
+  ok(JSON.stringify(calls) === '[["cdb-cu-status:kvm-enable"],["cdb-cu-status:kvm-disable"],["cdb-cu-status:icon"],["cdb-extra:open-settings"]]',
+     "KVM access, icon and open-settings hit their fixed channels with no argument: " + JSON.stringify(calls));
+}
+{
+  calls.length = 0;
+  api.themesBackdrop(); api.themesBackdrops(); api.themesSetBackdrop("honu-lagoon"); api.themesSetBackdrop(null);
+  ok(JSON.stringify(calls) === '[["cdb-themes:backdrop"],["cdb-themes:backdrops"],["cdb-themes:set-backdrop","honu-lagoon"],["cdb-themes:set-backdrop",""]]',
+     "themesBackdrop/Backdrops/SetBackdrop hit their fixed channels with a stringified scene id: " + JSON.stringify(calls));
+}
+calls.length = 0;
+api.transparentChatComposerRead(); api.transparentChatComposerSet("yes"); api.transparentChatComposerSet(true);
+ok(JSON.stringify(calls) === '[["cdb-chat-composer:read"],["cdb-chat-composer:set",false],["cdb-chat-composer:set",true]]',
+   "reply surroundings use fixed channels and boolean arguments");
+calls.length = 0;
+api.frostedReplyFieldRead(); api.frostedReplyFieldSet("yes"); api.frostedReplyFieldSet(true);
+ok(JSON.stringify(calls) === '[["cdb-reply-field:read"],["cdb-reply-field:set",false],["cdb-reply-field:set",true]]', "frost placement uses fixed channels and booleans");
 ok(typeof api.invoke !== "function" && typeof api.send !== "function", "no generic passthrough to arbitrary channels");
 
 console.log(`\n${pass} passed, ${fail} failed`);

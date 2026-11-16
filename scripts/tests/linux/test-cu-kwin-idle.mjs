@@ -10,6 +10,11 @@
 // boundary (__cuTaskBoundary, called from upstream's releaseRemoteCuLock IPC). The
 // lock stays held; the next command starts a new session through the lazy start.
 //
+// Case [35]: the KWin capture exclusions (windows left out of screenshots) are
+// lifted on every lock release (each upstream turn end), task boundary,
+// upstream's turn-end unhide (__unhideApps, sub-patch 4h) and at app start, and
+// a restore queued at a release always runs before the next prepare-for-action.
+//
 // Run headless: the bridge is a stub, timers are fake (setTimeout/clearTimeout are
 // shadowed inside the loaded module only), no KDE needed.
 import { readFileSync } from "node:fs";
@@ -54,6 +59,11 @@ function load() {
 
   const reply = (sub, cb) => {
     if (sub === "screens") { cb(null, { stdout: SCREENS, stderr: "" }); return; }
+    // A local command (no portal session): never hit by the stop latch.
+    if (sub === "restore-prepare-state") {
+      if (state.restoreFails) { cb(Object.assign(new Error("Command failed"), { stderr: "kwin unreachable", code: 1 }), "", ""); return; }
+      cb(null, { stdout: '{"hidden":[],"activated":null}', stderr: "" }); return;
+    }
     if (sub === "session-end") { state.stopped = false; state.noSession = false; cb(null, { stdout: "", stderr: "" }); return; }
     if (sub === "session-start") {
       if (state.startStopped) { cb(Object.assign(new Error("Command failed"), { stderr: STOPPED_STDERR, code: 5 }), "", ""); return; }
@@ -110,14 +120,17 @@ function load() {
   }
   const count = (c) => kw.filter(x => x === c).length;
   const fails = async (f) => { try { await f(); return "no error"; } catch (e) { return e.message; } };
-  return { mod, ex, kw, argv, gates, gateAfter, state, diag, clock, live, advance, release, count, fails };
+  return { mod, ex, kw, argv, gates, gateAfter, state, diag, clock, live, advance, release, count, fails,
+    setTimeout: fakeSetTimeout, clearTimeout: fakeClearTimeout };
 }
 
 process.setMaxListeners(50);                         // one exit hook per loaded module
 // The executor's debugLog (and its process-exit session-end hook) write to console.debug.
 console.debug = () => {};
 
+let cases = 0;
 async function runCase(name, body) {
+  cases++;
   console.log("\n" + name);
   caseFailed = false;
   try { await body(); }
@@ -296,11 +309,13 @@ await runCase("[8] __cuTaskBoundary: alias match acts, mismatch is ignored, unde
   await r.ex.__cuTaskBoundary("session_abc", "renderer", "session_ABC");
   ok(r.count("session-end") === 4 && r.diag.some(l => l.includes("stopped-by-user latch cleared")), "the boundary sends session-end and clears the latch", r.kw.join(" "));
   ok(await r.fails(() => r.ex.key("f")) === "no error", "and the next command works");
-  // Safe without a session: nothing to end, no bridge spawn, no throw.
+  // Safe without a session: nothing to end, no throw; only the capture
+  // exclusions are lifted (a local bridge command, no session started).
   const r2 = load();
   const before = r2.kw.length;
-  ok(await r2.fails(() => r2.ex.__cuTaskBoundary(undefined, "renderer", undefined)) === "no error" && r2.kw.length === before,
-     "no lock, no session: a no-op", r2.kw.join(" "));
+  ok(await r2.fails(() => r2.ex.__cuTaskBoundary(undefined, "renderer", undefined)) === "no error" &&
+     r2.kw.slice(before).join(" ") === "restore-prepare-state",
+     "no lock, no session: only restore-prepare-state", r2.kw.join(" "));
 });
 
 await runCase("[9] the stop latch lifts on idle even with a mouse button held", async () => {
@@ -465,6 +480,379 @@ await runCase("[16] no idle session-end after the daemon vanished (exit 4)", asy
   ok(r.count("session-end") === 1, "which the idle timer ends as usual", r.kw.join(" "));
 });
 
+// ── Cloud-session check (js/cu_session_check.js, #293 round 8) ──
+// The KWin twin of the GNOME harness cases [35]-[44]: while the bridge session
+// is up for a cloud lock holder, the shared poller asks upstream's session-state
+// check (globalThis.__cdbRemoteSessionMode, sub-patch 4f) 10 s after the last
+// bridge command; ended -> __cuTaskBoundary(holder, "session-check", holder).
+// Result keys: upstream's refreshRemoteChromeSessionMode ended/ok/transient/notFound.
+const SESSION_CHECK = path.join(ROOT, "js", "cu_session_check.js");
+const RUNNING = { ok: true, ended: false, transient: false, notFound: false };
+const ENDED = { ok: true, ended: true, transient: false, notFound: false };
+async function loadChecked(results, opts = {}) {
+  const r = load();
+  if (!globalThis.__cdbCuSessionCheck) new Function(readFileSync(SESSION_CHECK, "utf8"))();
+  globalThis.__cdbCuSessionCheck._seam({ setTimeout: r.setTimeout, clearTimeout: r.clearTimeout, now: () => r.clock.now });
+  r.requests = [];
+  if (opts.noAccessor) delete globalThis.__cdbRemoteSessionMode;
+  else globalThis.__cdbRemoteSessionMode = async () => ({
+    resolve: async () => ({}),
+    refresh: async (id) => { r.requests.push(id); const x = results(id, r.requests.length); if (x instanceof Error) throw x; return x; }
+  });
+  const isDecision = (l) => /session check: (armed for |not armed )/.test(l);
+  r.checkLog = () => r.diag.filter(l => l.includes("[claude-cu] session check:") && !isDecision(l));
+  r.decisionLog = () => r.diag.filter(isDecision);
+  r.lockLog = () => r.diag.filter(l => /^\[claude-cu\] lock (taken by|released)/.test(l));
+  await r.ex.__setLockHeld(true, "holder" in opts ? opts.holder : "cse_X"); await settle();
+  if (!opts.noCommand) ok(await r.fails(() => r.ex.key("a")) === "no error", "a key works");
+  return r;
+}
+function unloadChecked() {
+  globalThis.__cdbCuSessionCheck?._seam();
+  delete globalThis.__cdbRemoteSessionMode;
+}
+async function checkedCase(name, body) {
+  try { await runCase(name, body); } finally { unloadChecked(); }
+}
+
+await checkedCase("[17] session check: first check 10 s after the last command; ended -> the bridge session ends, the lock stays", async () => {
+  const r = await loadChecked(() => ENDED);
+  await r.advance(9000);
+  ok(r.requests.length === 0, "nothing asked 9 s after the command", r.requests.join(" "));
+  await r.advance(1000);
+  ok(r.requests.join(" ") === "cse_X", "at 10 s: one check for cse_X", r.requests.join(" "));
+  ok(r.count("session-end") === 1, "ended: session-end", r.kw.join(" "));
+  ok(r.diag.some(l => l.includes("[claude-cu] session check: cse_X ended, ending the portal session")), "the end is logged", r.diag.join(" / "));
+  ok(r.diag.some(l => l.includes("[linux-executor] task boundary (session-check): ending the bridge session")), "through the task boundary", r.diag.join(" / "));
+  await r.advance(40000);
+  ok(r.requests.length === 1 && r.count("session-end") === 1, "no further checks until the next arm", r.kw.join(" "));
+  ok(await r.fails(() => r.ex.key("b")) === "no error" && r.count("session-start") === 2, "the next command starts a new session", r.kw.join(" "));
+  await r.advance(10000);
+  ok(r.requests.length === 2, "and arms the check again", String(r.requests.length));
+});
+
+await checkedCase("[18] session check: a running session is left alone, checked every 10 s, without log lines", async () => {
+  const r = await loadChecked(() => RUNNING);
+  await r.advance(35000);
+  ok(r.requests.length === 3, "checks at 10, 20 and 30 s", String(r.requests.length));
+  ok(r.count("session-end") === 0, "no session-end", r.kw.join(" "));
+  ok(r.checkLog().length === 0, "no per-check log line", r.checkLog().join(" / "));
+  ok(r.live().some(t => t.at === 40000 && t.unrefed), "an unref'd 10 s timer stays armed",
+     JSON.stringify(r.live().map(t => ({ at: t.at, unref: t.unrefed }))));
+});
+
+await checkedCase("[19] session check: deferred while a command is in flight or a mouse button is held", async () => {
+  const r = await loadChecked(() => ENDED);
+  r.gates.add("key-sequence");
+  const p = r.ex.key("b");
+  await settle();
+  await r.advance(25000);
+  ok(r.requests.length === 0 && r.count("session-end") === 0, "a command in flight: no request", r.kw.join(" "));
+  await r.release("key-sequence"); await p;
+  await r.ex.mouseDown();
+  await r.advance(25000);
+  ok(r.requests.length === 0 && r.count("session-end") === 0, "a held button: no request", r.kw.join(" "));
+  await r.ex.mouseUp();
+  await r.advance(10000);
+  ok(r.requests.length === 1 && r.count("session-end") === 1, "released: checked and ended 10 s later", r.kw.join(" "));
+});
+
+await checkedCase("[20] session check: errors back off to 20/40/60 s and never end the session", async () => {
+  const r = await loadChecked((id, n) => n % 2 ? new Error("net::ERR_INTERNET_DISCONNECTED") : { ok: false, ended: false, transient: true, notFound: false });
+  await r.advance(10000);
+  ok(r.requests.length === 1, "first check at 10 s", String(r.requests.length));
+  await r.advance(19000);
+  ok(r.requests.length === 1, "nothing before 30 s", String(r.requests.length));
+  await r.advance(1000);
+  ok(r.requests.length === 2, "second at 30 s", String(r.requests.length));
+  await r.advance(40000);
+  ok(r.requests.length === 3, "third at 70 s", String(r.requests.length));
+  await r.advance(30000);
+  ok(await r.fails(() => r.ex.key("b")) === "no error", "an action at 100 s");
+  await r.advance(59000);
+  ok(r.requests.length === 3, "nothing at 159 s", String(r.requests.length));
+  await r.advance(1000);
+  ok(r.requests.length === 4, "capped at 60 s: the next check at 160 s", String(r.requests.length));
+  const backoff = r.checkLog().filter(l => l.includes("backing off"));
+  ok(backoff.length === 3 && /20 s/.test(backoff[0]) && /40 s/.test(backoff[1]) && /60 s/.test(backoff[2]), "one log line per change", backoff.join(" / "));
+  ok(r.count("session-end") === 0, "an error never ends the session", r.kw.join(" "));
+});
+
+await checkedCase("[21] session check: notFound stops it for this holder; the idle timer still ends the session", async () => {
+  const r = await loadChecked(() => ({ ok: false, ended: false, transient: false, notFound: true }));
+  await r.advance(10000);
+  ok(r.requests.length === 1 && r.checkLog().length === 1, "one check, logged once", r.checkLog().join(" / "));
+  await r.advance(30000);
+  ok(await r.fails(() => r.ex.key("b")) === "no error", "an action");
+  await r.advance(30000);
+  ok(r.requests.length === 1, "never asked again for this holder", String(r.requests.length));
+  await r.advance(IDLE_MS);
+  ok(r.count("session-end") === 1 && r.diag.some(l => l.includes("idle for 120 s")), "the idle backstop ends it", r.kw.join(" "));
+});
+
+await checkedCase("[22] session check: session_X is asked as cse_X; a UUID or missing holder is never checked", async () => {
+  let r = await loadChecked(() => ENDED, { holder: "session_01AbC" });
+  await r.advance(10000);
+  ok(r.requests.join(" ") === "cse_01AbC" && r.count("session-end") === 1, "session_01AbC -> cse_01AbC, ended", r.requests.join(" ") + " :: " + r.kw.join(" "));
+  ok(!r.diag.some(l => l.includes("task boundary (session-check): ignored")), "passes the task boundary's id check");
+  for (const holder of ["3f2b6c1e-8d4a-4c3b-9e2f-1a2b3c4d5e6f", undefined]) {
+    unloadChecked();
+    r = await loadChecked(() => ENDED, { holder });
+    await r.advance(40000);
+    ok(r.requests.length === 0 && r.checkLog().length === 0 && r.count("session-end") === 0, "holder " + holder + ": no check", r.requests.join(" "));
+  }
+});
+
+await checkedCase("[23] session check: a lock release or a renderer task boundary stops it", async () => {
+  let r = await loadChecked(() => ENDED);
+  await r.advance(5000);
+  await r.ex.__setLockHeld(false); await settle();
+  await r.advance(30000);
+  ok(r.requests.length === 0, "lock released: no check", String(r.requests.length));
+  ok(r.checkLog().filter(l => l.includes("stopped for cse_X (lock released)")).length === 1, "one stop line", r.checkLog().join(" / "));
+  unloadChecked();
+  r = await loadChecked(() => ENDED);
+  await r.advance(5000);
+  await r.ex.__cuTaskBoundary("cse_X", "renderer", "cse_X"); await settle();
+  await r.advance(30000);
+  ok(r.requests.length === 0 && r.count("session-end") === 1, "renderer task boundary: no check after it", r.kw.join(" "));
+});
+
+await checkedCase("[24] session check: with the stop latch set, an ended session lifts it through the task boundary", async () => {
+  const r = await loadChecked((id, n) => n === 1 ? RUNNING : ENDED);
+  r.state.stopped = true;
+  ok(await r.fails(() => r.ex.key("b")) === NEW_MSG, "latched");
+  await r.advance(10000);
+  ok(r.requests.length === 1 && r.count("session-end") === 0, "running: the latch stays", r.kw.join(" "));
+  await r.advance(10000);
+  ok(r.requests.length === 2 && r.count("session-end") === 1 && r.diag.some(l => l.includes("stopped-by-user latch cleared (task boundary (session-check))")),
+     "ended: session-end and the latch is cleared", r.diag.filter(l => l.includes("latch")).join(" / "));
+  ok(await r.fails(() => r.ex.key("c")) === "no error", "the next action shares again");
+});
+
+await checkedCase("[25] session check: no session-state accessor -> never checks; the idle backstop ends at 120 s", async () => {
+  const r = await loadChecked(() => ENDED, { noAccessor: true });
+  await r.advance(60000);
+  ok(r.checkLog().length === 0 && r.count("session-end") === 0, "nothing checked or logged, still up at 60 s", r.checkLog().join(" / "));
+  await r.advance(61000);
+  ok(r.count("session-end") === 1, "idle end at 120 s", r.kw.join(" "));
+});
+
+await checkedCase("[26] session check: notFound lasts until the lock is released; the same holder on the next lock is checked again", async () => {
+  let mode = "notFound";
+  const r = await loadChecked(() => mode === "notFound" ? { ok: false, ended: false, transient: false, notFound: true } : ENDED);
+  await r.advance(10000);
+  ok(r.requests.length === 1, "notFound at 10 s", String(r.requests.length));
+  await r.ex.__setLockHeld(false); await settle();
+  mode = "ended";
+  await r.ex.__setLockHeld(true, "cse_X"); await settle();
+  ok(await r.fails(() => r.ex.key("b")) === "no error", "a key on the new lock");
+  await r.advance(10000);
+  ok(r.requests.length === 2 && r.count("session-end") === 2, "checked again and ended", r.requests.length + " :: " + r.kw.join(" "));
+});
+
+await checkedCase("[27] session check: an 'ended' reply that lands after a tool call began is dropped", async () => {
+  // The tool call's first await is the background-display setting check
+  // (refreshTargetSetting): the reply lands while it is pending.
+  let release, sigGate = null;
+  globalThis.__cuTargetSig = () => sigGate ? sigGate.then(() => "sig") : Promise.resolve("sig");
+  try {
+  const r = await loadChecked(() => ENDED);
+  globalThis.__cdbRemoteSessionMode = async () => ({ refresh: (id) => { r.requests.push(id); return new Promise(res => { release = res; }); } });
+  await r.advance(10000);
+  ok(r.requests.length === 1 && typeof release === "function", "a check in flight");
+  let openSig; sigGate = new Promise(res => { openSig = res; });
+  const p = r.fails(() => r.ex.key("b"));
+  await settle();
+  if (typeof release === "function") release(ENDED);
+  await settle();
+  ok(r.count("session-end") === 0, "no session-end while the key is starting", r.kw.join(" "));
+  sigGate = null; openSig();
+  ok(await p === "no error" && r.count("session-start") === 1, "the key completes on its session", r.kw.join(" "));
+  globalThis.__cdbRemoteSessionMode = async () => ({ refresh: async (id) => { r.requests.push(id); return ENDED; } });
+  await r.advance(10000);
+  ok(r.requests.length === 2 && r.count("session-end") === 1, "10 s after it: checked again and ended", r.requests.length + " :: " + r.kw.join(" "));
+  } finally { delete globalThis.__cuTargetSig; }
+});
+
+await checkedCase("[28] session check: a command finishing during a task-boundary end leaves no check armed", async () => {
+  const r = await loadChecked(() => RUNNING);
+  r.gates.add("key-sequence");
+  const p = r.fails(() => r.ex.key("b"));
+  await settle();
+  r.gates.add("session-end");
+  const tb = r.ex.__cuTaskBoundary("cse_X", "renderer", "cse_X");
+  await settle();
+  await r.release("key-sequence"); await p;       // re-arms on its way out
+  await r.release("session-end"); await tb;
+  const n = r.requests.length;
+  await r.advance(35000);
+  ok(r.count("session-end") === 1 && r.requests.length === n, "after the end: no check runs", "requests +" + (r.requests.length - n) + " :: " + r.kw.join(" "));
+});
+
+await checkedCase("[29] session check: a backed-off interval does not carry into the next turn", async () => {
+  const r = await loadChecked((id, n) => n === 1 ? new Error("net::ERR_NETWORK_CHANGED") : ENDED);
+  await r.advance(30000);
+  ok(r.requests.length === 2 && r.count("session-end") === 1, "error at 10 s, ended at 30 s", r.requests.length + " :: " + r.kw.join(" "));
+  ok(await r.fails(() => r.ex.key("b")) === "no error", "next turn: a key");
+  await r.advance(10000);
+  ok(r.requests.length === 3, "checked 10 s after it", String(r.requests.length));
+});
+
+// ── #293 round 9: the lock and the session check are observable (KWin) ──
+// Through globalThis.__cdbDiag (r.diag), never debugLog (console.debug is
+// discarded by the official .deb). Triggers: __setLockHeld, bridge commands.
+const NOT_ARMED_NONE = "[claude-cu] session check: not armed (no Computer Use lock holder; the portal session was started outside the lock)";
+
+await checkedCase("[30] diagnostics: lock taken/released carry the holder; one 'armed' line per lock (dedup)", async () => {
+  const r = await loadChecked(() => RUNNING);
+  await r.ex.key("b"); await r.ex.key("c");
+  ok(r.lockLog().length === 1 && r.lockLog()[0] === "[claude-cu] lock taken by cse_X", "lock taken by cse_X, once", r.lockLog().join(" / "));
+  ok(r.decisionLog().length === 1 && r.decisionLog()[0] === "[claude-cu] session check: armed for cse_X",
+     "armed for cse_X once although every command arms", r.decisionLog().join(" / "));
+  await r.ex.__setLockHeld(false); await settle();
+  ok(r.lockLog()[1] === "[claude-cu] lock released", "lock released", r.lockLog().join(" / "));
+  await r.ex.__setLockHeld(true, "cse_X"); await settle();
+  await r.ex.key("d"); await r.ex.key("e");
+  ok(r.lockLog()[2] === "[claude-cu] lock taken by cse_X", "taken again, logged again", r.lockLog().join(" / "));
+  ok(r.decisionLog().length === 2, "the dedup reset on release: a new lock logs armed again", r.decisionLog().join(" / "));
+});
+
+await checkedCase("[31] diagnostics: lock taken without a holder is 'none', and the arm decision says so (once per lock)", async () => {
+  const r = await loadChecked(() => RUNNING, { holder: undefined });
+  await r.ex.key("b"); await r.ex.key("c"); await r.advance(15000);
+  ok(r.lockLog()[0] === "[claude-cu] lock taken by none", "lock taken by none", r.lockLog().join(" / "));
+  ok(r.decisionLog().length === 1 && r.decisionLog()[0] === NOT_ARMED_NONE, "no holder: one 'not armed' line over many commands", r.decisionLog().join(" / "));
+  ok(r.requests.length === 0, "and nothing is checked", String(r.requests.length));
+  await r.ex.__setLockHeld(false); await settle();
+  await r.ex.__setLockHeld(true); await settle();
+  await r.ex.key("d");
+  ok(r.decisionLog().filter(l => l === NOT_ARMED_NONE).length === 2, "a new holder-less lock logs again", r.decisionLog().join(" / "));
+});
+
+await checkedCase("[32] diagnostics: not armed for a UUID holder, without the accessor, and for a notFound holder (each once)", async () => {
+  const uuid = "3f2b6c1e-8d4a-4c3b-9e2f-1a2b3c4d5e6f";
+  let r = await loadChecked(() => RUNNING, { holder: uuid });
+  await r.ex.key("b"); await r.ex.key("c");
+  ok(r.decisionLog().length === 1 && r.decisionLog()[0] === "[claude-cu] session check: not armed (holder " + uuid + " is not a cloud session)",
+     "UUID holder: not a cloud session, once", r.decisionLog().join(" / "));
+  unloadChecked();
+  r = await loadChecked(() => RUNNING, { noAccessor: true });
+  await r.ex.key("b"); await r.ex.key("c");
+  ok(r.decisionLog().length === 1 && r.decisionLog()[0] === "[claude-cu] session check: not armed (the session-state check is not available)",
+     "no accessor: not available, once", r.decisionLog().join(" / "));
+  unloadChecked();
+  r = await loadChecked(() => ({ ok: false, ended: false, transient: false, notFound: true }));
+  await r.advance(10000);
+  await r.ex.key("b"); await r.ex.key("c");
+  const nk = "[claude-cu] session check: not armed (holder cse_X is not known to the server)";
+  ok(r.decisionLog().filter(l => l === nk).length === 1, "notFound holder: once, although every command re-arms", r.decisionLog().join(" / "));
+  ok(r.requests.length === 1, "behaviour unchanged: never asked again", String(r.requests.length));
+  await r.ex.__setLockHeld(false); await settle();
+  await r.ex.__setLockHeld(true, "cse_X"); await settle();
+  await r.ex.key("d");
+  ok(r.decisionLog().filter(l => l.includes("armed for cse_X") && !l.includes("not armed")).length === 2, "the next lock arms again, and says so", r.decisionLog().join(" / "));
+});
+
+await checkedCase("[33] diagnostics: a task boundary stops the check and resets the dedup", async () => {
+  const r = await loadChecked(() => RUNNING);
+  await r.ex.__cuTaskBoundary("cse_X", "renderer", "cse_X"); await settle();
+  await r.ex.key("b"); await r.ex.key("c");
+  ok(r.decisionLog().filter(l => l.includes("armed for cse_X")).length === 2, "armed again for the next session", r.decisionLog().join(" / "));
+});
+
+await checkedCase("[34] diagnostics: per-poll lines only with CDB_CU_DEBUG=1", async () => {
+  const pollLines = (r) => r.diag.filter(l => /session check: cse_X -> /.test(l));
+  let r = await loadChecked(() => RUNNING);
+  await r.advance(35000);
+  ok(r.requests.length === 3 && pollLines(r).length === 0, "off: three polls, no per-poll line", pollLines(r).join(" / "));
+  unloadChecked();
+  process.env.CDB_CU_DEBUG = "1";
+  try {
+    r = await loadChecked(() => RUNNING);
+    await r.advance(35000);
+    ok(pollLines(r).length === 3 && pollLines(r).every(l => l === "[claude-cu] session check: cse_X -> ok=true ended=false next in 10 s"), "on: one line per poll", pollLines(r).join(" / "));
+    unloadChecked();
+    r = await loadChecked((id, n) => n === 1 ? { ok: false, ended: false, transient: true, notFound: false } : ENDED);
+    await r.advance(30000);
+    ok(pollLines(r)[0] === "[claude-cu] session check: cse_X -> ok=false ended=false transient next in 20 s", "transient, backed-off interval", pollLines(r).join(" / "));
+    ok(pollLines(r)[1] === "[claude-cu] session check: cse_X -> ok=true ended=true", "ended", pollLines(r).join(" / "));
+    unloadChecked();
+    r = await loadChecked(() => ({ ok: false, ended: false, transient: false, notFound: true }));
+    await r.advance(10000);
+    ok(pollLines(r).length === 1 && pollLines(r)[0] === "[claude-cu] session check: cse_X -> ok=false ended=false notFound", "notFound", pollLines(r).join(" / "));
+  } finally { delete process.env.CDB_CU_DEBUG; }
+});
+
+await runCase("[35] capture exclusions: lifted on every lock release, task boundary, turn-end unhide and app start", async () => {
+  // Lock release = every upstream turn end (releaseTurnScopedState, the turn
+  // result, leavingRunning, the remote path), regardless of chicagoAutoUnhide.
+  let r = load();
+  await r.ex.__setLockHeld(true); await settle();
+  await r.ex.key("a");
+  let mark = r.kw.length;
+  await r.ex.__setLockHeld(false); await settle();
+  let tail = r.kw.slice(mark);
+  ok(tail.includes("restore-prepare-state") && tail.indexOf("restore-prepare-state") < tail.indexOf("session-end"),
+     "lock release: restore-prepare-state, then session-end", tail.join(" "));
+  ok(r.count("restore-prepare-state") === 1, "exactly one restore per release", r.kw.join(" "));
+  ok(r.diag.includes("[linux-executor] capture exclusions lifted (lock released)"), "the release restore is logged", r.diag.join(" / "));
+
+  // A failing restore is logged and never blocks the release.
+  r = load();
+  await r.ex.__setLockHeld(true); await settle();
+  r.state.restoreFails = true;
+  ok(await r.fails(() => r.ex.__setLockHeld(false)) === "no error", "a failing restore does not reject the release");
+  ok(r.count("session-end") === 1, "session-end still sent", r.kw.join(" "));
+  ok(r.diag.some(l => l.startsWith("[linux-executor] failed to lift capture exclusions (lock released)")), "the failure is logged", r.diag.join(" / "));
+
+  // Order: a restore queued at a release runs before the next lock's
+  // prepare-for-action, even while the restore is still in flight.
+  r = load();
+  await r.ex.__setLockHeld(true); await settle();
+  r.gates.add("restore-prepare-state");
+  const rel = r.ex.__setLockHeld(false);
+  await settle();
+  const prep = r.ex.prepareForAction(["org.kde.dolphin"], undefined);
+  await settle();
+  ok(r.count("restore-prepare-state") === 1 && r.count("prepare-for-action") === 0,
+     "prepare-for-action waits for the in-flight restore", r.kw.join(" "));
+  await r.release("restore-prepare-state");
+  await rel; await prep; await settle();
+  ok(r.kw.indexOf("restore-prepare-state") < r.kw.indexOf("prepare-for-action"), "restore, then prepare-for-action", r.kw.join(" "));
+
+  // Upstream's turn-end unhide (sub-patch 4h) and the task boundary.
+  r = load();
+  ok(typeof r.ex.__unhideApps === "function", "__unhideApps exists on the KWin executor");
+  ok(await r.fails(() => r.ex.__unhideApps(["org.kde.dolphin"])) === "no error" && r.count("restore-prepare-state") === 1,
+     "__unhideApps(ids): one restore-prepare-state", r.kw.join(" "));
+  ok(r.argv.includes("restore-prepare-state"), "no extra arguments (the bridge restores every recorded window)", r.argv.join(" | "));
+  ok(r.diag.includes("[linux-executor] capture exclusions lifted (turn-end unhide)"), "logged", r.diag.join(" / "));
+  ok(r.count("session-start") === 0, "no portal session started for it", r.kw.join(" "));
+  r.state.restoreFails = true;
+  ok(await r.fails(() => r.ex.__unhideApps(["x"])) === "no error", "__unhideApps never rejects");
+  r.state.restoreFails = false;
+  await r.ex.__setLockHeld(true); await settle();
+  await r.ex.key("a");
+  mark = r.count("restore-prepare-state");
+  await r.ex.__cuTaskBoundary("cse_A", "renderer", "cse_A");
+  ok(r.count("restore-prepare-state") === mark + 1, "task boundary lifts them", r.kw.join(" "));
+  mark = r.count("restore-prepare-state");
+  await r.ex.__cuTaskBoundary("cse_A", "renderer", "cse_B");
+  ok(r.count("restore-prepare-state") === mark, "a mismatched (ignored) task boundary does not", r.kw.join(" "));
+
+  // App start (Patch 1 calls it once after creating the executor).
+  r = load();
+  ok(await r.ex.__restoreCaptureExclusions("app start") === true && r.count("restore-prepare-state") === 1,
+     "__restoreCaptureExclusions('app start'): one restore, resolves true", r.kw.join(" "));
+  ok(r.diag.includes("[linux-executor] capture exclusions lifted (app start)"), "logged with its reason", r.diag.join(" / "));
+  r.state.restoreFails = true;
+  ok(await r.ex.__restoreCaptureExclusions("app start") === false, "a failure resolves false");
+  const patchSrc = readFileSync(path.join(ROOT, "patches", "linux", "fix_computer_use_linux.nim"), "utf8");
+  ok(patchSrc.includes('globalThis.__linuxExecutor.__restoreCaptureExclusions(\\"app start\\");'),
+     "Patch 1 calls it right after creating the KWin executor");
+});
+
 delete globalThis.__cuKwinBridgeBin;
-console.log("\n" + (fail ? `${pass} passed, ${fail} FAILED (cases failed: ${failedCases.length}/16)` : `ALL ${pass} CHECKS PASSED (16 cases)`));
+console.log("\n" + (fail ? `${pass} passed, ${fail} FAILED (cases failed: ${failedCases.length}/${cases}: ${failedCases.join(", ")})` : `ALL ${pass} CHECKS PASSED (${cases} cases)`));
 process.exit(fail ? 1 : 0);

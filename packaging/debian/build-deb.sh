@@ -152,7 +152,7 @@ cat > "$DEB_ROOT/usr/share/applications/com.anthropic.Claude.desktop" << 'EOF'
 Name=Claude
 Comment=Desktop application for Claude.ai
 GenericName=AI Assistant
-Keywords=AI;Chat;Assistant;Claude;Code;LLM;
+Keywords=AI;Chat;Assistant;Code;LLM;
 Exec=claude-desktop %U
 Icon=claude-desktop
 Type=Application
@@ -210,6 +210,26 @@ if [ ! -f "$MIME_SRC" ]; then
     exit 1
 fi
 install -pDm644 "$MIME_SRC" "$DEB_ROOT/usr/share/mime/packages/com.anthropic.Claude.xml"
+
+# Opt-in TPM access (cloud Cowork / Dispatch Computer Use) and KVM access (local
+# Cowork VM): the rules, the vhost_vsock modules-load file and their root helpers
+# stay disabled inside the tree; the helpers' polkit actions are package files so
+# pkexec shows our prompts. No maintainer script touches them.
+UDEV_DIR="$DEB_ROOT/usr/lib/claude-desktop/resources/linux-udev"
+UDEV_POLICY="io.github.patrickjaja.claude-desktop-extra.tpm-access.policy"
+UDEV_KVM_POLICY="io.github.patrickjaja.claude-desktop-extra.kvm-access.policy"
+for f in 70-claude-desktop-extra-tpm.rules cdb-tpm-access "$UDEV_POLICY" \
+        70-claude-desktop-extra-kvm.rules claude-desktop-extra-vsock.conf cdb-kvm-access "$UDEV_KVM_POLICY"; do
+    if [ ! -f "$UDEV_DIR/$f" ]; then
+        log_error "resources/linux-udev/$f missing from the tarball - rebuild it with scripts/build-patched-tarball.sh"
+        exit 1
+    fi
+done
+chmod 0755 "$UDEV_DIR" "$UDEV_DIR/cdb-tpm-access" "$UDEV_DIR/cdb-kvm-access"
+chmod 0644 "$UDEV_DIR/70-claude-desktop-extra-tpm.rules" "$UDEV_DIR/$UDEV_POLICY" \
+    "$UDEV_DIR/70-claude-desktop-extra-kvm.rules" "$UDEV_DIR/claude-desktop-extra-vsock.conf" "$UDEV_DIR/$UDEV_KVM_POLICY"
+install -pDm644 "$UDEV_DIR/$UDEV_POLICY" "$DEB_ROOT/usr/share/polkit-1/actions/$UDEV_POLICY"
+install -pDm644 "$UDEV_DIR/$UDEV_KVM_POLICY" "$DEB_ROOT/usr/share/polkit-1/actions/$UDEV_KVM_POLICY"
 
 # Debian policy: ship a copyright file under usr/share/doc/<pkg>/. The tarball
 # carries the upstream notice at its root (extracted from the official .deb by
@@ -385,10 +405,12 @@ log_info "Building .deb package..."
 mkdir -p "$OUTPUT_DIR"
 DEB_PATH="$OUTPUT_DIR/claude-desktop-extra_${DEB_VERSION}_${DEB_ARCH}.deb"
 
+# --root-owner-group: every file is root:root in the archive even without
+# fakeroot. The TPM helper's safety checks (and pkexec) require a root-owned tree.
 if command -v fakeroot >/dev/null 2>&1; then
-    fakeroot dpkg-deb --build "$DEB_ROOT" "$DEB_PATH"
+    fakeroot dpkg-deb --root-owner-group --build "$DEB_ROOT" "$DEB_PATH"
 else
-    dpkg-deb --build "$DEB_ROOT" "$DEB_PATH"
+    dpkg-deb --root-owner-group --build "$DEB_ROOT" "$DEB_PATH"
 fi
 
 # --- TRANSITIONAL PACKAGE (claude-desktop-bin -> claude-desktop-extra rename) ---

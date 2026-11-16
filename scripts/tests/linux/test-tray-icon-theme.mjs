@@ -447,7 +447,10 @@ section("[E] Extra settings: trayIconAlwaysWhite read / write / lock");
     // (see test-deployment-main.mjs); never called here.
     writeFileSync(
       mod,
-      '"use strict";\nfunction FHa(e=[]){let t=G().type==="3p"&&ou()==="1p"?[...e,j$t]:e;a.app.isPackaged?Mj(!0,t):fj(t)}\n'
+      '"use strict";\nfunction FHa(e=[]){let t=G().type==="3p"&&ou()==="1p"?[...e,j$t]:e;a.app.isPackaged?Mj(!0,t):fj(t)}\n' +
+        // ...and the navigation / VM-probe capture anchors (sub-patches C, D).
+        'var Hrr,Urr;function Yrr(){return Urr??=(async()=>{let t,n,r,s;return Hrr={qemuPath:t,firmwarePath:n,virtiofsdPath:r,virtiofsdAptInstallable:!0,kvm:s},Hrr})(),Urr}function Xrr(){return Hrr}\n' +
+        'function nav0(){let Uy=go(Hy,"Navigation",Xy,{events:[["navigate",[["path",I]]]]});return Uy}\n'
     );
     try { chmodSync(EXTRA_BIN, 0o755); } catch {}
     execFileSync(EXTRA_BIN, [mod], { stdio: "ignore" });
@@ -471,6 +474,7 @@ section("[E] Extra settings: trayIconAlwaysWhite read / write / lock");
     globalThis.__cdbDiag = (m) => diag.push(m);
     delete globalThis.__cdbTrayRefresh;
     delete globalThis.__cdbTrayAlwaysWhite;
+    delete globalThis.__cdbCuAxElements;
     try {
       require2(mod);
     } finally {
@@ -536,6 +540,33 @@ section("[E] Extra settings: trayIconAlwaysWhite read / write / lock");
     r = await call("cdb-tray:read");
     check("a non-boolean in the .jsonc does not lock", JSON.stringify([r.enabled, r.lockedByJsonc]), "[false,null]");
 
+    // --- computerUseAxElements (issue #306): same pref shape, no refresh hook ---
+    writeFileSync(json, JSON.stringify({ activeTheme: "nord" }, null, 2));
+    rmSync(jsonc, { force: true });
+    check("cu-ax: helper installed on Linux", typeof globalThis.__cdbCuAxElements, "function");
+    check("cu-ax: clean profile: helper says off", globalThis.__cdbCuAxElements(), false);
+    check("cu-ax: channels registered", !!handlers["cdb-cu-ax:read"] && !!handlers["cdb-cu-ax:set"], true);
+    r = await call("cdb-cu-ax:read");
+    check("cu-ax: read off by default, not locked", JSON.stringify([r.ok, r.enabled, r.lockedByJsonc]), "[true,false,null]");
+    r = await call("cdb-cu-ax:set", true);
+    check("cu-ax: set(true) writes the key, keeps the others", JSON.stringify(readJson()), '{"activeTheme":"nord","computerUseAxElements":true}');
+    check("cu-ax: helper now says on", globalThis.__cdbCuAxElements(), true);
+    r = await call("cdb-cu-ax:set", false);
+    check("cu-ax: set(false) removes the key", JSON.stringify(readJson()), '{"activeTheme":"nord"}');
+    r = await call("cdb-cu-ax:set", "yes");
+    check("cu-ax: non-boolean refused", r.ok === false && /boolean/.test(r.error), true);
+    writeFileSync(jsonc, '{\n  // hand-edited\n  "computerUseAxElements": true,\n}\n');
+    check("cu-ax: .jsonc true: helper on", globalThis.__cdbCuAxElements(), true);
+    r = await call("cdb-cu-ax:read");
+    check("cu-ax: .jsonc locks the row", JSON.stringify([r.enabled, r.lockedByJsonc]), "[true,true]");
+    const cuBefore = readFileSync(json, "utf8");
+    r = await call("cdb-cu-ax:set", false);
+    check("cu-ax: set refused as locked, .json untouched", r.ok === false && r.lockedByJsonc === true && readFileSync(json, "utf8") === cuBefore, true);
+    writeFileSync(jsonc, '{ "computerUseAxElements": "yes" }');
+    r = await call("cdb-cu-ax:read");
+    check("cu-ax: a non-boolean in the .jsonc does not lock", JSON.stringify([r.enabled, r.lockedByJsonc]), "[false,null]");
+    check("cu-ax: tray key and cu-ax key are independent", (writeFileSync(jsonc, '{ "trayIconAlwaysWhite": true }'), globalThis.__cdbCuAxElements()), false);
+
     rmSync(dir, { recursive: true, force: true });
     delete globalThis.__cdbTrayRefresh;
     delete globalThis.__cdbTrayAlwaysWhite;
@@ -554,6 +585,11 @@ section("[E] Extra settings: trayIconAlwaysWhite read / write / lock");
   api.trayIconSet("yes");
   api.trayIconSet(true);
   check("bridge: fixed channels, boolean only", JSON.stringify(calls), '[["cdb-tray:read"],["cdb-tray:set",false],["cdb-tray:set",true]]');
+  calls.length = 0;
+  api.cuAxRead();
+  api.cuAxSet("yes");
+  api.cuAxSet(true);
+  check("bridge: cu-ax fixed channels, boolean only", JSON.stringify(calls), '[["cdb-cu-ax:read"],["cdb-cu-ax:set",false],["cdb-cu-ax:set",true]]');
 
   // The page row: wired to those methods, in the Community list, plain dashes.
   const page = readFileSync(join(ROOT, "js", "extra_settings_page.js"), "utf8");
@@ -561,10 +597,46 @@ section("[E] Extra settings: trayIconAlwaysWhite read / write / lock");
   check("page: renderTrayIconRow exists", !!row, true);
   if (row) {
     check("page: row reads/writes the bridge methods", /read: "trayIconRead",\s*write: "trayIconSet"/.test(row[0]), true);
-    check("page: section Tray, title as specified", /section: "Tray",\s*title: "Always use the white tray icon"/.test(row[0]), true);
+    check("page: title as specified", /title: "Always use the white tray icon"/.test(row[0]), true);
     check("page: no em-dash in the row", row[0].includes("—"), false);
   }
-  check("page: row is in FEATURE_ROWS", /var FEATURE_ROWS = \[[^\]]*renderTrayIconRow/.test(page), true);
+  check("page: row is in FEATURE_GROUPS", /var FEATURE_GROUPS = [\s\S]*?renderTrayIconRow/.test(page), true);
+  const axRow = /function renderCuAxRow\(panel\) \{[\s\S]*?\n {2}\}\n/.exec(page);
+  check("page: renderCuAxRow exists", !!axRow, true);
+  if (axRow) {
+    check("page: cu-ax row reads/writes the bridge methods", /read: "cuAxRead",\s*write: "cuAxSet"/.test(axRow[0]), true);
+    check("page: cu-ax row title and Experimental badge", /title: "Computer Use: read app controls \(accessibility\)",\s*(\/\/[^\n]*\n\s*)?sharedSection: true,\s*badge: "Experimental"/.test(axRow[0]), true);
+    check("page: cu-ax row hidden on Linux-only refusal", /hideIf:[^\n]*Linux only/.test(axRow[0]), true);
+    check("page: cu-ax row joins the Options section (no second header)", /sharedSection: true/.test(axRow[0]) && /if \(!spec\.sharedSection\) panel\.appendChild\(head\)/.test(page), true);
+    check("page: no em-dash in the cu-ax row", axRow[0].includes("\u2014"), false);
+  }
+  // Computer Use has its own Extra entry, between Community and Models: its
+  // page is the status block, then an Options heading it draws once, then the
+  // two switches in this order. None of them is left in Community Features.
+  const navKinds = ((/var NAV_ITEMS = \[([\s\S]*?)\n {2}\];/.exec(page) || [])[1] || "").match(/kind: "(\w+)"/g) || [];
+  check("page: nav order themes, features, cu, models, flags, deploy", navKinds.join(","),
+    'kind: "themes",kind: "features",kind: "cu",kind: "models",kind: "flags",kind: "deploy"');
+  check("page: the cu entry is labelled Cowork (Linux) and not carried on Windows",
+    /\{ kind: "cu", label: "Cowork \(Linux\)", icon: ICON_CU, tooltip: "Cowork and Computer Use on Linux" \}/.test(page) && /var WINDOWS_NAV = \{ models: true \};/.test(page) &&
+    /cu: renderCu,/.test(page), true);
+  check("page: CU_ROWS is ask before control, Escape stops Computer Use, background display, read app controls, the glow, then the drawn cursor",
+    /var CU_ROWS = \[\s*renderCuAskRow,\s*renderCuEscapeAbortCuRow,\s*renderCuBackgroundRow,\s*renderCuAxRow,\s*renderCuGlowRow,\s*renderCuDrawnCursorRow\s*\];/.test(page), true);
+  check("page: no Computer Use row left in FEATURE_GROUPS",
+    /var FEATURE_GROUPS = [\s\S]*?renderCu(Status|Background|Ax)/.test(page) || /function renderCuStatusRow\b/.test(page), false);
+  const cuOptionFns = ["renderCuBackgroundRow", "renderCuAskRow", "renderCuAxRow", "renderCuGlowRow"]
+    .map((fn) => new RegExp("function " + fn + "\\([\\s\\S]*?\\n {2}\\}\\n").exec(page));
+  check("page: the four switches share the one Options heading",
+    (page.match(/section: "Options"/g) || []).length === 4 &&
+    cuOptionFns.every((m) => !!m && /section: "Options"/.test(m[0]) && /sharedSection: true/.test(m[0])) &&
+    !/section: "Computer Use"/.test(page), true);
+  const cuPage = /function renderCu\(panel\) \{[\s\S]*?\n {2}\}\n/.exec(page);
+  check("page: renderCu draws the status block first, then the Options heading, then CU_ROWS",
+    !!cuPage && (() => {
+      const t = cuPage[0];
+      const i = [t.indexOf("renderCuStatusBlock(panel"), t.indexOf('"Options"'), t.indexOf("CU_ROWS.forEach")];
+      return i.every((x) => x > 0) && i[0] < i[1] && i[1] < i[2];
+    })(), true);
+  check("page: no Back button on the Computer Use page", !!cuPage && !/cdbx-cubg-back|Back to/.test(cuPage[0]), true);
 }
 
 console.log(`\n${pass} passed, ${failures.length} failed`);

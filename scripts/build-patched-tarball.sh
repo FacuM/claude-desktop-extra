@@ -387,6 +387,15 @@ ELECTRON_VERSION="$(cat "$TREE_DIR/version" 2>/dev/null | tr -d '[:space:]' || t
 log_info "Extracting app.asar..."
 APP_DIR="$WORK_DIR/app"
 mkdir -p "$APP_DIR"
+# Upstream's own unpacked file set (relative paths, with the executable bit).
+# The repack below must reproduce it: the app runs these files from
+# resources/app.asar.unpacked/ (native modules, and since 5.1231.x the GitHub
+# connector binary resources/github-mcp/github-mcp-server).
+UPSTREAM_UNPACKED_LIST="$WORK_DIR/upstream-unpacked.txt"
+: > "$UPSTREAM_UNPACKED_LIST"
+if [ -d "$TREE_DIR/resources/app.asar.unpacked" ]; then
+    ( cd "$TREE_DIR/resources/app.asar.unpacked" && find . -type f -printf '%P\t%m\n' | LC_ALL=C sort ) > "$UPSTREAM_UNPACKED_LIST"
+fi
 asar extract "$TREE_DIR/resources/app.asar" "$APP_DIR/app.asar.contents"
 
 # App identity: we ride upstream's own desktopName ("com.anthropic.Claude.desktop")
@@ -418,12 +427,36 @@ log_info "desktopName is upstream com.anthropic.Claude.desktop (no pin)"
 # see the same tree; an asar is extracted into the work dir (never the shipped
 # tree) and repacked to its upstream path after patching. Neither form present
 # is a hard failure: silently skipping would ship the SPA unpatched.
+#
+# Since v4.16336.0 the .deb ALSO ships resources/ion-dist/ holding one static
+# index.html ("Claude was updated - quit and reopen"): a page for a pre-4.29.0
+# process still running after the upgrade, which resolves the old directory
+# path. Its own comment says "This version never loads it"; the main bundle
+# still serves only ion-dist.asar when packaged. We ship it verbatim and leave
+# it unpatched (no script, nothing of the SPA in it). Exactly that shape is
+# accepted next to the asar, plus a tripwire that the bundle's packaged path
+# is still ion-dist.asar; any other dir next to the asar fails the build.
 ION_ASAR="$TREE_DIR/resources/ion-dist.asar"
 ION_UPSTREAM_DIR="$TREE_DIR/resources/ion-dist"
 if [ -e "$ION_ASAR" ] && [ -e "$ION_UPSTREAM_DIR" ]; then
-    log_error "upstream ships BOTH resources/ion-dist.asar and resources/ion-dist/ - re-audit which one the main bundle serves before patching either"
-    exit 1
-elif [ -e "$ION_ASAR" ]; then
+    ION_STUB_ENTRIES="$(find "$ION_UPSTREAM_DIR" -mindepth 1 | LC_ALL=C sort)"
+    if [ -L "$ION_UPSTREAM_DIR" ] || [ ! -d "$ION_UPSTREAM_DIR" ] ||
+        [ "$ION_STUB_ENTRIES" != "$ION_UPSTREAM_DIR/index.html" ] ||
+        [ -L "$ION_UPSTREAM_DIR/index.html" ] || [ ! -f "$ION_UPSTREAM_DIR/index.html" ]; then
+        log_error "upstream ships BOTH resources/ion-dist.asar and a resources/ion-dist/ that is not the lone index.html placeholder - re-audit which one the main bundle serves before patching either"
+        exit 1
+    fi
+    if grep -qiE '<script|assets/' "$ION_UPSTREAM_DIR/index.html"; then
+        log_error "resources/ion-dist/index.html next to ion-dist.asar now loads scripts or assets - it is no longer the static placeholder; re-audit whether the ion-dist patches must cover it"
+        exit 1
+    fi
+    if ! grep -aqE 'isPackaged\?["`]ion-dist\.asar["`]:["`]ion-dist["`]' "$APP_DIR/app.asar.contents/.vite/build/"index*.js; then
+        log_error "the main bundle no longer resolves ion-dist to ion-dist.asar when packaged - re-audit which of resources/ion-dist.asar and resources/ion-dist/ it serves"
+        exit 1
+    fi
+    log_info "resources/ion-dist/ is upstream's static index.html placeholder for pre-4.29.0 processes (shipped verbatim, not patched)"
+fi
+if [ -e "$ION_ASAR" ]; then
     if [ -L "$ION_ASAR" ] || [ ! -f "$ION_ASAR" ]; then
         log_error "resources/ion-dist.asar is not a regular file (upstream lstat-checks it) - the .deb layout moved"
         exit 1
@@ -484,26 +517,48 @@ if grep -qsF 'await using ' "$APP_DIR/app.asar.contents/.vite/build/"*.js &&
     log_error "node $(node --version) cannot parse this bundle: it uses \`await using\`, which needs Node 24 or newer"
     exit 1
 fi
-SYNTAX_FAILED=false
-for js_file in "$APP_DIR/app.asar.contents/.vite/build/"*.js; do
-    [ -f "$js_file" ] || continue
-    if ! node --check "$js_file" 2>/dev/null; then
-        log_error "Syntax error in $(basename "$js_file")"
-        SYNTAX_FAILED=true
-    fi
-done
-for js_file in "$APP_DIR/app.asar.contents/.vite/renderer/"*"/assets/"*.js; do
-    [ -f "$js_file" ] || continue
-    if ! node --check "$js_file" 2>/dev/null; then
-        log_error "Syntax error in $(basename "$js_file")"
-        SYNTAX_FAILED=true
-    fi
-done
-if [ "$SYNTAX_FAILED" = true ]; then
+# Fan the checks out over all cores (529 files: ~14 s serial, ~1.5 s parallel).
+# Same file set as before: .vite/build/*.js and .vite/renderer/*/assets/*.js.
+# xargs exits 123 when any worker failed, which the `if !` turns into the error.
+if ! {
+    for js_file in "$APP_DIR/app.asar.contents/.vite/build/"*.js \
+        "$APP_DIR/app.asar.contents/.vite/renderer/"*"/assets/"*.js; do
+        if [ -f "$js_file" ]; then printf '%s\0' "$js_file"; fi
+    done
+} | xargs -0 -r -P"$(nproc)" -n1 sh -c \
+    'node --check "$1" 2>/dev/null || { echo "[ERROR] Syntax error in $(basename "$1")" >&2; exit 1; }' _; then
     log_error "JavaScript syntax validation FAILED - patched files have syntax errors"
     exit 1
 fi
 log_info "JavaScript syntax validation passed"
+
+# Census of upstream Linux-session gates (issue #323): every consumer of a
+# tracked predicate - through export aliases, lazy chunks and namespace
+# members - must be covered by our patches or listed in
+# baseline/predicate-consumers.json; every platform/session refusal string
+# must be pinned in baseline/refusal-strings.json. Both read the PATCHED tree.
+# The baselines live in baseline/, which the CI build containers copy next to
+# scripts/ - a missing file is a broken checkout/copy, not a pass.
+CENSUS_PRED_BASELINE="$PROJECT_DIR/baseline/predicate-consumers.json"
+CENSUS_REFUSAL_BASELINE="$PROJECT_DIR/baseline/refusal-strings.json"
+for f in "$CENSUS_PRED_BASELINE" "$CENSUS_REFUSAL_BASELINE"; do
+    if [ ! -f "$f" ]; then
+        log_error "Census baseline missing: $f - copy baseline/ next to scripts/ (CI: the 'cp -r scripts patches js packaging baseline' line)"
+        exit 1
+    fi
+done
+log_info "Checking upstream Linux-session predicate consumers..."
+if ! python3 -I "$SCRIPT_DIR/check-predicate-consumers.py" --quiet \
+    --baseline "$CENSUS_PRED_BASELINE" "$APP_DIR/app.asar.contents"; then
+    log_error "Predicate census failed - patch the predicate at its definition, or add an allowlist entry (needs @patrickjaja)"
+    exit 1
+fi
+log_info "Checking platform/session refusal strings..."
+if ! python3 -I "$SCRIPT_DIR/check-refusal-strings.py" --baseline "$CENSUS_REFUSAL_BASELINE" \
+    --js-dir "$PROJECT_DIR/js" "$APP_DIR/app.asar.contents"; then
+    log_error "Refusal-string census failed - review the new/stale strings and update baseline/refusal-strings.json"
+    exit 1
+fi
 
 # Drop upstream's V8 bytecode compile-cache (new in v1.34493.1). index.pre.js
 # feeds each .jsc to `new vm.Script(..., {cachedData})`; V8 validates it against
@@ -533,7 +588,37 @@ fi
 # (The .deb's node-pty uses the prebuilds/<platform>-<arch>/ layout, which loads
 # from the unpacked dir; we preserve whatever the .deb shipped.)
 log_info "Repacking app.asar..."
-( cd "$APP_DIR" && asar pack app.asar.contents app.asar --unpack "{**/*.node,**/spawn-helper}" )
+# Every file upstream ships unpacked stays unpacked, whatever its name.
+UNPACK_GLOB="**/*.node,**/spawn-helper"
+while IFS=$'\t' read -r _unpacked_rel _unpacked_mode; do
+    [ -n "$_unpacked_rel" ] || continue
+    case "$_unpacked_rel" in
+        *[,{}\[\]\*\?\!\(\)\\]*)
+            log_error "upstream unpacked file has glob characters in its path: $_unpacked_rel - teach the repack to keep it unpacked"
+            exit 1 ;;
+    esac
+    UNPACK_GLOB="$UNPACK_GLOB,**/$_unpacked_rel"
+done < "$UPSTREAM_UNPACKED_LIST"
+( cd "$APP_DIR" && asar pack app.asar.contents app.asar --unpack "{$UNPACK_GLOB}" )
+# The repacked set must contain upstream's, file by file. asar extract writes
+# unpacked files without their mode, so each one gets upstream's mode back (the
+# GitHub connector binary is executed, not loaded).
+_unpacked_missing=0
+while IFS=$'\t' read -r _unpacked_rel _unpacked_mode; do
+    [ -n "$_unpacked_rel" ] || continue
+    if [ ! -f "$APP_DIR/app.asar.unpacked/$_unpacked_rel" ]; then
+        log_error "repack lost an upstream unpacked file: app.asar.unpacked/$_unpacked_rel (the app loads it from there)"
+        _unpacked_missing=1
+        continue
+    fi
+    chmod "$_unpacked_mode" "$APP_DIR/app.asar.unpacked/$_unpacked_rel"
+    if [ $(( 0$_unpacked_mode & 0111 )) -ne 0 ] && [ ! -x "$APP_DIR/app.asar.unpacked/$_unpacked_rel" ]; then
+        log_error "app.asar.unpacked/$_unpacked_rel is not executable after the repack"
+        _unpacked_missing=1
+    fi
+done < "$UPSTREAM_UNPACKED_LIST"
+[ "$_unpacked_missing" -eq 0 ] || exit 1
+log_info "app.asar.unpacked: $(wc -l < "$UPSTREAM_UNPACKED_LIST") upstream file(s) kept unpacked"
 rm -rf "$APP_DIR/app.asar.contents"
 rm -rf "$TREE_DIR/resources/app.asar" "$TREE_DIR/resources/app.asar.unpacked"
 mv "$APP_DIR/app.asar" "$TREE_DIR/resources/app.asar"
@@ -671,6 +756,17 @@ elif command -v cargo &>/dev/null && [ -d "$X11_BRIDGE_SRC_DIR" ]; then
 else
     log_warn "x11-bridge not available — skipping (X11 Computer Use will require manual install)"
 fi
+# The bundled x11-bridge must have what this app relies on on X11 (issue
+# #327): doctor capabilities.screenshot_mask_ignore and compositing. An older
+# bridge passes everything else but keeps the glow off on every X11 session
+# and blanks masked screenshots under the teach overlay. Same check as CI's
+# bridge contract step (scripts/check-bridge-contract.sh).
+if [ -f "$TREE_DIR/resources/x11-bridge" ]; then
+    if ! bash "$SCRIPT_DIR/check-bridge-contract.sh" --x11-caps "$TREE_DIR/resources/x11-bridge"; then
+        log_error "the bundled x11-bridge is older than this app needs - rebuild it from the current x11-bridge source"
+        exit 1
+    fi
+fi
 
 # Bundle wlroots-bridge into resources/ (= process.resourcesPath) for wlroots
 # Wayland (Sway/Hyprland/Niri) Computer Use. First-party replacement for
@@ -693,6 +789,17 @@ elif command -v cargo &>/dev/null && [ -d "$WLROOTS_BRIDGE_SRC_DIR" ]; then
     fi
 else
     log_warn "wlroots-bridge not available — skipping (wlroots Wayland Computer Use will require manual install)"
+fi
+# The bundled wlroots-bridge must report how it masks (issue #329): doctor
+# screenshot_mask_mode / screenshot_mask_protocol and the per-window
+# shown / reason / coveredBy report. An older bridge passes everything else,
+# but on Hyprland its masked screenshots cut the approved window away under a
+# full-output layer. Same check as CI's bridge contract step.
+if [ -f "$TREE_DIR/resources/wlroots-bridge" ]; then
+    if ! bash "$SCRIPT_DIR/check-bridge-contract.sh" --wlroots-caps "$TREE_DIR/resources/wlroots-bridge"; then
+        log_error "the bundled wlroots-bridge is older than this app needs - rebuild it from the current wlroots-bridge source"
+        exit 1
+    fi
 fi
 
 # Bundle gnome-portal-bridge into resources/ (= process.resourcesPath) for GNOME
@@ -720,6 +827,52 @@ elif command -v cargo &>/dev/null && [ -d "$GNOME_PORTAL_BRIDGE_SRC_DIR" ]; then
 else
     log_warn "gnome-portal-bridge not available — skipping (GNOME Wayland Computer Use will require manual install)"
 fi
+
+# Opt-in device access, shipped DISABLED next to upstream's resources/linux-mime/:
+#   - TPM (cloud Cowork / Dispatch Computer Use; the device identity key lives in
+#     /dev/tpmrm0): a udev rule and cdb-tpm-access, which links it into
+#     /etc/udev/rules.d;
+#   - KVM (local Cowork VM: /dev/kvm + /dev/vhost-vsock): a udev rule, a
+#     modules-load file for vhost_vsock, and cdb-kvm-access, which links both
+#     into /etc/udev/rules.d and /etc/modules-load.d.
+# Each helper runs as root through pkexec or sudo; their polkit actions are also
+# installed to /usr/share/polkit-1/actions/ by deb/rpm/pacman. No package
+# scriptlet touches any of them.
+UDEV_SRC_DIR="$PROJECT_DIR/packaging/udev"
+UDEV_DST_DIR="$TREE_DIR/resources/linux-udev"
+UDEV_HELPERS="cdb-tpm-access cdb-kvm-access"
+UDEV_DATA="70-claude-desktop-extra-tpm.rules 70-claude-desktop-extra-kvm.rules claude-desktop-extra-vsock.conf"
+if [ -e "$UDEV_DST_DIR" ]; then
+    log_error "upstream now ships resources/linux-udev/ - re-audit before overlaying our device access files"
+    exit 1
+fi
+for f in $UDEV_HELPERS $UDEV_DATA; do
+    if [ ! -f "$UDEV_SRC_DIR/$f" ]; then
+        log_error "packaging/udev/$f missing"
+        exit 1
+    fi
+done
+for h in tpm kvm; do
+    if ! grep -qF "<annotate key=\"org.freedesktop.policykit.exec.path\">/usr/lib/claude-desktop/resources/linux-udev/cdb-$h-access</annotate>" \
+            "$UDEV_SRC_DIR/io.github.patrickjaja.claude-desktop-extra.$h-access.policy"; then
+        log_error "packaging/udev/io.github.patrickjaja.claude-desktop-extra.$h-access.policy: missing, or exec.path is not the installed helper path"
+        exit 1
+    fi
+done
+install -d -m 0755 "$UDEV_DST_DIR"
+for f in $UDEV_DATA io.github.patrickjaja.claude-desktop-extra.tpm-access.policy io.github.patrickjaja.claude-desktop-extra.kvm-access.policy; do
+    install -m 0644 "$UDEV_SRC_DIR/$f" "$UDEV_DST_DIR/$f"
+done
+for h in $UDEV_HELPERS; do
+    install -m 0755 "$UDEV_SRC_DIR/$h" "$UDEV_DST_DIR/$h"
+    if command -v shellcheck &>/dev/null; then
+        if ! shellcheck -S error "$UDEV_DST_DIR/$h"; then
+            log_error "$h failed shellcheck - fix packaging/udev/$h"
+            exit 1
+        fi
+    fi
+done
+log_info "Bundled TPM + KVM access rules, helpers and polkit actions (resources/linux-udev/, disabled)"
 
 # Every ELF in the shipped tree (upstream's and the bridges we just added) must
 # match the .deb's arch. Hard failure: a foreign binary is dead weight at best
@@ -845,7 +998,7 @@ log_info "SOURCE_DATE_EPOCH: $SOURCE_DATE_EPOCH"
 # speed on local builds.
 if [ "${CLAUDE_ALLOW_PIGZ:-0}" = "1" ] && command -v pigz &>/dev/null; then
     GZIP_PROG="pigz"
-    log_warn "Using pigz (CLAUDE_ALLOW_PIGZ=1) — output is NOT byte-reproducible"
+    log_warn "Using pigz (CLAUDE_ALLOW_PIGZ=1) - output is NOT byte-reproducible"
 else
     GZIP_PROG="gzip"
 fi

@@ -63,9 +63,12 @@ APP_ID='claude'
 # app_id ("com.anthropic.Claude"). On native Wayland there is no WM_CLASS, so
 # GNOME/KDE match the window to its .desktop entry by app_id == .desktop filename;
 # a mismatched filename makes the dock/Alt-Tab icon fall back to a generic one
-# (issue #148). StartupWMClass (also "com.anthropic.Claude", set in every .desktop
-# we write) covers X11/XWayland. So BOTH match keys agree: filename == app_id
-# (Wayland) and StartupWMClass == app_id (X11). The reverse-DNS id also lets
+# (issue #148). StartupWMClass (== DESKTOP_ID, set in every .desktop we write)
+# covers X11/XWayland. So BOTH match keys agree: filename == app_id (Wayland)
+# and StartupWMClass == app_id (X11). A named profile's windows take
+# "com.anthropic.Claude-<name>" as app_id / WM_CLASS whenever its per-profile
+# .desktop file exists (the app picks the identity up from that file), which
+# is why the per-profile files carry StartupWMClass=com.anthropic.Claude-<name>. The reverse-DNS id also lets
 # xdg-desktop-portal persist Computer Use grants on KDE. See the DESKTOP_ID
 # assignment after profile resolution below.
 
@@ -103,19 +106,23 @@ export PATH="$_claude_path"
 # sub-patch D): the first executable (X_OK) of
 #   1. $CLAUDE_QEMU_PATH, if set to an absolute path (our override),
 #   2. /usr/bin/qemu-system-<arch> (upstream's only candidate since 4.29.0),
-#   3. <dir>/qemu-system-<arch> for each absolute dir on $PATH (our fallback;
-#      upstream itself walked PATH up to 3.6556.2), skipping paths containing
-#      ',' or '=' (cowork-linux-helper rejects those QEMU option separators).
+#   3. <dir>/qemu-system-<arch> for each dir of the TOOL PATH (our fallback;
+#      upstream itself walked PATH up to 3.6556.2): upstream's narrowed PATH
+#      plus the root-owned read-only dirs of the PATH the app is started with
+#      (see _diag_tool_path), skipping paths containing ',' or '='
+#      (cowork-linux-helper rejects those QEMU option separators).
 # The resolved absolute path is passed to cowork-linux-helper, which execs it.
 # _cowork_qemu_probe replicates that order for --diagnose. Args: binary name,
-# PATH, override, and the /usr/bin dir (a parameter only so tests can fake it).
+# the dirs to walk (--diagnose passes the TOOL PATH), override, and the /usr/bin
+# dir (a parameter only so tests can fake it).
 _cowork_qemu_probe() {
     local bin=$1 path=$2 override=$3 usr_bin=${4:-/usr/bin} _d _c
     local -a cands=()
     [[ $override == /* ]] && cands+=("$override")
     cands+=("$usr_bin/$bin")
-    local IFS=:
-    for _d in $path; do
+    local -a _dirs=()
+    IFS=: read -r -a _dirs <<<"$path"
+    for _d in "${_dirs[@]}"; do
         [[ $_d == /* ]] || continue
         while [[ $_d == */ ]]; do _d=${_d%/}; done
         _c="$_d/$bin"
@@ -132,22 +139,23 @@ _cowork_qemu_probe() {
 # /usr/bin/qemu-system-<arch>, nothing on PATH, so Cowork reports "requires
 # QEMU" with qemu-kvm installed. The rpm ships qemu-shim/qemu-system-<arch>
 # symlinks to it (the helper's command line boots unchanged on RHEL qemu-kvm);
-# the app's PATH fallback (step 3 above) finds the shim once this dir is on
-# PATH. Append it only when no executable qemu-system-<arch> is on PATH,
-# qemu-kvm exists and the shim is installed; a real QEMU always wins (one in
-# /usr/bin wins anyway, since the app checks /usr/bin before PATH).
+# the app's TOOL PATH fallback (step 3 above) finds the shim once this dir is
+# on the PATH the app is started with: upstream's narrowed PATH drops it, but
+# the dir is root-owned and read-only, so it passes upstream's trust rule.
+# Appended (last, once) whenever qemu-kvm exists and the shim is installed -
+# only the rpm ships it, so every other install keeps its PATH unchanged. No
+# check for another qemu-system-<arch> on PATH: a copy in a user-writable dir
+# (~/.local/bin) is ignored by the app, so it must not suppress the shim, and a
+# real QEMU still wins (the app checks /usr/bin and the narrowed system dirs
+# first, then the started dirs in order, the shim last).
 _cowork_qemu_shim_path() {
-    local path=$1 arch=$2 qemu_kvm=$3 shim_dir=$4 bin _d
+    local path=$1 arch=$2 qemu_kvm=$3 shim_dir=$4 bin
     case "$arch" in
         x86_64) bin=qemu-system-x86_64 ;;
         aarch64 | arm64) bin=qemu-system-aarch64 ;;
         *) echo "$path"; return 0 ;;
     esac
-    local IFS=:
-    for _d in $path; do
-        [[ -n "$_d" && -x "$_d/$bin" && ! -d "$_d/$bin" ]] && { echo "$path"; return 0; }
-    done
-    if [[ -x "$qemu_kvm" && -x "$shim_dir/$bin" ]]; then
+    if [[ ":$path:" != *":$shim_dir:"* && -x "$qemu_kvm" && -x "$shim_dir/$bin" ]]; then
         echo "${path:+${path}:}${shim_dir}"
     else
         echo "$path"
@@ -441,8 +449,9 @@ ELECTRON_BIN="${CLAUDE_ELECTRON:-}"
 
 # The bundled Electron binary is named after APP_ID (cosmetic argv[0] / scope
 # hint). NOTE: the binary basename does NOT set the window WM_CLASS - that comes
-# from the app's desktopName ("com.anthropic.Claude"); see the APP_ID header
-# above and issue #148.
+# from the app's desktop name: "com.anthropic.Claude", or for a named profile
+# with a per-profile .desktop file "com.anthropic.Claude-<name>"; see the
+# APP_ID header above and issue #148.
 #
 # The app itself is NEVER passed on the command line: the official build's
 # OnlyLoadAppFromAsar fuse makes Electron load the exe-adjacent
@@ -452,10 +461,8 @@ ELECTRON_BIN="${CLAUDE_ELECTRON:-}"
 #
 # When a profile is active, prefer the user-local copy at
 # ~/.local/lib/claude-desktop/<APP_ID>-<profile> created by --create-profile.
-# (Intent was a per-profile WM_CLASS via the basename for separate icons/Alt-Tab
-# groups; in practice all profiles still report "com.anthropic.Claude" because
-# the shared app.asar desktopName wins - distinct per-profile WM_CLASS would need
-# a per-profile desktopName/CHROME_DESKTOP override, as in fix_quick_entry_app_id.nim.)
+# (The binary basename gives the process its own argv[0] only; the window's
+# WM_CLASS / app_id follows the per-profile .desktop file, see the APP_ID header.)
 if [[ -z "$ELECTRON_BIN" ]]; then
     candidates=()
     if [[ -n "$profile_suffix" ]]; then
@@ -847,6 +854,28 @@ _appimage_mime_current() {
     [[ -f "$_APPIMAGE_MIME_XML" ]] && [[ "$(<"$1")" == "$(<"$_APPIMAGE_MIME_XML")" ]]
 }
 
+# Named profiles never own claude://. An older AppImage entry for a profile did
+# claim it (and may still be the recorded default), so hand the scheme back to
+# the default profile's entry when it is the one on record. Succeeds when the
+# default handler is NOT this profile's entry afterwards.
+_appimage_release_scheme() {
+    command -v xdg-mime &>/dev/null || return 0
+    local cur d base="com.anthropic.Claude.desktop" found=""
+    cur=$(xdg-mime query default x-scheme-handler/claude 2>/dev/null || true)
+    if [[ "$cur" == "${DESKTOP_ID}.desktop" ]]; then
+        local _xdd=()
+        IFS=: read -r -a _xdd <<< "${XDG_DATA_DIRS:-/usr/local/share:/usr/share}" || true
+        for d in "${XDG_DATA_HOME:-$HOME/.local/share}" ${_xdd[@]+"${_xdd[@]}"}; do
+            [[ -n "$d" && -f "$d/applications/$base" ]] && { found=1; break; }
+        done
+        if [[ -n "$found" ]]; then
+            xdg-mime default "$base" x-scheme-handler/claude 2>/dev/null || true
+            cur=$(xdg-mime query default x-scheme-handler/claude 2>/dev/null || true)
+        fi
+    fi
+    [[ "$cur" != "${DESKTOP_ID}.desktop" ]]
+}
+
 _appimage_integrate() {
     local appimage_path="${CLAUDE_APPIMAGE_PATH:-}"
     local quiet="${1:-}"
@@ -877,6 +906,18 @@ _appimage_integrate() {
     fi
 
     local desired_exec="Exec=${appimage_path} %u"
+    # A named profile gets its own menu entry: it must start THAT profile, must
+    # not claim the claude:// scheme (the default profile's entry owns it and
+    # the launcher routes callbacks to the right profile) and carries the
+    # per-profile window class.
+    local desired_mime="$_APPIMAGE_MIME_LINE"
+    local desired_wmclass="com.anthropic.Claude"
+    if [[ -n "$profile_suffix" ]]; then
+        desired_exec="Exec=${appimage_path} --profile=${CLAUDE_PROFILE} %u"
+        desired_mime=""
+        desired_wmclass="$DESKTOP_ID"
+    fi
+    local _scheme_with_default=""
 
     # $ELECTRON_BIN (<AppDir>/usr/lib/claude-desktop/claude) locates the icon.
     # Never expand $CLAUDE_ELECTRON bare: it is the raw env var, unset unless
@@ -892,16 +933,18 @@ _appimage_integrate() {
     [[ -n "$mime_tree" && -f "$mime_src" ]] || mime_src=""
 
     if [[ -f "$_APPIMAGE_DESKTOP_FILE" ]]; then
-        local current_exec current_mime
+        local current_exec current_mime current_wmclass
         current_exec=$(grep '^Exec=' "$_APPIMAGE_DESKTOP_FILE" 2>/dev/null | head -1)
-        current_mime=$(grep '^MimeType=' "$_APPIMAGE_DESKTOP_FILE" 2>/dev/null | head -1)
-        if [[ "$current_exec" == "$desired_exec" && "$current_mime" == "$_APPIMAGE_MIME_LINE" ]] \
+        current_mime=$(grep '^MimeType=' "$_APPIMAGE_DESKTOP_FILE" 2>/dev/null | head -1 || true)
+        current_wmclass=$(grep '^StartupWMClass=' "$_APPIMAGE_DESKTOP_FILE" 2>/dev/null | head -1 || true)
+        if [[ "$current_exec" == "$desired_exec" && "$current_mime" == "$desired_mime" ]] \
+            && { [[ -z "$profile_suffix" ]] || [[ "$current_wmclass" == "StartupWMClass=${desired_wmclass}" ]]; } \
             && { [[ -z "$mime_src" ]] || _appimage_mime_current "$mime_src"; }; then
             log "AppImage integrate: .desktop up to date ($appimage_path)"
             if [[ "$quiet" != "quiet" ]]; then
                 echo "Desktop integration already up to date."
                 echo "  File: $_APPIMAGE_DESKTOP_FILE"
-                echo "  Exec: $appimage_path %u"
+                echo "  Exec: ${desired_exec#Exec=}"
             fi
             return 0
         fi
@@ -915,12 +958,31 @@ _appimage_integrate() {
     # instead of /usr/bin/claude-desktop. We keep %u (not the official %U) on the
     # main Exec= so it matches $desired_exec in the up-to-date check above;
     # the launcher handles a single claude:// URL either way.
+    if [[ -n "$profile_suffix" ]]; then
+        # Named profile: Name= matches _create_profile; no MimeType= and no
+        # Actions (their Exec lines have no --profile and would open the default
+        # profile).
+        cat > "$_APPIMAGE_DESKTOP_FILE" <<DESKTOP_EOF
+[Desktop Entry]
+Name=Claude (${CLAUDE_PROFILE})
+Comment=Desktop application for Claude.ai
+GenericName=AI Assistant
+Keywords=AI;Chat;Assistant;Code;LLM;
+${desired_exec}
+Icon=claude-desktop
+Type=Application
+StartupNotify=true
+StartupWMClass=${desired_wmclass}
+SingleMainWindow=true
+Categories=Utility;Development;
+DESKTOP_EOF
+    else
     cat > "$_APPIMAGE_DESKTOP_FILE" <<DESKTOP_EOF
 [Desktop Entry]
 Name=Claude
 Comment=Desktop application for Claude.ai
 GenericName=AI Assistant
-Keywords=AI;Chat;Assistant;Claude;Code;LLM;
+Keywords=AI;Chat;Assistant;Code;LLM;
 ${desired_exec}
 Icon=claude-desktop
 Type=Application
@@ -939,6 +1001,7 @@ Exec=${appimage_path} claude://claude.ai/new
 Name=New Claude Code session
 Exec=${appimage_path} claude://code/new
 DESKTOP_EOF
+    fi
 
     local appimage_icon=""
     if [[ -n "$here" ]]; then
@@ -969,18 +1032,32 @@ DESKTOP_EOF
         update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
     fi
 
-    if command -v xdg-mime &>/dev/null; then
-        xdg-mime default "${DESKTOP_ID}.desktop" x-scheme-handler/claude 2>/dev/null || true
+    if [[ -z "$profile_suffix" ]]; then
+        if command -v xdg-mime &>/dev/null; then
+            xdg-mime default "${DESKTOP_ID}.desktop" x-scheme-handler/claude 2>/dev/null || true
+        fi
+    else
+        # Only reached when the entry was (re)written, i.e. it may have just
+        # lost an older claude:// claim; an up-to-date entry returns above.
+        _appimage_release_scheme && _scheme_with_default=1
     fi
 
     log "AppImage integrate: registered ${_APPIMAGE_DESKTOP_FILE} -> ${appimage_path}"
     if [[ "$quiet" != "quiet" ]]; then
         echo "Desktop integration installed."
         echo "  File: $_APPIMAGE_DESKTOP_FILE"
-        echo "  Exec: $appimage_path %u"
-        echo "  Protocol: claude:// -> Claude Desktop (AppImage)"
-        echo
-        echo "The claude:// protocol handler is now active."
+        echo "  Exec: ${desired_exec#Exec=}"
+        if [[ -n "$profile_suffix" ]]; then
+            if [[ -n "$_scheme_with_default" ]]; then
+                echo "  (profile entry: the claude:// handler stays with the default profile)"
+            else
+                echo "  (profile entry: no claude:// handler change was made)"
+            fi
+        else
+            echo "  Protocol: claude:// -> Claude Desktop (AppImage)"
+            echo
+            echo "The claude:// protocol handler is now active."
+        fi
         echo "To remove: claude-desktop --unintegrate"
     fi
     return 0
@@ -1032,6 +1109,40 @@ _appimage_unintegrate() {
     return 0
 }
 
+# The window identity this launch would use: the per-profile id when its
+# .desktop is found the way the app looks it up ($XDG_DATA_HOME/applications,
+# an unset/empty/relative value meaning ~/.local/share, then each absolute
+# $XDG_DATA_DIRS entry; a regular file, symlinks followed; Hidden=true counts as
+# absent). Pure bash, never fails.
+_window_identity() {
+    local base="com.anthropic.Claude"
+    if [[ -z "$profile_suffix" ]]; then
+        echo "$base"
+        return 0
+    fi
+    local d f line hidden dirs=()
+    if [[ "${XDG_DATA_HOME:-}" == /* ]]; then dirs+=("$XDG_DATA_HOME"); else dirs+=("$HOME/.local/share"); fi
+    local x _xdd=()
+    # Split into an array: an unquoted expansion would glob-expand entries.
+    IFS=: read -r -a _xdd <<< "${XDG_DATA_DIRS:-/usr/local/share:/usr/share}" || true
+    for x in ${_xdd[@]+"${_xdd[@]}"}; do
+        [[ "$x" == /* ]] && dirs+=("$x")
+    done
+    for d in "${dirs[@]}"; do
+        f="$d/applications/${DESKTOP_ID}.desktop"
+        [[ -f "$f" ]] || continue
+        hidden=""
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ "${line%$'\r'}" == "Hidden=true" ]] && { hidden=1; break; }
+        done < "$f" 2>/dev/null
+        [[ -n "$hidden" ]] && continue
+        echo "$DESKTOP_ID ($f)"
+        return 0
+    done
+    echo "$base (shared: no ${DESKTOP_ID}.desktop in the XDG applications dirs)"
+    return 0
+}
+
 _create_profile() {
     local name="$1"
     if [[ -z "$name" || "$name" == "default" ]]; then
@@ -1048,8 +1159,8 @@ _create_profile() {
     # still isolates the profile's state without one.
     if [[ -n "${CLAUDE_APPIMAGE_PATH:-}" ]]; then
         echo >&2 "claude-desktop: --create-profile is not available in the AppImage (its files move on every launch)."
-        echo >&2 "  Run the AppImage with --profile=$name instead: the profile gets its own login, logs and settings,"
-        echo >&2 "  and shares the default profile's taskbar entry."
+        echo >&2 "  Run the AppImage with --profile=$name instead: the profile gets its own login, logs, settings"
+        echo >&2 "  and its own menu entry and window identity (com.anthropic.Claude-$name)."
         return 1
     fi
 
@@ -1085,10 +1196,10 @@ _create_profile() {
     # /proc/self/exe resolves to the per-profile path (distinct argv[0] / scope).
     # This mirrors how Chrome does multi-channel (google-chrome-stable /
     # google-chrome-beta are real copies). NOTE: this alone does NOT give each
-    # profile a distinct WM_CLASS - Chromium's app_id comes from the shared
-    # app.asar desktopName ("com.anthropic.Claude"), not the binary basename, so the
-    # WM still groups all profiles as one app. See issue #148 / the discovery
-    # comment above for the per-profile-desktopName follow-up.
+    # profile a distinct WM_CLASS - Chromium's app_id comes from the app's
+    # desktop name, not the binary basename. The per-profile .desktop file
+    # written below is what gives the profile its own app_id
+    # (com.anthropic.Claude-<name>); see the APP_ID header.
     #
     # Strategy: hardlink first (zero-cost, same fs only), reflink second
     # (zero-cost on btrfs/xfs), copy fallback (typically ~200 MB per profile).
@@ -1153,13 +1264,12 @@ _create_profile() {
         # binary, so a named profile's right-click "New chat" would open in the
         # default profile. Simpler to drop them than to rewrite each per-action Exec.
         #
-        # StartupWMClass is left as the inherited "com.anthropic.Claude" on
-        # purpose: the window's live app_id is "com.anthropic.Claude" for every
-        # profile (the shared app.asar desktopName wins), so a per-profile
-        # WMClass would never match the window. A distinct per-profile app_id
-        # needs a per-profile desktopName override (out of scope for #148).
-        awk -v name="$name" -v execline="$exec_line" '
-            BEGIN { FS=OFS="="; drop=0 }
+        # StartupWMClass becomes the per-profile DESKTOP_ID: with this file
+        # present the profile's windows carry com.anthropic.Claude-<name> as
+        # app_id / WM_CLASS, so X11 matches the entry by this key and Wayland
+        # by the filename.
+        awk -v name="$name" -v execline="$exec_line" -v wmclass="com.anthropic.Claude-${name}" '
+            BEGIN { FS=OFS="="; drop=0; seenwm=0 }
             /^\[Desktop Action / { drop=1; next }   # drop the whole action block
             /^\[Desktop Entry\]/ { drop=0 }
             drop { next }
@@ -1167,7 +1277,9 @@ _create_profile() {
             /^Exec=/     { print execline; next }
             /^MimeType=/ { next }
             /^Actions=/  { next }
+            /^StartupWMClass=/ { print "StartupWMClass=" wmclass; seenwm=1; next }
             { print }
+            END { if (!seenwm) print "StartupWMClass=" wmclass }
         ' "$source_desktop" > "$desktop_file"
     else
         cat > "$desktop_file" <<EOF
@@ -1177,7 +1289,7 @@ ${exec_line}
 Terminal=false
 Type=Application
 Icon=claude-desktop
-StartupWMClass=com.anthropic.Claude
+StartupWMClass=com.anthropic.Claude-${name}
 Categories=Utility;Development;
 EOF
     fi
@@ -1341,6 +1453,156 @@ _kwallet_available() {
     return 1
 }
 
+# One question to the session bus through one tool, for --diagnose's
+# Secret Service lines. $1 = busctl|dbus-send|gdbus, $2 = what to ask:
+#   has     does org.freedesktop.secrets have an owner right now (true|false)
+#   pid     the process id of that owner
+#   locked  the Locked property of the default collection (true|false|nodefault)
+# Prints the normalized answer and returns 0; returns 1 when the tool did not
+# answer (cannot reach the bus, unparsable) and 2 when it ran into its timeout.
+# "has" and "pid" are addressed to org.freedesktop.DBus, which never starts
+# anything. "locked" is addressed to org.freedesktop.secrets and therefore
+# D-Bus-activates the provider when nobody owns the name: the caller must have
+# seen "has" answer true first (#330: --diagnose must not start a daemon).
+_ss_call() {
+    local _tool="$1" _what="$2" _out='' _t0=$SECONDS _re _dpath=/org/freedesktop/secrets/aliases/default
+    local -a _to=()
+    command -v timeout &>/dev/null && _to=(timeout 6)
+    command -v "$_tool" &>/dev/null || return 1
+    case "$_tool:$_what" in
+        busctl:has)
+            _out=$(${_to[@]+"${_to[@]}"} busctl --user --no-pager --auto-start=no --timeout=5 call \
+                org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus NameHasOwner s org.freedesktop.secrets 2>&1) || true
+            _re='^b (true|false)' ;;
+        busctl:pid)
+            _out=$(${_to[@]+"${_to[@]}"} busctl --user --no-pager --auto-start=no --timeout=5 call \
+                org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus GetConnectionUnixProcessID s org.freedesktop.secrets 2>&1) || true
+            _re='^u ([0-9]+)' ;;
+        busctl:locked)
+            _out=$(${_to[@]+"${_to[@]}"} busctl --user --no-pager --auto-start=no --timeout=5 get-property \
+                org.freedesktop.secrets "$_dpath" org.freedesktop.Secret.Collection Locked 2>&1) || true
+            _re='^b (true|false)' ;;
+        dbus-send:has)
+            _out=$(${_to[@]+"${_to[@]}"} dbus-send --session --print-reply --reply-timeout=5000 --dest=org.freedesktop.DBus \
+                /org/freedesktop/DBus org.freedesktop.DBus.NameHasOwner string:org.freedesktop.secrets 2>&1) || true
+            _re='^[[:space:]]*boolean (true|false)' ;;
+        dbus-send:pid)
+            _out=$(${_to[@]+"${_to[@]}"} dbus-send --session --print-reply --reply-timeout=5000 --dest=org.freedesktop.DBus \
+                /org/freedesktop/DBus org.freedesktop.DBus.GetConnectionUnixProcessID string:org.freedesktop.secrets 2>&1) || true
+            _re='^[[:space:]]*uint32 ([0-9]+)' ;;
+        dbus-send:locked)
+            _out=$(${_to[@]+"${_to[@]}"} dbus-send --session --print-reply --reply-timeout=5000 --dest=org.freedesktop.secrets \
+                "$_dpath" org.freedesktop.DBus.Properties.Get string:org.freedesktop.Secret.Collection string:Locked 2>&1) || true
+            _re='^[[:space:]]*variant[[:space:]]+boolean (true|false)' ;;
+        gdbus:has)
+            _out=$(${_to[@]+"${_to[@]}"} gdbus call --session --timeout 5 --dest org.freedesktop.DBus \
+                --object-path /org/freedesktop/DBus --method org.freedesktop.DBus.NameHasOwner org.freedesktop.secrets 2>&1) || true
+            _re='^\((true|false),?\)' ;;
+        gdbus:pid)
+            _out=$(${_to[@]+"${_to[@]}"} gdbus call --session --timeout 5 --dest org.freedesktop.DBus \
+                --object-path /org/freedesktop/DBus --method org.freedesktop.DBus.GetConnectionUnixProcessID org.freedesktop.secrets 2>&1) || true
+            _re='^\((uint32 )?([0-9]+),?\)' ;;
+        gdbus:locked)
+            _out=$(${_to[@]+"${_to[@]}"} gdbus call --session --timeout 5 --dest org.freedesktop.secrets \
+                --object-path "$_dpath" --method org.freedesktop.DBus.Properties.Get \
+                org.freedesktop.Secret.Collection Locked 2>&1) || true
+            _re='^\(<(true|false)>,?\)' ;;
+        *) return 1 ;;
+    esac
+    if [[ "$_out" =~ $_re ]]; then
+        printf '%s\n' "${BASH_REMATCH[${#BASH_REMATCH[@]}-1]}"
+        return 0
+    fi
+    if [[ "$_what" == locked ]] && grep -qiE 'UnknownObject|Unknown object|No such object|does not exist' <<<"$_out"; then
+        echo nodefault
+        return 0
+    fi
+    (( SECONDS - _t0 < 4 )) || return 2
+    return 1
+}
+
+# Which process owns org.freedesktop.secrets, and is its default keyring
+# locked. Sets _ss_provider and _ss_lock (the report text of the two lines) and
+# _ss_lock_state (yes|no|nodefault|other). Each tool falls through to the next
+# when it cannot answer, like _secret_service_available. Never starts a
+# provider: the lock state is read only once the name is known to have an owner.
+_ss_provider=''
+_ss_lock=''
+_ss_lock_state='other'
+_secret_service_inspect() {
+    local _tool _rc _owned='' _pid='' _exe='' _lk='' _have_tool=0 _timed_out=0
+    _ss_lock_state='other'
+    for _tool in busctl dbus-send gdbus; do
+        command -v "$_tool" &>/dev/null || continue
+        _have_tool=1
+        _rc=0; _owned=$(_ss_call "$_tool" has) || _rc=$?
+        if (( _rc == 0 )); then break; fi
+        _owned=''
+        (( _rc == 2 )) && { _timed_out=1; break; }
+    done
+    if (( ! _have_tool )); then
+        _ss_provider='unknown (no D-Bus tool)'
+        _ss_lock='unknown (no D-Bus tool)'
+        return 0
+    fi
+    if [[ -z "$_owned" ]]; then
+        _ss_provider='unknown (the session bus did not answer)'
+        (( ! _timed_out )) || _ss_provider='unknown (the session bus did not answer within 5 s)'
+        _ss_lock='not checked (provider unknown)'
+        return 0
+    fi
+    if [[ "$_owned" == false ]]; then
+        if _secret_service_available; then
+            _ss_provider='not running (activatable)'
+        else
+            _ss_provider='none'
+        fi
+        _ss_lock='not checked (provider not running)'
+        [[ "$_ss_provider" == none ]] && _ss_lock='not checked (no provider)'
+        return 0
+    fi
+    # Owned: name the owner.
+    for _tool in busctl dbus-send gdbus; do
+        _rc=0; _pid=$(_ss_call "$_tool" pid) || _rc=$?
+        (( _rc == 0 )) && break
+        _pid=''
+        (( _rc == 2 )) && break
+    done
+    if [[ -z "$_pid" ]]; then
+        _ss_provider='unknown (the bus did not tell the owner process id)'
+    else
+        _exe=$(readlink "/proc/$_pid/exe" 2>/dev/null || true)
+        _exe="${_exe% (deleted)}"
+        _exe="${_exe##*/}"
+        [[ -n "$_exe" ]] || _exe=$(cat "/proc/$_pid/comm" 2>/dev/null || true)
+        if [[ -n "$_exe" ]]; then
+            _ss_provider="$_exe"
+        else
+            _ss_provider="unknown (cannot read /proc/$_pid)"
+        fi
+    fi
+    # The name has an owner, so this read activates nothing.
+    for _tool in busctl dbus-send gdbus; do
+        _rc=0; _lk=$(_ss_call "$_tool" locked) || _rc=$?
+        (( _rc == 0 )) && break
+        _lk=''
+        (( _rc == 2 )) && break
+    done
+    case "$_lk" in
+        true)
+            _ss_lock_state=yes
+            _ss_lock='yes (the app can use it only once it is unlocked: at login through PAM, or through a prompt when the provider can show one)' ;;
+        false)
+            _ss_lock_state=no
+            _ss_lock='no' ;;
+        nodefault)
+            _ss_lock_state=nodefault
+            _ss_lock='no default keyring' ;;
+        *)
+            _ss_lock='unknown (the provider did not answer the Locked property)' ;;
+    esac
+}
+
 # The password-store decision, asked as a question so that both the launch path
 # and --diagnose get the same answer from one implementation. Sets three globals
 # rather than echoing, because the reason has to survive alongside the verdict:
@@ -1421,8 +1683,9 @@ _fontconfig_var_usable() {
     [[ -n "$_v" ]] || return 0
     case "$1" in
         FONTCONFIG_PATH)
-            local IFS=:
-            for _d in $_v; do [[ -d "$_d" ]] && return 0; done
+            local _fcp=()
+            IFS=: read -r -a _fcp <<< "$_v" || true
+            for _d in ${_fcp[@]+"${_fcp[@]}"}; do [[ -n "$_d" && -d "$_d" ]] && return 0; done
             return 1
             ;;
         *)
@@ -1487,6 +1750,99 @@ _diag_app_is_wayland() {
     fi
 }
 
+# --- The PATH the app runs its own tools from (upstream 4.23118+) ---
+# At startup upstream narrows process.env.PATH to fixed system dirs and keeps
+# the launch PATH in CLAUDE_DESKTOP_STARTED_PATH. Our patches resolve the tools
+# they run (xdg-mime, git, hyprctl, secret-tool, qemu-system-*, ...) through
+# js/tool_path.js on the TOOL PATH: the narrowed dirs, then each started-PATH
+# dir that passes upstream's trust rule along the whole entry as written. The
+# helpers below replicate that for --diagnose; the launcher's own PATH is what
+# the app is started with.
+
+# Upstream's trust rule for a dir (index.pre.js): a directory that is not a
+# symlink, owned by root, and not writable by us.
+_diag_trust_rule() {
+    local d="$1" u
+    [[ -d "$d" && ! -L "$d" ]] || return 1
+    u="$(stat -c %u -- "$d" 2>/dev/null)" || return 1
+    [[ "$u" == 0 && ! -w "$d" ]]
+}
+
+# A started-PATH entry -> the real dir tools are taken from, when every dir
+# passed through passes the rule and every symlink hop is owned by root (only
+# root can change where the entry leads); status 1 otherwise. Same walk as
+# _chainReal in js/tool_path.js.
+_diag_chain_real() {
+    local cur=/ n nx t u hops=0
+    local -a q tq
+    _diag_trust_rule / || return 1
+    IFS=/ read -r -a q <<<"$1"
+    while (( ${#q[@]} )); do
+        n="${q[0]}"; q=("${q[@]:1}")
+        [[ -z "$n" || "$n" == . ]] && continue
+        if [[ "$n" == .. ]]; then
+            cur="${cur%/*}"; [[ -n "$cur" ]] || cur=/
+            continue
+        fi
+        nx="${cur%/}/$n"
+        if [[ -L "$nx" ]]; then
+            hops=$(( hops + 1 )); (( hops <= 40 )) || return 1
+            u="$(stat -c %u -- "$nx" 2>/dev/null)" || return 1
+            [[ "$u" == 0 ]] || return 1
+            t="$(readlink -- "$nx" 2>/dev/null)" || return 1
+            [[ "$t" == /* ]] && cur=/
+            IFS=/ read -r -a tq <<<"$t"
+            q=("${tq[@]}" "${q[@]}")
+            continue
+        fi
+        _diag_trust_rule "$nx" || return 1
+        cur="$nx"
+    done
+    echo "$cur"
+}
+
+# Upstream's narrowed PATH, computed the way index.pre.js does it.
+_diag_narrowed_path() {
+    local -a out=()
+    if _diag_trust_rule /usr/local; then
+        _diag_trust_rule /usr/local/bin && out+=(/usr/local/bin)
+        _diag_trust_rule /usr/local/sbin && out+=(/usr/local/sbin)
+    fi
+    out+=(/usr/bin /bin /usr/sbin /sbin /snap/bin /run/current-system/sw/bin /run/current-system/profile/bin)
+    local IFS=:
+    echo "${out[*]}"
+}
+
+# TOOL PATH. $1 = the PATH the app is started with, $2 = the narrowed PATH
+# (default: computed; a parameter only so tests can fake it).
+_diag_tool_path() {
+    local started="$1" out="${2:-}" d r
+    local -a dirs=()
+    [[ -n "$out" ]] || out="$(_diag_narrowed_path)"
+    # Split on ':' without word splitting or globbing (an entry such as /opt/*
+    # stays one literal entry, as in the app).
+    IFS=: read -r -a dirs <<<"$started"
+    for d in "${dirs[@]}"; do
+        [[ "$d" == /* ]] || continue
+        [[ ":$out:" == *":$d:"* ]] && continue
+        r="$(_diag_chain_real "$d")" || continue
+        [[ ":$out:" == *":$r:"* ]] || out="$out:$r"
+    done
+    echo "$out"
+}
+
+# First executable non-directory $1 in the dirs of $2. Status 1 if none.
+_diag_which_in() {
+    local name="$1" d
+    local -a dirs=()
+    IFS=: read -r -a dirs <<<"$2"
+    for d in "${dirs[@]}"; do
+        [[ "$d" == /* ]] || continue
+        [[ -x "$d/$name" && ! -d "$d/$name" ]] && { echo "$d/$name"; return 0; }
+    done
+    return 1
+}
+
 # Resolve a host tool the way the patched app does: the literal upstream path
 # when that file exists (fs.existsSync, not an exec check), else the bare name
 # for PATH lookup. Echoes the command the app will exec.
@@ -1496,22 +1852,37 @@ _diag_app_tool_cmd() {
 }
 
 # One host tool.
-#   $1 mode: fallback = upstream execs $3, our patch falls back to PATH
+#   $1 mode: fallback = upstream execs $3, our patch falls back to the TOOL PATH
 #            abs      = only the literal $3 works (nothing falls back)
-#            path     = resolved through PATH
+#            path     = resolved through PATH (the launcher's own tools)
+#            tool     = resolved by the app on the TOOL PATH (system folders,
+#                       then root-owned read-only folders of the started PATH)
 #   $2 tool name, $3 absolute path (or ''), $4 1 = this session needs it,
 #   $5 what it is for, $6 consequence when it is missing
+# _DIAG_NARROWED (tests only) replaces the computed narrowed PATH.
 _diag_cap() {
-    local mode="$1" name="$2" abs="$3" needed="$4" what="$5" miss="$6" p=''
+    local mode="$1" name="$2" abs="$3" needed="$4" what="$5" miss="$6" p='' tp
     case "$mode" in
         fallback)
             if [[ -e "$abs" ]]; then
                 echo "[ok]   $name = $abs (upstream path) - $what"; return 0
             fi
-            p="$(command -v "$name" 2>/dev/null || true)"
+            tp="$(_diag_tool_path "${PATH:-}" "${_DIAG_NARROWED:-}")"
+            p="$(_diag_which_in "$name" "$tp" || true)"
             if [[ -n "$p" ]]; then
-                echo "[ok]   $name = $p (not at $abs; works through our PATH fallback) - $what"; return 0
+                echo "[ok]   $name = $p (not at $abs; found by our fallback in a system or root-owned read-only folder) - $what"; return 0
             fi
+            p="$(command -v "$name" 2>/dev/null || true)"
+            [[ -n "$p" ]] && miss="$miss (found $p, a user-writable folder the app does not run its own tools from - install $name system-wide)"
+            ;;
+        tool)
+            tp="$(_diag_tool_path "${PATH:-}" "${_DIAG_NARROWED:-}")"
+            p="$(_diag_which_in "$name" "$tp" || true)"
+            if [[ -n "$p" ]]; then
+                echo "[ok]   $name = $p - $what"; return 0
+            fi
+            p="$(command -v "$name" 2>/dev/null || true)"
+            [[ -n "$p" ]] && miss="$miss (found $p, a user-writable folder the app does not run its own tools from - install $name system-wide)"
             ;;
         abs)
             if [[ -x "$abs" ]]; then
@@ -1563,6 +1934,26 @@ _diag_bus_owner() {
         [[ "$out" =~ ^\(false ]] && { echo absent; return 0; }
     fi
     echo unknown
+}
+
+# Whether --diagnose may make the real kwalletd method call. That call starts
+# an activatable kwalletd (and ksecretd behind it), so it is only made where
+# KWallet is expected: a KDE session (same XDG_CURRENT_DESKTOP test as
+# _pw_store_detect), a kwalletd already on the bus, or a kwallet store asked
+# for ($1 = the --password-store= argument, if any). "unknown" counts as not running.
+_diag_kwallet_may_ask() {
+    local _de _v
+    local -a _de_parts
+    IFS=':' read -ra _de_parts <<< "${XDG_CURRENT_DESKTOP:-}"
+    for _de in "${_de_parts[@]}"; do
+        [[ "${_de,,}" == kde ]] && return 0
+    done
+    [[ "${1:-}" == --password-store=kwallet* ]] && return 0
+    [[ "${CLAUDE_PASSWORD_STORE:-}" == kwallet* ]] && return 0
+    for _v in 6 5; do
+        [[ "$(_diag_bus_owner session "org.kde.kwalletd${_v}")" == present ]] && return 0
+    done
+    return 1
 }
 
 # The app's GlobalShortcuts portal probe, argument for argument: upstream
@@ -1866,6 +2257,245 @@ _diag_bridge_screens() {
     done
 }
 
+# --diagnose: the community switch "Escape stops Computer Use" for the
+# userData dir given as $1, read the way js/extra_settings_main.js reads it:
+# a boolean computerUseEscapeAbort in claude-desktop-extra.jsonc wins (and
+# locks the switch), else only a true in claude-desktop-extra.json is on. A
+# .jsonc that does not parse is skipped, as the app skips it. Prints "on ...",
+# "off ..." or "unknown (<why>)". Read-only.
+_diag_escape_switch() {
+    local ud="$1"
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo 'unknown (python3 is needed to read claude-desktop-extra.json)'
+        return 0
+    fi
+    python3 - "$ud/claude-desktop-extra.jsonc" "$ud/claude-desktop-extra.json" 2>/dev/null <<'PY' \
+        || echo 'unknown (the settings files could not be read)'
+import json, os, sys
+
+KEY = "computerUseEscapeAbort"
+
+
+# js/extra_settings_main.js __cdbEx_strip: comments and trailing commas out,
+# string literals untouched.
+def strip(s):
+    out, i, n, in_str = [], 0, len(s), False
+    while i < n:
+        c = s[i]
+        if in_str:
+            out.append(c)
+            if c == "\\" and i + 1 < n:
+                out.append(s[i + 1])
+                i += 1
+            elif c == '"':
+                in_str = False
+            i += 1
+            continue
+        if c == '"':
+            in_str = True
+            out.append(c)
+            i += 1
+            continue
+        if s.startswith("//", i):
+            while i < n and s[i] != "\n":
+                i += 1
+            continue
+        if s.startswith("/*", i):
+            j = s.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            continue
+        if c == ",":
+            j = i + 1
+            while j < n:
+                if s[j] in " \t\r\n":
+                    j += 1
+                elif s.startswith("//", j):
+                    while j < n and s[j] != "\n":
+                        j += 1
+                elif s.startswith("/*", j):
+                    k = s.find("*/", j + 2)
+                    j = n if k < 0 else k + 2
+                else:
+                    break
+            if j < n and s[j] in "}]":
+                i += 1
+                continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def read(path):
+    if not os.path.exists(path):
+        return "absent", None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            raw = fh.read()
+    except OSError as e:
+        return "unreadable", e.strerror or str(e)
+    try:
+        data = json.loads(strip(raw) or "{}")
+    except ValueError:
+        return "bad", None
+    return "ok", (data.get(KEY) if isinstance(data, dict) else None)
+
+
+jsonc, js = sys.argv[1], sys.argv[2]
+st, val = read(jsonc)
+if st == "unreadable":
+    print("unknown (claude-desktop-extra.jsonc cannot be read: %s)" % val)
+elif st == "ok" and isinstance(val, bool):
+    print(("on" if val else "off") + " (set in claude-desktop-extra.jsonc, the switch is locked)")
+else:
+    st2, val2 = read(js)
+    if st2 == "unreadable":
+        print("unknown (claude-desktop-extra.json cannot be read: %s)" % val2)
+    elif st2 == "ok" and val2 is True:
+        print("on")
+    else:
+        print("off (the default)" if not (st2 == "ok" and val2 is False) else "off")
+PY
+}
+
+# --diagnose: how a bridge filters screenshots, from its doctor JSON ($1) only.
+# wlroots-bridge: top-level screenshot_mask / _mode / _protocol / _gaps (a mask
+# without a mode is the older whole-screen kind); x11-bridge: capabilities.
+# screenshot_mask / screenshot_mask_ignore. No such key: the bridge does not filter.
+_diag_screenshot_filter() {
+    local doc="$1" mask mode proto gaps ign how re
+    # Only the bridges that filter themselves carry the key (x11-bridge,
+    # wlroots-bridge); KDE filters through upstream's own handling and GNOME
+    # shows the whole screen, said elsewhere in this report.
+    [[ "$doc" == *'"screenshot_mask"'* ]] || return 0
+    mask="$(_bridge_json_field "$doc" screenshot_mask || true)"
+    if [[ "$mask" != true ]]; then
+        echo '  screenshot filter: none (this bridge does not filter)'
+        return 0
+    fi
+    mode="$(_bridge_json_field "$doc" screenshot_mask_mode || true)"
+    proto="$(_bridge_json_field "$doc" screenshot_mask_protocol || true)"
+    if [[ "$mode" == toplevel ]]; then
+        how='per window'
+        [[ -n "$proto" && "$proto" != null ]] && how+=" ($proto)"
+    else
+        how='whole screen, only approved windows kept'
+    fi
+    re='"screenshot_mask_gaps"[[:space:]]*:[[:space:]]*\[([^]]*)\]'
+    if [[ "$doc" =~ $re ]]; then
+        gaps="${BASH_REMATCH[1]//\"/}"
+        gaps="${gaps//[[:space:]]/}"
+        gaps="${gaps//,/, }"
+        [[ -n "$gaps" ]] && how+="; cannot cover: $gaps"
+    fi
+    ign="$(_bridge_json_field "$doc" screenshot_mask_ignore || true)"
+    [[ "$ign" == true ]] && how+='; can ignore Claude'"'"'s own overlay windows'
+    echo "  screenshot filter: $how"
+}
+
+# --diagnose: the `abortWatch` doctor object of a bridge as tab-separated
+# fields: has available mechanism reason consumes stale skipped. has=0: the
+# bridge has no such key (older bridge). Needs python3; without it only
+# available / reason are read (the plain-text path below).
+_diag_escape_doctor() {
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c '
+import json, sys
+try:
+    d = json.loads(sys.stdin.read() or "{}")
+except ValueError:
+    d = {}
+a = d.get("abortWatch") if isinstance(d, dict) else None
+if not isinstance(a, dict):
+    print("0"); sys.exit(0)
+def s(v):
+    if v is None: return "null"
+    if isinstance(v, bool): return "true" if v else "false"
+    return str(v).replace("\t", " ").replace("\n", " ")
+sk = a.get("skippedKeyboards")
+sk = ", ".join(str(k) for k in sk) if isinstance(sk, list) else ""
+print("\t".join(["1", s(a.get("available")), s(a.get("mechanism")), s(a.get("reason")), s(a.get("consumes")), s(a.get("stale")), sk]))
+' 2>/dev/null || echo 0
+        return 0
+    fi
+    local doc aw av re
+    doc="$(cat)"
+    [[ "$doc" == *'"abortWatch"'* ]] || { echo 0; return 0; }
+    aw="${doc#*\"abortWatch\"}"
+    av="$(_bridge_json_field "$aw" available || true)"
+    re="$(_bridge_json_field "$aw" reason || true)"
+    printf '1\t%s\tnull\t%s\tnull\tnull\t\n' "${av:-null}" "${re:-null}"
+}
+
+# --diagnose: "Escape stops Computer Use" - the switch for this profile and
+# the stop-key watcher the app would start on this session (the same choice
+# as js/cu_esc_watch.js select(): the HOST session, not the input bridge), with
+# that bridge's doctor facts in plain words. Read-only: the settings files and
+# one `doctor` call, which never binds anything. $1 = the userData dir.
+_diag_escape() {
+    local ud="$1" sw st desk wl='' name='' why bin env_var info has av mech reason cons stale skipped
+    sw="$(_diag_escape_switch "$ud")"
+    echo "Escape stops Computer Use (community switch) = $sw  [$ud]"
+    st="$(printf %s "${XDG_SESSION_TYPE:-}" | tr '[:upper:]' '[:lower:]')"
+    desk="$(printf %s "${XDG_CURRENT_DESKTOP:-}" | tr '[:upper:]' '[:lower:]')"
+    case "$st" in
+        wayland) wl=1 ;;
+        x11)     wl='' ;;
+        *)       [[ -n "${WAYLAND_DISPLAY:-}" ]] && wl=1 ;;
+    esac
+    if [[ -z "$wl" ]]; then
+        if [[ -n "${DISPLAY:-}" ]]; then name=x11-bridge; why='X11 session'; else why='no X display'; fi
+    elif [[ -n "${NIRI_SOCKET:-}" ]]; then why='niri has no runtime key binding API'
+    elif [[ -n "${SWAYSOCK:-}" ]]; then name=wlroots-bridge; why='sway'
+    elif [[ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]]; then name=wlroots-bridge; why='Hyprland'
+    elif [[ "$desk" == *kde* ]]; then name=kwin-portal-bridge; why='KDE Plasma Wayland'
+    elif [[ "$desk" == *gnome* ]]; then why='GNOME Wayland has no global stop key for Claude'
+    else why="no global stop key on this Wayland compositor${desk:+ ($desk)}"
+    fi
+    if [[ -z "$name" ]]; then
+        echo "  stop-key watcher = none on this session ($why): Escape in Claude's own window, Stop sharing and Stop remain"
+        [[ "$sw" == on* ]] && _diag_problems+=("Escape stops Computer Use is on, but this session has no stop-key watcher ($why): use Escape in Claude's window, Stop sharing or Stop")
+        return 0
+    fi
+    env_var="$(_cu_bridge_env "$name")"
+    bin="$(_cu_bridge_path "$name" "$env_var")"
+    echo "  stop-key watcher = $name abort-watch ($why)${bin:+, $bin}"
+    if [[ -z "$bin" || ! -x "$bin" ]]; then
+        echo "  unavailable: $name is missing"
+        [[ "$sw" == on* ]] && _diag_problems+=("Escape stops Computer Use is on, but $name is missing: no stop key on this session - reinstall the package")
+        return 0
+    fi
+    if [[ "$(_diag_bridge_runs "$bin" "$env_var")" != ok* ]]; then
+        echo "  unavailable: $name cannot run (see the bridge run check above)"
+        [[ "$sw" == on* ]] && _diag_problems+=("Escape stops Computer Use is on, but $name cannot run: no stop key on this session")
+        return 0
+    fi
+    info="$(_cu_bridge_doctor "$bin" | _diag_escape_doctor)"
+    IFS=$'\t' read -r has av mech reason cons stale skipped <<<"$info"
+    if [[ "$has" != 1 ]]; then
+        echo "  unavailable: this $name has no stop-key support (older bridge: no abortWatch in its doctor)"
+        [[ "$sw" == on* ]] && _diag_problems+=("Escape stops Computer Use is on, but $name at $bin has no stop-key support (older bridge)")
+        return 0
+    fi
+    if [[ "$av" == true ]]; then
+        echo "  available${mech:+ (mechanism ${mech/#null/unknown})}"
+    else
+        [[ -n "$reason" && "$reason" != null ]] || reason='no reason given'
+        echo "  unavailable: $reason"
+        [[ "$sw" == on* ]] && _diag_problems+=("Escape stops Computer Use is on, but $name cannot watch Escape here: $reason")
+    fi
+    case "$cons" in
+        true)  echo '  Escape and applications: Escape is taken from applications while Claude is working' ;;
+        false) echo '  Escape and applications: Escape still reaches applications' ;;
+        *)     echo '  Escape and applications: unknown' ;;
+    esac
+    [[ -n "$skipped" ]] && echo "  keyboards not watched: $skipped"
+    if [[ "$stale" == true ]]; then
+        echo "  leftover binding: a stop-key binding from an earlier run is still active - clear it with: $bin abort-watch </dev/null"
+        _diag_problems+=("$name left a stop-key binding from an earlier run, so Escape may be taken from applications with nothing running: clear it with $bin abort-watch </dev/null")
+    fi
+    return 0
+}
+
 # --diagnose: the contract view of every bridge - doctor's required keys, then
 # `screens` when the bridge says it serves this session. Bridges below
 # contract 1 get the checks this launcher made before the contract.
@@ -1893,6 +2523,7 @@ _diag_bridges() {
                 line+=" $k=$v"
             done
             echo "  doctor:$line"
+            _diag_screenshot_filter "$doc"
             # Optional key: the user clicked "Stop sharing" in the desktop's
             # screen-sharing indicator; the bridge refuses input and capture
             # until the next session-start.
@@ -1954,6 +2585,148 @@ _diag_bridges() {
     done < <(_cu_bridges)
     if [[ -n "$any_session" ]]; then
         echo '(claude-desktop --reset-screen-sharing forgets the remembered screen-sharing choice; the next Computer Use task asks again)'
+    fi
+}
+
+# Device identity key (cloud Cowork / Dispatch Computer Use). The app's native
+# code keeps the key in the TPM through /dev/tpmrm0 only; without read+write on
+# it the device connects keyless and cloud sessions get no computer tools.
+# `[[ -r && -w ]]` is access(2), so an ACL from the uaccess rule counts.
+# Sets _diag_tpm = ok | denied | absent.
+_diag_tpm_state() {
+    local dev="$1" om
+    _diag_tpm=''
+    if [[ ! -e "$dev" ]]; then
+        _diag_tpm=absent
+        echo 'device key (TPM) = absent (no TPM 2.0 resource manager)'
+    elif [[ -r "$dev" && -w "$dev" ]]; then
+        _diag_tpm=ok
+        echo "device key (TPM) = ok ($dev rw)"
+    else
+        _diag_tpm=denied
+        om="$(stat -c '%U:%G %a' -- "$dev" 2>/dev/null || true)"
+        if [[ "$om" =~ ^([^ ]+)\ ([0-7]+)$ ]]; then
+            om="${BASH_REMATCH[1]} $(printf '%04d' "${BASH_REMATCH[2]}")"
+        else
+            om='owner unknown'
+        fi
+        echo "device key (TPM) = NOT ACCESSIBLE ($om)"
+    fi
+}
+
+# Is <raw link target> one of OUR rule paths? Exactly cdb-tpm-access's
+# known_src() (and __cdbEx_cusKnownRule in js/extra_settings_main.js): the
+# deb/rpm/pacman path, or /nix/store/<32 nix-base32>-<name>/lib/claude-desktop/
+# resources/linux-udev/<rule>. Nothing else - not this run's resources dir (an
+# AppImage mount or build tree goes away, and whoever recreates the path then
+# writes a rule udevd runs as root). The three are pinned to one case list,
+# scripts/tests/fixtures/tpm-rule-paths.tsv.
+_cdb_tpm_rule_ours() {
+    local t="$1" name=70-claude-desktop-extra-tpm.rules rest seg hash nm LC_ALL=C
+    [[ "$t" == "/usr/lib/claude-desktop/resources/linux-udev/$name" ]] && return 0
+    [[ "$t" == /nix/store/* ]] || return 1
+    rest="${t#/nix/store/}"
+    seg="${rest%%/*}"
+    [[ "$rest" == "$seg/lib/claude-desktop/resources/linux-udev/$name" ]] || return 1
+    hash="${seg%%-*}"
+    nm="${seg#*-}"
+    [[ "$hash" != "$seg" && ${#hash} -eq 32 && -n "$nm" ]] || return 1
+    [[ "$hash" =~ ^[0123456789abcdfghijklmnpqrsvwxyz]+$ && "$nm" =~ ^[A-Za-z0-9+._?=-]+$ ]]
+}
+
+# The opt-in rule's link in udev's admin dir (cdb-tpm-access enable|disable).
+# <link>. Sets _diag_tpm_link = ours | stale | file | masked | unsafe | none.
+# Any other symlink there is "unsafe": udevd reads whatever it points at as
+# root, and the helper and the panel leave it alone, so only an admin removes it.
+_diag_tpm_rule() {
+    local link="$1" t
+    _diag_tpm_link=''
+    if [[ -L "$link" ]]; then
+        t="$(readlink -- "$link" 2>/dev/null || true)"
+        if _cdb_tpm_rule_ours "$t"; then
+            if [[ -e "$link" ]]; then
+                _diag_tpm_link=ours
+                echo "TPM access rule = enabled (link -> $t)"
+            else
+                _diag_tpm_link=stale
+                echo "TPM access rule = stale link (-> $t, missing)"
+            fi
+        elif [[ "$t" == /dev/null ]]; then
+            _diag_tpm_link=masked
+            echo 'TPM access rule = masked (link -> /dev/null)'
+        else
+            _diag_tpm_link=unsafe
+            echo "TPM access rule = unsafe link (-> $t, not an installed claude-desktop-extra rule - remove it)"
+        fi
+    elif [[ -e "$link" ]]; then
+        _diag_tpm_link='file'
+        echo 'TPM access rule = enabled (file, not managed by claude-desktop-extra)'
+    else
+        _diag_tpm_link=none
+        echo 'TPM access rule = not enabled'
+    fi
+}
+
+# Last remote-tools device connect in <main.log>: keyed = the TPM key signed it.
+# The regex is the one js/extra_settings_main.js uses; both harnesses read
+# scripts/tests/fixtures/main-log-device.txt, so an upstream wording change
+# breaks both together. Sets _diag_connect = keyed | keyless | none | '' and
+# _diag_connect_reason.
+_diag_last_connect() {
+    local log="$1" line ts re='connect frame sent: device_id (keyed|keyless|none)( \((.*)\))?$'
+    _diag_connect=''
+    _diag_connect_reason=''
+    if [[ -f "$log" && -r "$log" ]]; then
+        line="$(tail -c 524288 -- "$log" 2>/dev/null | grep -a 'connect frame sent: device_id ' | tail -n 1 || true)"
+    else
+        line=''
+    fi
+    if [[ -z "$line" || ! "$line" =~ $re ]]; then
+        echo 'last remote-device connect = not seen'
+        return 0
+    fi
+    _diag_connect="${BASH_REMATCH[1]}"
+    _diag_connect_reason="${BASH_REMATCH[3]}"
+    ts='time unknown'
+    [[ "$line" =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}) ]] && ts="${BASH_REMATCH[1]}"
+    case "$_diag_connect" in
+        keyless) echo "last remote-device connect = keyless${_diag_connect_reason:+ ($_diag_connect_reason)} ($ts)" ;;
+        *)       echo "last remote-device connect = $_diag_connect ($ts)" ;;
+    esac
+}
+
+# The three device-key lines of --- Cloud Cowork device key --- and their Problems.
+# <tpm device> <rule link> <resources dir> <main.log>
+_diag_device_key() {
+    local dev="$1" link="$2" res="$3" log="$4" helper fix
+    helper="$res/linux-udev/cdb-tpm-access"
+    _diag_tpm_state "$dev"
+    _diag_tpm_rule "$link"
+    _diag_last_connect "$log"
+    fix="sudo $helper enable"
+    if [[ -e /etc/NIXOS ]]; then
+        fix='programs.claude-desktop-extra.tpmAccess.enable = true; in the NixOS configuration'
+    elif [[ -n "${CLAUDE_APPIMAGE_PATH:-}" ]]; then
+        # The image's helper refuses (its rule is not root-owned and the mount
+        # goes away): copy the rule instead.
+        fix="sudo install -m 0644 $res/linux-udev/70-claude-desktop-extra-tpm.rules $link && sudo udevadm control --reload && sudo udevadm trigger --action=change --subsystem-match=tpmrm"
+    fi
+    if [[ "$_diag_tpm" == denied ]]; then
+        _diag_problems+=("cloud Cowork and Dispatch get no Computer Use: the device key needs $dev - Settings -> Extra -> Cowork (Linux) -> Enable TPM access, or $fix; without logind: sudo usermod -aG tss \$USER and log in again")
+    elif [[ "$_diag_tpm" == ok && "$_diag_connect" == keyless ]]; then
+        case "$_diag_connect_reason" in
+            row_pk_no_row)
+                _diag_problems+=("device registered keyless (row_pk_no_row) although $dev is accessible: open the Cowork tab in Claude so claude.ai registers this computer's TPM key; if it stays keyless after a restart, attach this report to an issue") ;;
+            row_pk_directory)
+                _diag_problems+=("device registered keyless (row_pk_directory) although $dev is accessible: the device-directory lookup failed (network or TLS error in main.log); check the connection and restart Claude") ;;
+            *)
+                _diag_problems+=("device registered keyless${_diag_connect_reason:+ ($_diag_connect_reason)} although $dev is accessible: restart Claude; if it stays keyless, attach this report to an issue") ;;
+        esac
+    fi
+    if [[ "$_diag_tpm_link" == stale ]]; then
+        _diag_problems+=("TPM access rule link points at a removed install: sudo $helper enable")
+    elif [[ "$_diag_tpm_link" == unsafe ]]; then
+        _diag_problems+=("TPM access rule link points outside an installed claude-desktop-extra rule (udev reads it as root), remove it: sudo rm -f $link && sudo udevadm control --reload")
     fi
 }
 
@@ -2077,6 +2850,7 @@ _diagnose() {
     echo "CLAUDE_PROFILE = ${CLAUDE_PROFILE:-(unset → default)}"
     echo "config_dir = $config_dir"
     echo "DESKTOP_ID = $DESKTOP_ID"
+    echo "window identity = $(_window_identity)"
     # The system-installed default .desktop is the portal-identity anchor that
     # the systemd scope (app-com.anthropic.Claude-...scope) resolves back to. It
     # is the default "com.anthropic.Claude.desktop"; named-profile .desktop files
@@ -2125,7 +2899,14 @@ _diagnose() {
     done
     echo "CLAUDE_PASSWORD_STORE = ${CLAUDE_PASSWORD_STORE:-(unset)}"
     echo "org.freedesktop.secrets on session bus = $(_secret_service_available && echo yes || echo no)"
-    echo "kwalletd answers on session bus = $(_kwallet_available && echo yes || echo no)"
+    _secret_service_inspect
+    echo "org.freedesktop.secrets provider = $_ss_provider"
+    echo "default keyring locked = $_ss_lock"
+    if _diag_kwallet_may_ask "$_pw_forced"; then
+        echo "kwalletd answers on session bus = $(_kwallet_available && echo yes || echo no)"
+    else
+        echo "kwalletd answers on session bus = not asked (not a KDE session and kwalletd is not running)"
+    fi
     if [[ -n "$_pw_forced" ]]; then
         echo "Detection = SKIPPED (explicit $_pw_forced on the command line wins)"
     elif [[ "${CLAUDE_PASSWORD_STORE:-}" == 'auto' ]]; then
@@ -2140,6 +2921,12 @@ _diagnose() {
             libsecret) echo "Verdict = --password-store=gnome-libsecret; $_pw_detail" ;;
             none)      echo "Verdict = NO KEYRING - $_pw_detail" ;;
         esac
+        # A locked (or missing) default keyring breaks the Secret Service
+        # path only; KDE with kwalletd answering does not use it.
+        if [[ "$_ss_lock_state" == yes || "$_ss_lock_state" == nodefault ]] \
+            && [[ "$_pw_state" == libsecret || ( "$_pw_state" == native && ":${XDG_CURRENT_DESKTOP,,}:" != *:kde:* ) ]]; then
+            _diag_problems+=("the Secret Service default keyring is $([[ "$_ss_lock_state" == yes ]] && echo locked || echo missing) (provider: $_ss_provider): without a prompter to unlock it the app's safeStorage reports encryption unavailable and the sign-in will not persist - unlock it at login (PAM) or create and unlock a default keyring")
+        fi
     fi
     echo
     echo '--- xdg-desktop-portal GlobalShortcuts ---'
@@ -2291,12 +3078,28 @@ _diagnose() {
         # and the first thing to hang when the bridge cannot talk to Mutter,
         # issue #232) runs in the bridge section below.
     fi
+    # Device key for cloud Cowork / Dispatch: TPM access, the opt-in rule, and
+    # what the app's last remote-device connect used. main.log of the userData
+    # the app writes to: the default one or upstream's 3p relocation, whichever
+    # was written last.
+    local _cu_log="$config_dir/logs/main.log"
+    [[ -f "${config_dir}-3p/logs/main.log" && ( ! -f "$_cu_log" || "${config_dir}-3p/logs/main.log" -nt "$_cu_log" ) ]] \
+        && _cu_log="${config_dir}-3p/logs/main.log"
+    echo
+    echo '--- Cloud Cowork device key ---'
+    _diag_device_key /dev/tpmrm0 /etc/udev/rules.d/70-claude-desktop-extra-tpm.rules "$_cu_res" "$_cu_log"
     echo
     echo '--- Computer Use bridges (CLI contract) ---'
     # doctor + screens per bridge; neither opens a portal session (contract).
     _diag_bridges
     echo
-    echo '--- Cowork VM capability (replicates the app probe) ---'
+    echo '--- Escape stops Computer Use ---'
+    # The switch is read from the userData dir the app writes to (the one whose
+    # main.log is newer: the default one or upstream's 3p relocation, as for
+    # the device key above); only `doctor` runs, nothing is bound.
+    _diag_escape "$(dirname "$(dirname "$_cu_log")")"
+    echo
+    echo '--- Local Cowork VM (replicates the app probe) ---'
     # Mirrors the native Cowork backend's capability probe. If any of qemuPath /
     # firmwarePath / virtiofsdPath / kvm is missing, the app reports "VM not
     # supported" and the workspace Download does nothing. The resource base is
@@ -2309,14 +3112,18 @@ _diagnose() {
         *)             _arch=x64;   _qemu_bin=qemu-system-x86_64 ;;
     esac
     echo "PATH (as diagnose sees it) = ${PATH:-(empty!)}"
-    # qemuPath: CLAUDE_QEMU_PATH, then /usr/bin/<bin>, then PATH (same order and
-    # X_OK test as the app - see _cowork_qemu_probe)
+    local _tool_path
+    _tool_path="$(_diag_tool_path "${PATH:-}")"
+    echo "TOOL PATH (what the app runs its own tools from: upstream's system folders + the root-owned read-only folders above) = $_tool_path"
+    echo "  (the narrowed view: a running app whose remote switch restored its PATH uses the PATH above instead - diagnose cannot see that switch)"
+    # qemuPath: CLAUDE_QEMU_PATH, then /usr/bin/<bin>, then the TOOL PATH (same
+    # order and X_OK test as the app - see _cowork_qemu_probe)
     local _qemu_path=''
-    _qemu_path="$(_cowork_qemu_probe "$_qemu_bin" "${PATH:-}" "${CLAUDE_QEMU_PATH:-}")" || _qemu_path=''
+    _qemu_path="$(_cowork_qemu_probe "$_qemu_bin" "$_tool_path" "${CLAUDE_QEMU_PATH:-}")" || _qemu_path=''
     if [[ -n ${CLAUDE_QEMU_PATH:-} && $_qemu_path != "$CLAUDE_QEMU_PATH" ]]; then
         echo "  (CLAUDE_QEMU_PATH=$CLAUDE_QEMU_PATH is ignored: not an absolute path to an executable)"
     fi
-    echo "qemuPath = ${_qemu_path:-NOT FOUND (CLAUDE_QEMU_PATH, /usr/bin/$_qemu_bin, $_qemu_bin on PATH)}"
+    echo "qemuPath = ${_qemu_path:-NOT FOUND (CLAUDE_QEMU_PATH, /usr/bin/$_qemu_bin, $_qemu_bin on the TOOL PATH)}"
     # firmwarePath: first readable OVMF/AAVMF CODE candidate (must match the
     # app's patched firmware array: CLAUDE_OVMF_CODE_PATH override first, then
     # the fixed paths - see fix_cowork_firmware_paths_linux.nim)
@@ -2363,18 +3170,18 @@ _diagnose() {
     echo "helperBinaryPath = $([[ -x $_res_base/cowork-linux-helper ]] && echo "$_res_base/cowork-linux-helper" || echo MISSING)"
     echo "smolBinPath = $([[ -r $_res_base/smol-bin.$_arch.img ]] && echo "$_res_base/smol-bin.$_arch.img" || echo MISSING)"
     # kvm + vsock (app checks R_OK|W_OK)
-    echo "/dev/kvm = $([[ -r /dev/kvm && -w /dev/kvm ]] && echo ok || { [[ -e /dev/kvm ]] && echo 'NO PERMISSION (add user to kvm group + relogin)' || echo 'MISSING (enable virtualization in BIOS)'; })"
-    echo "/dev/vhost-vsock = $([[ -r /dev/vhost-vsock && -w /dev/vhost-vsock ]] && echo ok || { [[ -e /dev/vhost-vsock ]] && echo 'NO PERMISSION' || echo 'MISSING (sudo modprobe vhost_vsock)'; })"
+    echo "/dev/kvm = $([[ -r /dev/kvm && -w /dev/kvm ]] && echo ok || { [[ -e /dev/kvm ]] && echo 'NO PERMISSION (Settings -> Extra -> Cowork (Linux) -> Enable KVM access, or add your user to the kvm group and log in again)' || echo 'MISSING (enable virtualization in BIOS)'; })"
+    echo "/dev/vhost-vsock = $([[ -r /dev/vhost-vsock && -w /dev/vhost-vsock ]] && echo ok || { [[ -e /dev/vhost-vsock ]] && echo 'NO PERMISSION (Settings -> Extra -> Cowork (Linux) -> Enable KVM access)' || echo 'MISSING (sudo modprobe vhost_vsock)'; })"
     if [[ -n $_qemu_path && -n $_fw && -n $_vfs && -r /dev/kvm && -w /dev/kvm && -r /dev/vhost-vsock && -w /dev/vhost-vsock ]]; then
-        echo "=> capability probe SHOULD pass (Cowork supported)"
+        echo "=> capability probe SHOULD pass (local Cowork VM supported)"
     else
         echo "=> capability probe WOULD FAIL - fix the NOT-FOUND/MISSING item(s) above"
-        _diag_problems+=("Cowork VM unavailable: the capability probe would fail (see the Cowork section: qemu, firmware, virtiofsd, /dev/kvm, /dev/vhost-vsock)")
+        _diag_problems+=("local Cowork VM unavailable (cloud Cowork is not affected): the capability probe would fail (see the Local Cowork VM section: qemu, firmware, virtiofsd, /dev/kvm, /dev/vhost-vsock)")
     fi
     echo
     echo '--- Host capabilities (what the app execs, resolved the way it does) ---'
-    # One line per host tool: found at the upstream path, found on PATH only
-    # (works through our fallback patch), or MISSING with what breaks. A tool
+    # One line per host tool: found at the upstream path, found on the TOOL
+    # PATH only (works through our fallback patch), or MISSING with what breaks. A tool
     # this session does not need is listed but not counted as a problem.
     local _hc_wl='' _hc_desk _hc_ss='' _hc_kw='' _hc_py=1 _hc_owner _hc_n
     _diag_app_is_wayland && _hc_wl=1
@@ -2394,7 +3201,7 @@ _diagnose() {
     _diag_cap fallback kwallet-query /usr/bin/kwallet-query "${_hc_kw:-0}" \
         'Chrome cookie import from KWallet' \
         'Chrome cookie import skips KWallet-encrypted cookies (install kwallet / kwalletmanager)'
-    _diag_cap path xdg-open '' 1 \
+    _diag_cap tool xdg-open '' 1 \
         'opening links and "Open in" targets' \
         'links and "Open in ..." do nothing (install xdg-utils)'
     _diag_cap abs gjs /usr/bin/gjs "$([[ $_hc_desk == *gnome* ]] && echo 1 || echo 0)" \
@@ -2505,9 +3312,10 @@ Options:
                             a 'claude-desktop-NAME' symlink. Omit for default.
   --create-profile=NAME     Create profile NAME: installs user-local symlinks
                             (~/.local/bin/claude-desktop-NAME, ~/.local/lib/...)
-                            and a menu entry "Claude (NAME)". All profiles
-                            share one taskbar/Alt-Tab identity; the window
-                            title carries the profile name.
+                            and a menu entry "Claude (NAME)". The profile's
+                            windows get their own taskbar/Alt-Tab identity
+                            (com.anthropic.Claude-NAME) through that entry;
+                            the window title carries the profile name.
                             User data is not created until first launch.
   --delete-profile=NAME     Remove the entry points for profile NAME. User data
                             (~/.config/Claude-NAME, ~/.claude-NAME) is preserved.
@@ -2723,8 +3531,7 @@ esac
 # Auto-heal stale per-profile installs after package upgrades or NixOS rebuilds.
 # Also refresh ELECTRON_BIN if path discovery had to fall back to the canonical
 # (e.g. dangling per-profile from a moved Nix store path) - we want the next
-# launch step to use the freshly materialised per-profile binary so WM_CLASS /
-# Wayland app_id reflect the profile.
+# launch step to use the freshly materialised per-profile binary.
 # The AppImage never uses a per-profile binary (see _refresh_profile_binary_if_stale).
 if [[ -z "${_diagnose_requested:-}" && -n "$profile_suffix" && -z "${CLAUDE_APPIMAGE_PATH:-}" ]]; then
     _refresh_profile_binary_if_stale || true
@@ -2734,8 +3541,8 @@ if [[ -z "${_diagnose_requested:-}" && -n "$profile_suffix" && -z "${CLAUDE_APPI
     elif [[ "$ELECTRON_BIN" == "$_profile_bin" ]]; then
         # The per-profile binary was chosen during resolution but is not usable
         # now. Launching it would exec a path that is not there, so fall back to
-        # the canonical binary: the profile keeps its isolated state (window
-        # identity is com.anthropic.Claude either way).
+        # the canonical binary: the profile keeps its isolated state and its
+        # window identity (that follows the per-profile .desktop, not the binary).
         ELECTRON_BIN=''
         for candidate in "/usr/lib/claude-desktop/${APP_ID}" "/usr/lib/claude-desktop-bin/${APP_ID}"; do
             [[ -x "$candidate" ]] && { ELECTRON_BIN="$candidate"; break; }
@@ -2748,8 +3555,8 @@ if [[ -z "${_diagnose_requested:-}" && -n "$profile_suffix" && -z "${CLAUDE_APPI
 
     # Hint for --profile=NAME without --create-profile: state is isolated, but
     # there is no per-profile binary, menu entry or claude-desktop-NAME
-    # shortcut. (The window's WM_CLASS / Wayland app_id is com.anthropic.Claude
-    # for every profile regardless - it comes from the bundle's desktopName.)
+    # shortcut. (Without the per-profile .desktop file the window keeps the
+    # shared com.anthropic.Claude app_id / WM_CLASS; --create-profile writes it.)
     # Suppress with CLAUDE_PROFILE_QUIET=1.
     if [[ ! -e "$_profile_bin" && -z "${CLAUDE_PROFILE_QUIET:-}" ]]; then
         echo >&2 "claude-desktop: profile '$CLAUDE_PROFILE' has isolated state but no menu entry or claude-desktop-$CLAUDE_PROFILE shortcut."
@@ -2757,6 +3564,53 @@ if [[ -z "${_diagnose_requested:-}" && -n "$profile_suffix" && -z "${CLAUDE_APPI
         echo >&2 "    claude-desktop --create-profile=$CLAUDE_PROFILE"
         echo >&2 "  (suppress this message with CLAUDE_PROFILE_QUIET=1)"
     fi
+fi
+
+# Bring the launcher-written per-profile .desktop in step with the window
+# identity: a file made before the per-profile app_id existed still says
+# StartupWMClass=com.anthropic.Claude, which no longer matches the profile's
+# windows on X11. Rewrites only that line, only in the exact file --create-profile
+# writes (recognised by its Exec= carrying --profile=<this profile>), and never
+# creates a file. Pure bash on the common path (no process when nothing needs
+# changing); never fails the launch.
+_heal_profile_wmclass() {
+    local dir f line has_wm has_exec tmp cr
+    local seen=""
+    for dir in "$HOME/.local/share/applications" "${XDG_DATA_HOME:-}/applications"; do
+        [[ "$dir" == "/applications" || "$seen" == *"|$dir|"* ]] && continue
+        seen+="|$dir|"
+        f="$dir/${DESKTOP_ID}.desktop"
+        [[ -f "$f" && ! -L "$f" && -w "$f" ]] || continue
+        has_wm=""
+        has_exec=""
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            if [[ "$line" == StartupWMClass=* && "${line%$'\r'}" != "StartupWMClass=${DESKTOP_ID}" ]]; then has_wm=1; fi
+            [[ "$line" == Exec=*" --profile=${CLAUDE_PROFILE} "* || "$line" == Exec=*" --profile=${CLAUDE_PROFILE}" ]] && has_exec=1
+        done < "$f"
+        [[ -n "$has_wm" && -n "$has_exec" ]] || continue
+        tmp="$f.tmp.$$"
+        if { : > "$tmp"; } 2>/dev/null; then
+            while IFS= read -r line || [[ -n "$line" ]]; do
+                if [[ "$line" == StartupWMClass=* ]]; then
+                    cr=""
+                    [[ "$line" == *$'\r' ]] && cr=$'\r'
+                    printf 'StartupWMClass=%s%s\n' "${DESKTOP_ID}" "$cr"
+                else
+                    printf '%s\n' "$line"
+                fi
+            done < "$f" > "$tmp" 2>/dev/null || { rm -f "$tmp"; continue; }
+            chmod --reference="$f" "$tmp" 2>/dev/null || true
+            if mv -f "$tmp" "$f" 2>/dev/null; then
+                log "profile .desktop: StartupWMClass -> ${DESKTOP_ID} ($f)"
+            else
+                rm -f "$tmp"
+            fi
+        fi
+    done
+    return 0
+}
+if [[ -z "${_diagnose_requested:-}" && -n "$profile_suffix" && -z "${CLAUDE_APPIMAGE_PATH:-}" ]]; then
+    _heal_profile_wmclass || true
 fi
 
 # ---------------------------------------------------------------------------
