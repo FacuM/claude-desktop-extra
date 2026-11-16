@@ -49,12 +49,21 @@ linux/fix_computer_use_linux: \
   ../js/cu_session_check.js \
   ../js/cu_display_target.js \
   ../js/cu_consent.js \
+  ../js/cu_share_stop.js \
+  ../js/cu_wl_glow.js \
   ../js/executor_linux.js
 
 community/add_feature_auto_archive_grace: ../js/auto_archive_grace.js
 community/add_feature_auto_archive_grace_ion: ../js/auto_archive_grace_ui.js
+community/add_feature_auto_archive_grace_web: \
+  ../js/auto_archive_grace_web_main.js \
+  ../js/auto_archive_grace_web_page.js
+linux/fix_cowork_device_icon_web: \
+  ../js/cowork_device_icon_web_main.js \
+  ../js/cowork_device_icon_web_page.js
 
 community/add_feature_autofix_merge_ready: ../js/autofix_merge_ready.js
+community/add_feature_cu_escape_abort: ../js/cu_esc_watch.js
 
 community/add_feature_autofix_post_merge: ../js/autofix_post_merge.js
 community/add_feature_session_start_always_allow: ../js/session_start_permission.js
@@ -139,19 +148,27 @@ community/add_feature_transcript_limits: ../js/transcript_limits_main.js
 community/add_feature_transcript_limits_worker: ../js/transcript_limits_worker.js
 
 # Theme patch embeds the spinner-reshape installer (swaps the loading-star SVG
-# for the active theme's custom shape) and the bundled community + gaming palette
-# collections via staticRead.
+# for the active theme's custom shape), the animated SVG backdrop scenes +
+# injector, and the bundled community + gaming + scene palette collections via
+# staticRead.
 core/add_feature_custom_themes: \
   ../js/spinner_injector.js \
+  ../js/backdrop_scenes.js \
+  ../js/backdrop_injector.js \
   ../js/community_themes.json \
-  ../js/gaming_themes.json
+  ../js/gaming_themes.json \
+  ../js/scene_themes.json
 
-# Theme picker embeds its page + preload via staticRead.
-community/add_feature_theme_picker: ../js/theme_picker_page.html ../js/theme_picker_preload.js
+# Theme picker embeds its page + preload + backdrop scenes via staticRead.
+community/add_feature_theme_picker: \
+  ../js/theme_picker_page.html \
+  ../js/theme_picker_preload.js \
+  ../js/backdrop_scenes.js
 
 # Extra settings area: main-process half embeds the injected page script and its
 # stylesheet; the bridge half embeds the preload snippet.
 core/add_feature_extra_settings: \
+  ../js/sender_guard.js \
   ../js/extra_settings_main.js \
   ../js/extra_settings_page.js \
   ../js/extra_settings_page.css
@@ -161,6 +178,26 @@ core/add_feature_extra_settings_bridge: ../js/extra_settings_bridge.js
 # The flag catalog the Extra settings page renders is parsed out of this file's
 # .jsonc template at runtime.
 core/add_growthbook_overrides: ../js/growthbook_overrides.js
+
+core/fix_profile_app_identity: ../js/profile_app_identity.js
+
+core/add_tool_path_resolver: ../js/tool_path.js
+
+linux/fix_open_external_tool_path: ../js/open_external_tool_path.js
+
+community/add_feature_jira_tracker: \
+  ../js/jira_tracker_adf.js \
+  ../js/jira_tracker_client.js \
+  ../js/jira_tracker_store.js \
+  ../js/jira_tracker_prompt.js \
+  ../js/jira_tracker_send.js \
+  ../js/jira_tracker_view.js \
+  ../js/jira_tracker_main.js \
+  ../js/jira_tracker_page.html \
+  ../js/jira_tracker_page.js \
+  ../js/jira_tracker_preload.js \
+  ../js/jira_tracker_web_page.js
+
 
 clean:
 	@rm -rf $(BINS) .nimcache

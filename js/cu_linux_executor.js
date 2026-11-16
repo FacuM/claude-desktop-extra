@@ -4,15 +4,25 @@ var _cp=require("child_process"),_path=require("path"),_fs=require("fs"),_os=req
 // Run ydotool without a shell. Typed text and key names are model-supplied;
 // concatenating them into an execSync shell string would let $(...), backticks
 // etc. expand (JSON.stringify quoting is NOT shell quoting).
-function _ydotool(args){return _cp.execFileSync("ydotool",args,{encoding:"utf-8",timeout:15000})}
+function _ydotool(args){return _cp.execFileSync(_toolCmd("ydotool")||"ydotool",args,{encoding:"utf-8",timeout:15000})}
 // Launch a command detached without a shell, fire-and-forget (replaces the
 // old `setsid ... >/dev/null 2>&1` shell strings). stdio:"ignore" matches the
 // old /dev/null redirect — execFile would pipe+buffer instead and SIGTERM the
 // app once its lifetime output passed maxBuffer (setsid execs the app in
 // place, so the kill would hit the app itself). Spawn failures still surface
 // via the error event; unref() lets the child outlive us.
+// args[0] is a tool we pick (xdg-open for a URL or path), taken from the TOOL
+// PATH like setsid. Its env is the TOOL PATH too, never the APP PATH: xdg-open
+// runs xdg-mime, gio, kde-open, exo-open ... by bare name, and a URL is opened
+// with the PATH upstream's own shell.openExternal uses. Only when BOTH commands
+// are absolute does the spawn get an env of ours; a bare-name fallback (a tool
+// not found) inherits the narrowed env, exactly as before - a bare name next to
+// a wider PATH could pick a planted copy (see _envFor).
 function _launchDetached(args){
-  var c=_cp.spawn("setsid",args,{detached:true,stdio:"ignore"});
+  var a=args.slice(),o={detached:true,stdio:"ignore"},ss=_toolCmd("setsid"),x=_toolCmd(a[0]);
+  if(ss&&x&&ss.charAt(0)==="/"&&x.charAt(0)==="/"){a[0]=x;var te=_envFor("tool");if(te)o.env=te}
+  else ss="setsid";
+  var c=_cp.spawn(ss,a,o);
   c.on("error",function(err){globalThis.__cdbDiag("[claude-cu] detached launch failed ("+args.join(" ")+"): "+(err.message||err))});
   c.unref();
 }
@@ -32,7 +42,7 @@ function _gnomeBridgeBin(){return process.env.GNOME_PORTAL_BRIDGE_BIN||globalThi
 function _isWlrootsCovered(){return _tgt?_tgt.kind==="wlroots":_wayland&&_isWlroots()}
 function _isGnomeCovered(){return !_tgt&&_isGnomeWayland()}
 // ── Background display target (issue #300) ──
-// Settings -> Extra -> Computer Use -> "Computer Use on a background display" points
+// Settings -> Extra -> Cowork (Linux) -> "Computer Use on a background display" points
 // Computer Use at a second, invisible display (Xvfb/Xephyr -> x11-bridge,
 // headless/nested wlroots -> wlroots-bridge). globalThis.__cuTargetRead
 // (cu_mode_preamble.js) reads the setting; it is latched here at startup and on
@@ -44,7 +54,7 @@ function _isGnomeCovered(){return !_tgt&&_isGnomeWayland()}
 // ydotool, spectacle, desktopCapturer, GNOME portal session or host
 // clipboard - nothing ever falls back to the user's desktop.
 var _tgt=null;
-var _CU_TGT_OFF="turn off Settings -> Extra -> Computer Use -> Computer Use on a background display.";
+var _CU_TGT_OFF="turn off Settings -> Extra -> Cowork (Linux) -> Computer Use on a background display.";
 // Target clipboard. The Electron clipboard is the user's desktop clipboard and
 // is never touched in target mode; the target's own selection is read and
 // written with xclip (else xsel) on an x11 target, wl-copy / wl-paste on a
@@ -57,17 +67,19 @@ var CU_TGT_CLIP_MS=5000;
 var TGT_LAUNCH_MS=15000;
 function _tgtClip(write){
   if(_tgt.refuse)throw _tgtErr();
-  var x=_tgt.kind==="x11",t=x?(_execResolvable("xclip",null,true)?(write?["xclip",["-selection","clipboard","-in"]]:["xclip",["-selection","clipboard","-out"]]):_execResolvable("xsel",null,true)?(write?["xsel",["--clipboard","--input"]]:["xsel",["--clipboard","--output"]]):null)
-    :(_execResolvable(write?"wl-copy":"wl-paste",null,true)?(write?["wl-copy",[]]:["wl-paste",["--no-newline","--type","text"]]):null);
-  if(!t){var e=new Error("The clipboard tools need "+(x?"xclip or xsel":"wl-clipboard (wl-copy and wl-paste)")+" to use the clipboard of the background display "+_tgt.display+" - ask the user to install "+(x?"the xclip package":"the wl-clipboard package")+", or type the text instead.");e.__cdbSurface=!0;throw e}
+  // t = [command to spawn (absolute while upstream narrows PATH), args, tool name].
+  var x=_tgt.kind==="x11",c,t=null,wl=write?"wl-copy":"wl-paste";
+  if(x){if(c=_toolCmd("xclip",!0))t=[c,write?["-selection","clipboard","-in"]:["-selection","clipboard","-out"],"xclip"];else if(c=_toolCmd("xsel",!0))t=[c,write?["--clipboard","--input"]:["--clipboard","--output"],"xsel"]}
+  else if(c=_toolCmd(wl,!0))t=[c,write?[]:["--no-newline","--type","text"],wl];
+  if(!t){var e=new Error("The clipboard tools need "+(x?"xclip or xsel":"wl-clipboard (wl-copy and wl-paste)")+" to use the clipboard of the background display "+_tgt.display+" - ask the user to install "+(x?"the xclip package":"the wl-clipboard package")+", or type the text instead."+_toolIgnoredMsg(x?["xclip","xsel"]:[wl]));e.__cdbSurface=!0;throw e}
   return t;
 }
 function _tgtClipRead(){
   var t=_tgtClip(!1);
   return new Promise(function(resolve,reject){
-    _cp.execFile(t[0],t[1],{encoding:"utf-8",timeout:CU_TGT_CLIP_MS,maxBuffer:16*1024*1024,env:_tgt.env},function(err,out,se){
+    _cp.execFile(t[0],t[1],{encoding:"utf-8",timeout:CU_TGT_CLIP_MS,maxBuffer:16*1024*1024,env:_envFor("tool")},function(err,out,se){
       // An empty selection is not an error to the model.
-      if(err){if(/nothing is copied|no suitable type|no selection|not available|no clipboard/i.test(String(se||"")+String(err.message||"")))resolve("");else reject(new Error(t[0]+" failed: "+String(se||err.message||err).trim()));return}
+      if(err){if(/nothing is copied|no suitable type|no selection|not available|no clipboard/i.test(String(se||"")+String(err.message||"")))resolve("");else reject(new Error(t[2]+" failed: "+String(se||err.message||err).trim()));return}
       resolve(out||"");
     });
   });
@@ -78,7 +90,7 @@ function _tgtClipRead(){
 function _tgtClipWrite(text){
   var t=_tgtClip(!0);
   var p=_tgtClipSpawn(t,text);
-  if(t[0]!=="xsel")return p;
+  if(t[2]!=="xsel")return p;
   return p.then(function(){
     var n=0;
     function again(){return _tgtClipRead().then(function(v){if(v===String(text))return;if(++n>=XSEL_READBACK_TRIES)throw new Error("xsel did not take the clipboard of the background display within "+XSEL_READBACK_TRIES*100+" ms");return new Promise(function(r){setTimeout(r,100)}).then(again)})}
@@ -90,10 +102,10 @@ function _tgtClipSpawn(t,text){
   return new Promise(function(resolve,reject){
     var done=!1,c,tm;
     function fin(e){if(done)return;done=!0;clearTimeout(tm);if(e)reject(e);else resolve()}
-    try{c=_cp.spawn(t[0],t[1],{stdio:["pipe","ignore","ignore"],env:_tgt.env})}catch(se){fin(se);return}
-    tm=setTimeout(function(){try{c.kill("SIGKILL")}catch(ke){}fin(new Error(t[0]+" did not finish within "+CU_TGT_CLIP_MS/1000+" s"))},CU_TGT_CLIP_MS);
-    c.on("error",function(e){fin(new Error(t[0]+": "+(e.message||e)))});
-    c.on("exit",function(code){fin(code?new Error(t[0]+" exited with code "+code):null)});
+    try{c=_cp.spawn(t[0],t[1],{stdio:["pipe","ignore","ignore"],env:_envFor("tool")})}catch(se){fin(se);return}
+    tm=setTimeout(function(){try{c.kill("SIGKILL")}catch(ke){}fin(new Error(t[2]+" did not finish within "+CU_TGT_CLIP_MS/1000+" s"))},CU_TGT_CLIP_MS);
+    c.on("error",function(e){fin(new Error(t[2]+": "+(e.message||e)))});
+    c.on("exit",function(code){fin(code?new Error(t[2]+" exited with code "+code):null)});
     try{c.stdin.on("error",function(){});c.stdin.end(String(text))}catch(we){fin(we)}
   });
 }
@@ -102,7 +114,8 @@ function _tgtDownMsg(d){return"Computer Use is set to the background display "+(
 // toolkits pinned to the target's protocol - all unless the setting's env map
 // supplies the var. The map never carries PATH, CLAUDE_ELECTRON or LD_*
 // (validated by __cuTargetRead); the display var and XDG_SESSION_TYPE are
-// always the target's.
+// always the target's. PATH is set per spawn (_envFor): the APP PATH for the
+// app a launch starts, the TOOL PATH for the bridge and the clipboard tools.
 // x11 target: with WAYLAND_DISPLAY unset libwayland still connects to
 // $XDG_RUNTIME_DIR/wayland-0 - the user's desktop on most Wayland sessions -
 // and GTK3/GTK4 and Wayland-only apps opened there (measured: headless sway on
@@ -114,6 +127,159 @@ function _tgtDownMsg(d){return"Computer Use is set to the background display "+(
 // defence in depth. wlroots target: Electron < 38 defaults to X11 (and fails
 // with DISPLAY unset), so its hint is pinned to wayland; GTK/Qt follow
 // WAYLAND_DISPLAY already.
+// ── PATH: the app's vs. our own tools ──
+// Upstream (v4.23118) narrows process.env.PATH at startup to a fixed list of
+// system dirs (/usr/local/bin and /usr/local/sbin only when root-owned and
+// read-only, then /usr/bin:/bin:/usr/sbin:/sbin:/snap/bin:
+// /run/current-system/sw/bin:/run/current-system/profile/bin), stores it in
+// CLAUDE_DESKTOP_NARROWED_PATH and the PATH it was started with in
+// CLAUDE_DESKTOP_STARTED_PATH: a tool the app runs by itself must not come from
+// a folder the user - or anything running as the user - can write. Its remote
+// flag 1358805273 can put the started PATH back at run time, so everything
+// here reads the env per call, never at load. Two PATHs, by purpose:
+//   APP PATH (_startedPath / _lookupPath) - the app the model asked to open:
+//     its Exec argv[0], TryExec, the exe-identity index, and PATH in the env of
+//     that app and of the desktop launcher tool that resolves Exec= for us
+//     (gio, gtk-launch, ...). The started PATH, absolute entries only (a
+//     relative one would resolve against our cwd), narrowed dirs appended - what
+//     the desktop's own launcher uses, so a bare Exec= from a per-user profile
+//     (~/.local/bin, ~/.nix-profile/bin, /etc/profiles/per-user/<u>/bin)
+//     resolves again, on the desktop and on a background display alike.
+//   TOOL PATH (_toolCmd / _toolPath) - every helper WE choose to run (setsid,
+//     clipboard tools, gio, ydotool, ...): the narrowed dirs, then the started
+//     dirs that pass upstream's trust rule (_dirTrusted - which keeps the Nix
+//     store dirs of our NixOS wrapper). A helper is spawned by the absolute path
+//     found, so the PATH in the child's env never picks the binary.
+// Narrowing not in effect (an upstream without it, or the flag restored the
+// started PATH): process.env.PATH for both and tools by bare name, as before.
+//
+// The started PATH while upstream's narrowing is in effect, else null. Mirrors
+// upstream's own test: PATH still equal to the narrowed one.
+function _startedRaw(){
+  var s=process.env.CLAUDE_DESKTOP_STARTED_PATH,p=process.env.PATH;
+  return typeof s==="string"&&typeof p==="string"&&p===process.env.CLAUDE_DESKTOP_NARROWED_PATH&&s!==p?s:null;
+}
+function _absDirs(s){var out=[],seen={};String(s||"").split(":").forEach(function(d){if(d.charAt(0)==="/"&&!seen[d]){seen[d]=1;out.push(d)}});return out}
+// APP PATH; null when narrowing is not in effect.
+function _startedPath(){
+  var s=_startedRaw();if(s===null)return null;
+  var d=_absDirs(s+":"+process.env.PATH);return d.length?d.join(":"):null;
+}
+// The PATH an app lookup walks (the same PATH its spawn gets, so a lookup and
+// the spawn after it agree).
+function _lookupPath(){return _startedPath()||process.env.PATH||""}
+var _X_OK=(_fs.constants&&_fs.constants.X_OK)||1,_W_OK=(_fs.constants&&_fs.constants.W_OK)||2;
+function _xfile(c){try{_fs.accessSync(c,_X_OK);return!_fs.statSync(c).isDirectory()}catch(e){return!1}}
+// PATH walk with an X_OK check - the lookup execvp itself does. Relative
+// entries are skipped. Absolute path or null.
+function _walk(dirs,bin){for(var i=0;i<dirs.length;i++){if(dirs[i].charAt(0)!=="/")continue;var c=_path.join(dirs[i],bin);if(_xfile(c))return c}return null}
+// Upstream's trust rule for a dir (index.pre.js): lstat says directory, uid 0,
+// and a W_OK check fails with EACCES / EROFS. st: an lstat result in hand.
+function _trustRule(d,st){
+  try{st=st||_fs.lstatSync(d);if(!st.isDirectory()||st.uid!==0)return!1}catch(e){return!1}
+  try{_fs.accessSync(d,_W_OK);return!1}catch(e){return!!e&&(e.code==="EACCES"||e.code==="EROFS")}
+}
+// A started-PATH entry -> the real dir to take tools from, when the entry AS
+// WRITTEN is trustworthy all the way, else null. Walked component by component
+// from "/": every directory passed through must pass the rule, and every
+// symlink hop must be owned by root and sit in a directory that passed it - so
+// only root can change where the entry leads. /etc/profiles/per-user/<u>/bin
+// (root's link into /nix/store), /run/current-system/sw/bin and a Bazzite-style
+// /usr/local -> /var/usrlocal link pass; ~/.nix-profile/bin does not (the user
+// owns that link and the dir holding it, and repoints it with nix-env / nix
+// profile). Upstream judges only fixed system dirs (lstat, no symlinks); ours
+// can be anywhere, hence the whole chain, the real dir's ancestors included.
+function _chainReal(p){
+  if(!_trustRule("/"))return null;
+  var cur="/",q=p.split("/").filter(Boolean),hops=0;
+  while(q.length){
+    var n=q.shift();if(n===".")continue;
+    if(n===".."){cur=_path.dirname(cur);continue}
+    var nx=_path.join(cur,n),st;try{st=_fs.lstatSync(nx)}catch(e){return null}
+    if(st.isSymbolicLink()){
+      // cur, the dir holding the link, already passed the rule.
+      if(++hops>40||st.uid!==0)return null;
+      var t;try{t=String(_fs.readlinkSync(nx))}catch(e){return null}
+      if(t.charAt(0)==="/")cur="/";
+      q=t.split("/").filter(Boolean).concat(q);continue;
+    }
+    if(!_trustRule(nx,st))return null;
+    cur=nx;
+  }
+  return cur;
+}
+// Verdict cached per entry string: a trusted chain cannot change without root,
+// and an untrusted verdict can only be stale on the safe side. fresh (launch
+// pre-checks, the clipboard tools) walks the chain again, so a link repointed
+// since is seen. The tool lookups (_toolCmd) cache the real path found, not
+// the entry: a spawn never follows the entry's links again.
+var _dirTrust={};
+function _dirTrusted(d,fresh){
+  if(fresh||!Object.prototype.hasOwnProperty.call(_dirTrust,d))_dirTrust[d]=_chainReal(d);
+  return _dirTrust[d];
+}
+// TOOL PATH as a string (env PATH of the target's bridge / clipboard tools and
+// of URL opening): the narrowed dirs, then the trusted started dirs (real paths).
+function _toolPath(){
+  var s=_startedRaw(),P=process.env.PATH||"";if(s===null)return P;
+  var out=_absDirs(P);
+  _absDirs(s).forEach(function(d){if(out.indexOf(d)>=0)return;var r=_dirTrusted(d);if(r&&out.indexOf(r)<0)out.push(r)});
+  return out.join(":");
+}
+// A helper we run -> what to spawn: its absolute path while upstream narrows
+// PATH (narrowed dirs first, then trusted started dirs), its bare name when it
+// does not (as before), null when it is missing. A helper present only in a
+// started dir that fails the rule (~/.local/bin/wl-copy) is missing; that is
+// logged once per tool and named by _toolIgnoredMsg. Cached per (PATH, started
+// PATH, tool): a hit for good, a miss for MISS_TTL_MS only, so a tool
+// installed while the app runs is seen a few seconds later without a restart
+// (the old bare-name spawn saw it at once). fresh bypasses the cache (launch
+// pre-checks, the clipboard tools: seen at once).
+var MISS_TTL_MS=5000;
+var _toolCache={},_toolMissAt={},_toolIgn={},_toolSaid={};
+function _toolCmd(bin,fresh){
+  var s=_startedRaw(),P=process.env.PATH||"",ck=P+"\0"+(s===null?"":s)+"\0"+bin;
+  if(fresh)delete _toolCache[ck];
+  var c=_toolCache[ck];
+  if(c!==void 0&&(c!==null||Date.now()-_toolMissAt[ck]<MISS_TTL_MS))return c;
+  var r=null;
+  if(s===null)r=_walk(P.split(":"),bin)?bin:null;
+  else{
+    r=_walk(P.split(":"),bin);
+    var ign=null,sd=_absDirs(s);
+    for(var i=0;!r&&i<sd.length;i++){
+      if(!_xfile(_path.join(sd[i],bin)))continue;
+      var rd=_dirTrusted(sd[i],fresh);
+      if(rd&&_xfile(_path.join(rd,bin)))r=_path.join(rd,bin);else if(!ign)ign=sd[i];
+    }
+    if(r&&!_toolSaid[bin+"\0"+r]&&P.split(":").indexOf(_path.dirname(r))<0){_toolSaid[bin+"\0"+r]=1;globalThis.__cdbDiag("[claude-cu] tools: "+bin+" -> "+r+" (a root-owned read-only folder on the PATH Claude Desktop was started with)")}
+    if(r)delete _toolIgn[bin];
+    else if(ign){_toolIgn[bin]=ign;if(!_toolSaid[bin+"\0"+ign]){_toolSaid[bin+"\0"+ign]=1;globalThis.__cdbDiag("[claude-cu] tools: "+bin+" found only in "+ign+", a user-writable folder - ignored (Computer Use runs its own tools only from system folders)")}}
+  }
+  _toolCache[ck]=r;if(r===null)_toolMissAt[ck]=Date.now();return r;
+}
+// " (<tool> was found in <dir>, a user-writable folder, ...)" for the tools of
+// a "missing" message that were ignored, else "".
+function _toolIgnoredMsg(bins){
+  var o=[];bins.forEach(function(b){if(_toolIgn[b])o.push(b+" in "+_toolIgn[b])});
+  return o.length?" (found "+o.join(", ")+" - a user-writable folder, which Computer Use ignores for the tools it runs itself)":"";
+}
+// env option for a spawn: kind "app" -> APP PATH, "tool" -> TOOL PATH. Target
+// mode: the overlay; desktop: process.env. null = no env option (inherit):
+// desktop mode with no narrowing in effect, exactly as before. The overlay
+// itself is returned when its PATH is already the one wanted.
+// Invariant for every caller: a PATH wider than the narrowed one goes only to a
+// spawn whose own commands are absolute (_toolCmd while narrowing); the only
+// bare names resolved on the APP PATH are the app the user asked for (its Exec
+// argv[0]), $TERMINAL and COWORK_SCREENSHOT_CMD - commands the user named.
+function _envFor(kind){
+  var base=_tgt&&_tgt.env||null,s=_startedRaw(),P=s===null?process.env.PATH:kind==="app"?_startedPath():_toolPath();
+  if(!base&&s===null)return null;
+  if(base&&base.PATH===P)return base;
+  var e={},k,src=base||process.env;for(k in src)e[k]=src[k];
+  if(typeof P==="string")e.PATH=P;else delete e.PATH;
+  return e;
+}
 var _TGT_PIN={x11:{GDK_BACKEND:"x11",QT_QPA_PLATFORM:"xcb",SDL_VIDEODRIVER:"x11",ELECTRON_OZONE_PLATFORM_HINT:"x11",MOZ_ENABLE_WAYLAND:"0"},wlroots:{ELECTRON_OZONE_PLATFORM_HINT:"wayland"}};
 function _targetEnv(r){
   var e={},k,x=r.env||{},X=r.kind==="x11",own=X?"DISPLAY":"WAYLAND_DISPLAY",other=X?"WAYLAND_DISPLAY":"DISPLAY",pin=_TGT_PIN[r.kind];
@@ -131,7 +297,9 @@ function _targetEnv(r){
 // `env` key at all (inherit, exactly as before). With bin given, only the
 // target's own bridge gets it: ending a GNOME portal session left from a
 // desktop lock must still talk to the desktop.
-function _spo(o,bin){if(_tgt&&_tgt.env&&(bin===void 0||bin===_tgt.bin))o.env=_tgt.env;return o}
+// The bridges get the TOOL PATH: x11-bridge / wlroots-bridge can exec `ibus`
+// by name (zbus, for an ibus: bus address).
+function _spo(o,bin){if(_tgt&&_tgt.env&&(bin===void 0||bin===_tgt.bin))o.env=_envFor("tool");return o}
 function _tgtErr(){var e=new Error(_tgt.refuse);e.__cdbSurface=!0;return e}
 // The target's bridge: env override, else the preamble's verdict, else the
 // bundled copy (a switch turned on after startup was never probed there).
@@ -155,7 +323,7 @@ function _tgtLatch(why,keep){
   if(keep&&_tgtKey(r)===(prev?prev.key:""))return !1;
   if(_tgtKey(r)!==(prev?prev.key:""))_tgtGen++;
   _tgtResetShot(prev?prev.key:"",_tgtKey(r));
-  if(!r){_tgt=null;if(prev){_wlScreensInvalidate();_x11ScreensInvalidate();globalThis.__cdbDiag("[claude-cu] diagnostics: target=off - back on the desktop session ("+why+")")}return !!prev}
+  if(!r){_tgt=null;if(prev){_wlScreensInvalidate();_x11ScreensInvalidate();globalThis.__cdbDiag("[claude-cu] diagnostics: target=off - back on the desktop session ("+why+")");_cuAnnounceCheck("background display off");_cuCapChanged("background display off")}return !!prev}
   var t={kind:r.kind,display:r.display,bin:null,env:null,refuse:null,why:null,probe:null,key:_tgtKey(r)};
   if(r.invalid){t.why="invalid";t.refuse="Computer Use is set to a background display, but the setting is invalid: "+r.invalid+". Fix it, or "+_CU_TGT_OFF}
   else{
@@ -165,6 +333,8 @@ function _tgtLatch(why,keep){
   }
   _tgt=t;_wlScreensInvalidate();_x11ScreensInvalidate();
   globalThis.__cdbDiag("[claude-cu] diagnostics: target="+(r.invalid?"invalid ("+r.invalid+")":r.kind+" "+r.display+" via "+(t.bin||"(no bridge)")+(r.env&&Object.keys(r.env).length?" env+"+Object.keys(r.env).join(","):""))+" ("+why+")");
+  _cuAnnounceCheck("background display changed");
+  _cuCapChanged("background display changed");
   return !0;
 }
 // What follows a (re)latch: a GNOME portal session left from a desktop lock
@@ -236,14 +406,17 @@ function _tgtProbe(t){
   }).then(function(){if(t.probe===p)t.probe=null});
   return p;
 }
-try{var _virt=_cp.execFileSync("systemd-detect-virt",[],{encoding:"utf-8",timeout:3000,stdio:["ignore","pipe","ignore"]}).trim();globalThis.__isVM=_virt!=="none"&&_virt!==""}catch(e){globalThis.__isVM=!1}
+try{var _virt=_cp.execFileSync(_toolCmd("systemd-detect-virt")||"systemd-detect-virt",[],{encoding:"utf-8",timeout:3000,stdio:["ignore","pipe","ignore"]}).trim();globalThis.__isVM=_virt!=="none"&&_virt!==""}catch(e){globalThis.__isVM=!1}
 if(globalThis.__isVM)globalThis.__cdbDiag("[claude-cu] VM detected ("+_virt+") — teach overlay uses dark backdrop fallback");
+// Lookups are PATH walks (_walk), not `which`: it is not installed on every
+// system (minimal images), where every tool read as missing, and it cost one
+// blocking spawn per tool on the main process.
+// _hasCmd: a helper tool we run (TOOL PATH, see _toolCmd).
+function _hasCmd(bin){return!!_toolCmd(bin)}
+// An app's command on the APP PATH -> absolute path or null. Cached per
+// (APP PATH, name): the started PATH and ours can differ.
 var _cmdCache={};
-// PATH walk with an X_OK check - the lookup execvp itself does. `which` is not
-// installed on every system (minimal images), where every tool read as missing,
-// and it cost one blocking spawn per tool on the main process. Empty and
-// relative PATH entries are skipped: they would resolve against our cwd.
-function _hasCmd(bin){if(_cmdCache[bin]!==void 0)return _cmdCache[bin];var found=false,X=(_fs.constants&&_fs.constants.X_OK)||1,dirs=(process.env.PATH||"").split(":");for(var i=0;i<dirs.length&&!found;i++){if(dirs[i].charAt(0)!=="/")continue;var c=_path.join(dirs[i],bin);try{_fs.accessSync(c,X);found=!_fs.statSync(c).isDirectory()}catch(e){}}_cmdCache[bin]=found;return found}
+function _appWhich(b,fresh){var P=_lookupPath(),ck=P+"\0"+b;if(fresh)delete _cmdCache[ck];if(_cmdCache[ck]===void 0)_cmdCache[ck]=_walk(P.split(":"),b);return _cmdCache[ck]}
 // Application dirs per the XDG base-dir spec: $XDG_DATA_HOME (default
 // ~/.local/share) first, then each $XDG_DATA_DIRS entry (default
 // /usr/local/share:/usr/share - this is what carries NixOS profiles, snap and
@@ -384,10 +557,11 @@ function _entryBase(e){
   }
   return _WRAPPER_BINS[b]?e.dfn:b;
 }
-// fresh=true bypasses _hasCmd's permanent per-process cache (launch pre-checks:
-// an app or tool installed after the first attempt must launch without a restart).
+// An app's command (Exec argv[0], TryExec, $TERMINAL): a bare name on the APP
+// PATH. fresh=true bypasses the permanent per-process cache (launch pre-checks:
+// an app installed after the first attempt must launch without a restart).
 function _execResolvable(b,cwd,fresh){
-  if(b.indexOf("/")<0){if(fresh)delete _cmdCache[b];return _hasCmd(b)}
+  if(b.indexOf("/")<0)return!!_appWhich(b,fresh);
   var p=b.charAt(0)==="/"?b:_path.resolve(cwd||process.cwd(),b);
   try{_fs.accessSync(p,(_fs.constants&&_fs.constants.X_OK)||1);return!_fs.statSync(p).isDirectory()}catch(e){return false}
 }
@@ -450,7 +624,9 @@ function _readDesktopEntries(dirs){
 // resolves without a restart). Read-only and portal-free: safe outside the
 // Computer Use lock (enumeration side of the _gnomePortalCmds rule).
 var APP_IDX_TTL_MS=30000;
-var _appIdx=null,_appIdxAt=0;
+// _appIdxPath: the APP PATH it was built on (TryExec and the exe index resolve
+// there): a different one - narrowing put in place or lifted - rebuilds it.
+var _appIdx=null,_appIdxAt=0,_appIdxPath=null;
 var _GENERIC_EXE_RE=/^(?:electron\d*|python[\d.]*m?|pypy[\d.]*|java|node|nodejs|bun|deno|wine(?:64)?(?:-preloader)?|mono|perl[\d.]*|ruby[\d.]*|bwrap|apprun|flatpak-spawn|gjs|qemu-.*|ld-linux.*)$/i;
 function _genericExe(b){return !b||!!_WRAPPER_BINS[b]||_GENERIC_EXE_RE.test(b)}
 function _genericDir(d){
@@ -481,8 +657,9 @@ function _aclaim(map,k,r,rank){
 }
 // fresh=true rebuilds now (listInstalledApps: a TryExec installed mid-session counts at once).
 function _appIndex(fresh){
-  var now=Date.now();
-  if(!fresh&&_appIdx&&now-_appIdxAt<APP_IDX_TTL_MS)return _appIdx;
+  var now=Date.now(),lp=_lookupPath();
+  if(!fresh&&_appIdx&&now-_appIdxAt<APP_IDX_TTL_MS&&_appIdxPath===lp)return _appIdx;
+  _appIdxPath=lp;
   var ents=[];try{ents=_readDesktopEntries(_xdgAppDirs())}catch(e){}
   var keys=Object.create(null),byId=Object.create(null),list=[];
   for(var i=0;i<ents.length;i++){
@@ -528,17 +705,94 @@ function _appIndex(fresh){
     for(var y=0;y<list.length;y++){if(list[y].mergedInto)byId[_akey(list[y].id)]=list[y].mergedInto}
     list=list.filter(function(q){return !q.mergedInto});
   }
-  _appIdx={keys:keys,byId:byId,list:list,exe:null,words:null};_appIdxAt=now;
+  // Web apps and terminal apps (issue #329): their windows carry a class the
+  // entry does not declare as StartupWMClass.
+  var web=Object.create(null);
+  for(var wi=0;wi<list.length;wi++){
+    var wr=list[wi];
+    var wu=_aWebUrl(wr.e);
+    if(wu){wr.web=wu;_aWebNames(wu).forEach(function(n){_aclaim(web,n,wr,1)})}
+    var tc=_aTermApp(wr.e);
+    if(tc)wr.term=tc;
+  }
+  _appIdx={keys:keys,byId:byId,list:list,exe:null,words:null,web:web};_appIdxAt=now;
   return _appIdx;
+}
+// ── Web apps (Chromium-family --app=<url>) ──
+// A web-app entry starts a Chromium-family browser with --app=<url>, directly
+// or through a launcher script that passes its first argument on as
+// --app="$1" (Omarchy: Exec=omarchy-launch-webapp https://youtube.com/). Its
+// window's class is the browser's prefix, Chromium's app name for the URL
+// (host "_" path, characters not allowed in a file name as "_") and the
+// profile: chrome-youtube.com__-Default (measured on Hyprland 0.56.2,
+// Chromium; brave-, msedge-, vivaldi- ... the same way). The name comes from
+// the URL alone, so a web-app grant owns windows of that URL's app only -
+// never the browser's own windows or another site's app. Two entries for one
+// URL (or one URL with and without its trailing "_") are ambiguous and own
+// nothing.
+var _CR_APP_CLASS_RE=/^(?:chrome|chromium|brave|msedge|vivaldi|opera|helium|thorium)-(.+)-([^-]+)$/i;
+var _WEBAPP_WRAP_RE=/--app=("?)\$(?:1|\{1\})\1(?![\w}])/;
+// A launcher script (#!, at most 64 KiB) that passes its first argument as --app=.
+function _aWebWrapper(p){
+  try{
+    var st=_fs.statSync(p);if(!st.isFile()||st.size<3||st.size>65536)return !1;
+    var s=String(_fs.readFileSync(p,"utf8"));
+    return s.slice(0,2)==="#!"&&_WEBAPP_WRAP_RE.test(s);
+  }catch(e){return !1}
+}
+// Entry -> the http(s) URL it opens as an app window, or null.
+function _aWebUrl(e){
+  var a=e&&e.argv;if(!a)return null;
+  var pi=_entryProgIdx(a);if(pi<0)return null;
+  var u=null;
+  for(var i=pi+1;i<a.length&&!u;i++){var m=/^--app=(.+)$/.exec(a[i]);if(m)u=m[1]}
+  if(!u&&pi+1<a.length&&/^https?:\/\//i.test(a[pi+1])){var w=_aWhich(a[pi]);if(w&&_aWebWrapper(w))u=a[pi+1]}
+  if(!u)return null;
+  var p;try{p=new URL(u)}catch(er){return null}
+  return(p.protocol==="http:"||p.protocol==="https:")&&p.hostname?p:null;
+}
+// Chromium's app name for a URL as the window class carries it: as written,
+// and trimmed of "_" (both forms claimed; keys are case-insensitive).
+function _aWebNames(p){
+  var n=(p.hostname+"_"+p.pathname).replace(/[\u0000-\u001f\u007f"*\/:<>?\\|]/g,"_");
+  var t=n.replace(/^_+|_+$/g,"");
+  return(t&&t!==n?[n,t]:[n]).map(_akey);
+}
+// Window own id -> the web-app record, or null.
+function _aWebWin(idx,own){
+  for(var i=0;i<own.length;i++){var m=_CR_APP_CLASS_RE.exec(own[i]);if(m){var r=_alook(idx.web,_akey(m[1]));if(r)return r}}
+  return null;
+}
+// ── Terminal apps (explicit --app-id / --class) ──
+// A terminal-app entry starts a terminal with an explicit class and a command
+// (Omarchy: Exec=xdg-terminal-exec --app-id=TUI.float -e bash -c "dua i /").
+// Such an entry never owns a window: the class says nothing (every Omarchy
+// TUI shares TUI.float or TUI.tile), the terminal process's command line is
+// that of its first window (one process may serve several: foot --server,
+// single-instance terminals), its child is not the entry's argv (bash -c
+// "dua i /" execs dua), and a pid read now proves nothing about the window
+// a wlroots id named at capture time. The window keeps its terminal's id;
+// the entry's class only lets a refusal name the app that has a window of it
+// (_mkNoWindow).
+function _aTermApp(e){
+  var a=e&&e.argv;if(!a)return null;
+  var pi=_entryProgIdx(a);if(pi<0)return null;
+  var cls=null,ci=-1;
+  for(var i=pi+1;i<a.length;i++){
+    if(a[i]==="-e"||a[i]==="--"){ci=i;break}
+    var m=/^--(?:app-id|class)=(.+)$/.exec(a[i]);
+    if(m){cls=m[1];continue}
+    if((a[i]==="--app-id"||a[i]==="--class")&&i+1<a.length){cls=a[++i];continue}
+  }
+  if(!cls||ci<0||ci+1>=a.length)return null;
+  return{cls:cls};
 }
 function _alook(map,k){var c=k?map[k]:null;return c&&!c.amb?c.r:null}
 // Exact canonical id first, then any alias.
 function _arec(idx,raw){var k=_akey(raw);return k?(idx.byId[k]||_alook(idx.keys,k)):null}
 function _aWhich(b){
   if(b.indexOf("/")>=0)return b.charAt(0)==="/"?b:null;
-  var X=(_fs.constants&&_fs.constants.X_OK)||1,dirs=(process.env.PATH||"").split(":");
-  for(var i=0;i<dirs.length;i++){if(dirs[i].charAt(0)!=="/")continue;var c=_path.join(dirs[i],b);try{_fs.accessSync(c,X);if(!_fs.statSync(c).isDirectory())return c}catch(e){}}
-  return null;
+  return _walk(_lookupPath().split(":"),b);
 }
 function _aReal(p){try{return _fs.realpathSync(p)}catch(e){return p}}
 // Lazy: built only when a window needs the process tier.
@@ -588,6 +842,7 @@ function _aWin(w){
   if(w.pid===process.pid){var h=_hostId();return{id:h,rec:idx.byId[_akey(h)]||null,host:!0}}
   var own=_aOwnIds(w);
   for(i=0;i<own.length;i++){r=_arec(idx,own[i]);if(r)return{id:r.id,rec:r}}
+  r=_aWebWin(idx,own);if(r)return{id:r.id,rec:r};
   for(var p=w.transient_for,n=0;p&&typeof p==="object"&&n<8;p=p.transient_for,n++){var po=_aOwnIds(p);for(i=0;i<po.length;i++){r=_arec(idx,po[i]);if(r)return{id:r.id,rec:r}}}
   r=_aProc(idx,w.pid);if(r)return{id:r.id,rec:r};
   var raw=_aRawFirst(w);
@@ -657,25 +912,38 @@ function _spawnWait(cmd,args,opts,mode){
 // activatable ones included), then the optional desktop launcher tools for
 // entries with no/malformed Exec, Terminal=true, or a binary that would not
 // spawn. Throws a clear error when every tier is unavailable or fails.
+// Once per command: an app that resolves on the APP PATH only (not on the
+// narrowed PATH upstream leaves in process.env), so claude-patches.log shows
+// which PATH a launch took.
+var _appPathSaid={};
+function _appPathNote(b){
+  if(b.indexOf("/")>=0||_startedRaw()===null||_appPathSaid[b]||_walk((process.env.PATH||"").split(":"),b))return;
+  _appPathSaid[b]=1;globalThis.__cdbDiag("[claude-cu] openApp: "+b+" -> "+_appWhich(b)+" (found on the PATH Claude Desktop was started with, not on the narrowed one)");
+}
 async function _launchEntry(e,label){
   var reasons=[],cwd=e.path||null,SO={detached:true,stdio:"ignore"};
   // Target mode: the direct Exec spawn only, in the target's environment. The
   // desktop launcher tools (gio, gtk-launch, kioclient, exo-open, terminals)
   // hand the launch to the user's desktop session and are never tried.
-  if(_tgt)SO.env=_tgt.env;
-  function _has(b){return _execResolvable(b,null,true)}
+  // AE: the app's env (APP PATH; the overlay in target mode), null = inherit.
+  // setsid and the launcher tools are ours: TOOL PATH, absolute (_toolCmd);
+  // setsid then finds the app on the APP PATH of AE.
+  var AE=_envFor("app");
+  if(AE)SO.env=AE;
+  function _has(b){return _toolCmd(b,true)}
   var cwdBad=false;
   if(cwd){
     try{cwdBad=!_fs.statSync(cwd).isDirectory()}catch(ce){cwdBad=true}
     if(cwdBad)cwd=null;else SO.cwd=cwd;
   }
   if(e.argv&&!e.terminal){
-    var cmd,args;
-    if(_has("setsid")){cmd="setsid";args=e.argv.slice()}else{cmd=e.argv[0];args=e.argv.slice(1)}
+    var cmd,args,ss=_has("setsid");
+    if(ss){cmd=ss;args=e.argv.slice()}else{cmd=e.argv[0];args=e.argv.slice(1)}
     globalThis.__cdbDiag("[claude-cu] openApp: launching argv "+JSON.stringify([cmd].concat(args))+(cwd?" cwd="+cwd:""));
     if(cwdBad)reasons.push("working directory "+e.path+" not usable");
     else if(!_execResolvable(e.argv[0],cwd,true))reasons.push(e.argv[0]+": command not found");
     else{
+      _appPathNote(e.argv[0]);
       var r=await _spawnWait(cmd,args,SO,"direct");
       if(r.ok)return{via:"direct",pid:r.pid};
       reasons.push(r.reason);
@@ -683,17 +951,18 @@ async function _launchEntry(e,label){
   }else reasons.push(e.terminal?"Terminal=true":e.malformed?"malformed Exec":"no Exec");
   if(_tgt)throw new Error("Could not launch "+label+" on the background display "+_tgt.display+": "+reasons.join("; ")+" (only a plain Exec line can start there; desktop launcher tools would open it on the user's desktop).");
   globalThis.__cdbDiag("[claude-cu] openApp: "+e.name+" ("+reasons[0]+") - trying desktop launcher tools");
-  var tiers=[];
-  if(_has("gio"))tiers.push(["gio",["launch",e.file],"tool"]);
-  if(_has("gtk-launch"))tiers.push(["gtk-launch",[e.dfn],"tool"]);
-  var kio=_has("kioclient6")?"kioclient6":_has("kioclient5")?"kioclient5":"";
+  var tiers=[],tc0;
+  if(tc0=_has("gio"))tiers.push([tc0,["launch",e.file],"tool"]);
+  if(tc0=_has("gtk-launch"))tiers.push([tc0,[e.dfn],"tool"]);
+  var kio=_has("kioclient6")||_has("kioclient5");
   if(kio)tiers.push([kio,["exec",e.file],"tool"]);
-  if(_has("exo-open"))tiers.push(["exo-open",[e.file],"tool"]);
+  if(tc0=_has("exo-open"))tiers.push([tc0,[e.file],"tool"]);
   if(e.terminal&&e.argv){
-    if(_has("xdg-terminal-exec"))tiers.push(["xdg-terminal-exec",e.argv.slice(),"term"]);
-    if(_has("x-terminal-emulator"))tiers.push(["x-terminal-emulator",["-e"].concat(e.argv),"term"]);
+    if(tc0=_has("xdg-terminal-exec"))tiers.push([tc0,e.argv.slice(),"term"]);
+    if(tc0=_has("x-terminal-emulator"))tiers.push([tc0,["-e"].concat(e.argv),"term"]);
     // $TERMINAL may carry arguments ("kitty --single-instance"): split on
-    // whitespace into argv (no shell, no quote handling).
+    // whitespace into argv (no shell, no quote handling). A command the user
+    // named: looked up on the APP PATH and spawned by name with AE.
     var tt=(process.env.TERMINAL||"").trim();
     if(tt){
       var tp=tt.split(/\s+/);
@@ -705,10 +974,16 @@ async function _launchEntry(e,label){
       }
     }
   }
-  if(!tiers.length)reasons.push("no desktop launcher tool found (gio, gtk-launch, kioclient, exo-open)");
+  if(!tiers.length)reasons.push("no desktop launcher tool found (gio, gtk-launch, kioclient, exo-open)"+_toolIgnoredMsg(["gio","gtk-launch","kioclient6","kioclient5","exo-open"]));
   for(var t=0;t<tiers.length;t++){
     var tc=tiers[t],to={detached:true,stdio:"ignore"};
     if(tc[2]==="term"&&cwd)to.cwd=cwd;
+    // The tool resolves the app's Exec= (or runs its argv) itself, exactly as
+    // the user's own launcher does: it needs the APP PATH. The tool itself is
+    // absolute (_toolCmd; tiers hold only tools that were found). URL opening
+    // (_launchDetached) differs: xdg-open picks helper tools by name, not an
+    // app the user asked for, so it keeps the TOOL PATH.
+    if(AE)to.env=AE;
     globalThis.__cdbDiag("[claude-cu] openApp: launching argv "+JSON.stringify([tc[0]].concat(tc[1])));
     var tr=await _spawnWait(tc[0],tc[1],to,tc[2]==="term"?"direct":"tool");
     if(tr.ok)return{via:tc[0]};
@@ -717,8 +992,13 @@ async function _launchEntry(e,label){
   throw new Error("Could not launch "+label+": "+reasons.join("; "));
 }
 function _desktopId(){return(process.env.XDG_CURRENT_DESKTOP||"").toLowerCase()}
-var _ydotoolOk=null;
-function _checkYdotool(){if(_tgt)return false;if(_ydotoolOk!==null)return _ydotoolOk;if(!_hasCmd("ydotool")){_ydotoolOk=false;return false}try{_cp.execFileSync("pgrep",["-x","ydotoold"],{timeout:2000,stdio:"pipe"});_ydotoolOk=true}catch(e){var sock=(process.env.YDOTOOL_SOCKET||"")||((process.env.XDG_RUNTIME_DIR||"/tmp")+"/.ydotool_socket");try{_fs.accessSync(sock);_ydotoolOk=true}catch(se){globalThis.__cdbDiag("[claude-cu] ydotool found but ydotoold not running — falling back to x11-bridge (XWayland)");_ydotoolOk=false}}return _ydotoolOk}
+// ydotool usable (installed, and ydotoold running or its socket present). Like
+// _toolCmd: true is kept for good, false for MISS_TTL_MS only, so installing
+// ydotool or starting ydotoold while the app runs is seen a few seconds later
+// without a restart. Re-checked only when a caller asks (at most one pgrep per
+// MISS_TTL_MS), never on a timer.
+var _ydotoolOk=null,_ydotoolNoAt=0,_ydotoolSaid=!1;
+function _checkYdotool(){if(_tgt)return false;if(_ydotoolOk===true||_ydotoolOk===false&&Date.now()-_ydotoolNoAt<MISS_TTL_MS)return _ydotoolOk;_ydotoolOk=false;if(_hasCmd("ydotool")){try{_cp.execFileSync(_toolCmd("pgrep")||"pgrep",["-x","ydotoold"],{timeout:2000,stdio:"pipe"});_ydotoolOk=true}catch(e){var sock=(process.env.YDOTOOL_SOCKET||"")||((process.env.XDG_RUNTIME_DIR||"/tmp")+"/.ydotool_socket");try{_fs.accessSync(sock);_ydotoolOk=true}catch(se){if(!_ydotoolSaid){_ydotoolSaid=!0;globalThis.__cdbDiag("[claude-cu] ydotool found but ydotoold not running - falling back to x11-bridge (XWayland)")}}}}_ydotoolNoAt=Date.now();return _ydotoolOk}
 // ── x11-bridge: first-party X11/XWayland backend (replaces xdotool/scrot/import/wmctrl) ──
 // The binary is resolved in cu_mode_preamble.js into globalThis.__cuX11BridgeBin.
 function _x11BridgeBin(){if(_tgt)return _tgt.kind==="x11"?_tgt.bin:null;return process.env.X11_BRIDGE_BIN||globalThis.__cuX11BridgeBin}
@@ -738,13 +1018,62 @@ function _parseBridgeJson(label,out){
     throw new Error(label+" returned non-JSON output: "+preview);
   }
 }
-function _x11Bridge(args){
+function _x11Bridge(args,timeoutMs){
   if(_tgt&&_tgt.refuse)throw _tgtErr();
   var bin=_x11BridgeBin();
   if(!bin)throw new Error(_bridgeWhy("x11-bridge","X11_BRIDGE_BIN"));
-  var res=_cp.execFileSync(bin,args,_spo({encoding:"utf-8",timeout:15000,maxBuffer:16*1024*1024},bin));
+  var res=_cp.execFileSync(bin,args,_spo({encoding:"utf-8",timeout:timeoutMs||15000,maxBuffer:16*1024*1024},bin));
   var out=res.trim();
   return out?_parseBridgeJson("x11-bridge",out):null;
+}
+// x11-bridge `type` timeout, scaled with the text instead of a flat 15 s: 5 s
+// (spawn, keymap lock, Chrome's keymap wait) + the bridge's 12 ms per
+// character plus 3 ms of X round trips, + 0.3 s per 30 non-ASCII characters
+// (characters off the layout are typed on spare keycodes bound in pages of
+// about 30, each bound and settled; non-ASCII is the upper bound we can tell
+// without the layout). Never below the old 15 s.
+function _x11TypeMs(t){
+  var cps=Array.from(String(t)),off=0;
+  for(var i=0;i<cps.length;i++)if(cps[i].codePointAt(0)>127)off++;
+  return Math.max(15000,5000+cps.length*15+Math.ceil(off/30)*300);
+}
+// An x11-bridge `type` stopped early prints {action:"type", text, charCount,
+// interrupted:true, reason:"signal"|"keymapChanged"} on stdout and exits 1
+// (charCount = code points typed from the start of text). -> that object when
+// err carries it for exactly this text, else null (an older bridge, a second
+// bridge that could not get the keymap lock: stderr only, nothing typed).
+function _x11TypeStop(err,text){
+  var o=null;try{o=JSON.parse(String(err&&err.stdout||"").trim())}catch(e){return null}
+  if(!o||o.action!=="type"||o.interrupted!==!0||typeof o.charCount!=="number"||!Number.isInteger(o.charCount)||o.charCount<0)return null;
+  if(typeof o.text==="string"&&o.text!==text)return null;
+  return o;
+}
+// Type text through x11-bridge, resuming after an interruption instead of
+// typing all of it again: our own timeout (SIGTERM from execFileSync,
+// err.code ETIMEDOUT) or a keyboard layout change mid-text (reason
+// keymapChanged; a fresh run reads the new layout). Only the rest is typed
+// (Array.from(text).slice(charCount)), at most 3 times, and only while each
+// run makes progress; otherwise the bridge's error is thrown as before. A
+// signal from anyone else (the app quitting) is never resumed. An older
+// bridge without the interrupted result behaves exactly as before.
+var X11_TYPE_RESUMES=3;
+function _x11Type(text){
+  var rest=String(text),done=0,total=Array.from(rest).length;
+  for(var tries=0;;tries++){
+    try{_x11Bridge(["type","--text",rest],_x11TypeMs(rest));return}
+    catch(err){
+      var st=_x11TypeStop(err,rest),ours=st&&(st.reason==="keymapChanged"||err&&err.code==="ETIMEDOUT");
+      var cps=Array.from(rest);
+      if(!ours||tries>=X11_TYPE_RESUMES||st.charCount<=0||st.charCount>cps.length){
+        if(st)globalThis.__cdbDiag("[claude-cu] x11-bridge type: stopped after "+(done+st.charCount)+" of "+total+" characters ("+(st.reason||"?")+(err&&err.code==="ETIMEDOUT"?", timeout":"")+") - not resumed"+(st.charCount<=0?" (no progress)":tries>=X11_TYPE_RESUMES?" (resume limit)":ours?"":" (not our stop)"));
+        throw err;
+      }
+      done+=st.charCount;
+      if(st.charCount===cps.length)return;
+      rest=cps.slice(st.charCount).join("");
+      globalThis.__cdbDiag("[claude-cu] x11-bridge type: stopped after "+done+" of "+total+" characters ("+(st.reason||"?")+(err.code==="ETIMEDOUT"?", timeout":"")+") - typing the remaining "+(total-done));
+    }
+  }
 }
 // Async twin of _x11Bridge. The SCREENSHOT path is async end to end (issue
 // #232) - a hung bridge there must never block the Electron main process.
@@ -763,6 +1092,19 @@ function _x11BridgeAsync(args,timeoutMs){
 // timeout once per window, not per shot, and a bridge that recovers is used.
 var _x11ScreensCache=null,_x11ScreensRetryAt=0,_x11ScreensGen=0;
 function _x11ScreensInvalidate(){_x11ScreensCache=null;_x11ScreensGen++;_x11ScreensRetryAt=0}
+// Electron knows a layout change at once; the cached list does not. Armed on
+// the first successful enumeration (a tool call, so the app is ready), once.
+// Not in target mode: the cache then holds the background display's monitors.
+var _x11HotplugArmed=!1;
+function _x11HotplugArm(){
+  if(_x11HotplugArmed)return;
+  try{
+    var sc=_electron.screen;if(!sc||typeof sc.on!=="function")return;
+    var f=function(){if(!_tgt&&_x11ScreensCache!==null)_x11ScreensInvalidate()};
+    sc.on("display-added",f);sc.on("display-removed",f);sc.on("display-metrics-changed",f);
+    _x11HotplugArmed=!0;
+  }catch(e){}
+}
 async function _x11BridgeScreens(){
   if(_x11ScreensCache!==null)return _x11ScreensCache;
   if(Date.now()<_x11ScreensRetryAt)return [];
@@ -770,6 +1112,7 @@ async function _x11BridgeScreens(){
   try{s=await _x11BridgeAsync(["screens"],SCREENS_TIMEOUT_MS);if(!Array.isArray(s)||!s.length)why="no monitors in the answer"}catch(e){why=e.message||String(e)}
   if(gen!==_x11ScreensGen)return why?[]:s;
   if(why){globalThis.__cdbDiag("[claude-cu] x11-bridge screens failed: "+why+" - retrying in "+Math.round(SCREENS_RETRY_MS/1000)+"s");_x11ScreensRetryAt=Date.now()+SCREENS_RETRY_MS;return []}
+  _x11HotplugArm();
   return _x11ScreensCache=s;
 }
 // A zoom whose --display names a monitor the bridge no longer has: every bridge
@@ -851,13 +1194,51 @@ function _bridge(bin,args,timeoutMs){
 // error; label names the bridge in the parse error.
 function _execFileAsync(label,bin,args,timeoutMs){
   return new Promise(function(resolve,reject){
-    _cp.execFile(bin,args,_spo({encoding:"utf-8",timeout:timeoutMs||15000,maxBuffer:16*1024*1024},bin),function(err,stdout){
+    var kid=null,cap=_capKidSubs[args&&args[0]]===1;
+    kid=_cp.execFile(bin,args,_spo({encoding:"utf-8",timeout:timeoutMs||15000,maxBuffer:16*1024*1024},bin),function(err,stdout){
+      if(kid&&cap)_capKids.delete(kid);
       if(err){reject(_cuNotSharedError(err));return}
       var out=(stdout||"").trim();
       try{resolve(out?_parseBridgeJson(label,out):null)}catch(pe){reject(pe)}
     });
+    if(kid&&cap&&typeof kid.kill==="function")_capKids.add(kid);
   });
 }
+// ── Captures in flight across a lock release ──
+// _capLockGen counts lock transitions (__setLockHeld). A capture remembers it
+// at its start: a retry only runs while it is unchanged, and the async bridge
+// processes of a capture (zoom / screenshot) still running when the lock is
+// released are ended then (_capKillPending), so a turn that is over leaves no
+// bridge process behind. The covered Wayland sessions never reach the
+// desktopCapturer tier (its portal picker is a desktop dialog nobody could
+// cancel); on the uncovered Wayland rows it is the only capture path and a
+// pending getSources() cannot be cancelled by Electron.
+var _capLockGen=0,_capKids=new Set(),_capKidSubs={"zoom":1,"screenshot":1},_capFails=0;
+function _capCancelled(){return _capSurface("Screenshot cancelled: the Computer Use turn ended while it was being taken.")}
+function _capKillPending(why){
+  if(!_capKids.size)return;
+  var n=0;_capKids.forEach(function(k){try{k.kill("SIGTERM");n++}catch(e){}});_capKids.clear();
+  globalThis.__cdbDiag("[claude-cu] "+n+" capture(s) still running at "+why+" - ended");
+}
+// A bridge capture failure worth one more try: the bridge answered that a
+// frame did not arrive in time (its own wait, not our process timeout). Not a
+// process timeout or a kill (the budget is spent, or the lock was released),
+// not an instruction for the model.
+function _capRetryable(e){
+  if(!e||typeof e!=="object")return !1;
+  if(e.__cdbNotShared||e.__cdbSurface||e.__cdbStoppedByUser||e.__cdbNoSession)return !1;
+  if(e.code==="ETIMEDOUT"||e.killed===!0||e.signal)return !1;
+  return /timed out waiting for (?:a )?(?:PipeWire )?frame/i.test(String(e.stderr||"")+"\n"+String(e.message||""));
+}
+// The bridge's own reason, one line: its last non-empty stderr/message line.
+function _capShort(e){
+  if(!e)return"the bridge returned no image";
+  if(e.killed===!0||e.code==="ETIMEDOUT")return"the bridge did not answer in time";
+  var s=String(e.stderr||e.message||e).split("\n").map(function(l){return l.trim()}).filter(function(l){return l&&!/^Command failed:/.test(l)});
+  var t=s.length?s[s.length-1]:String(e.message||e);
+  return t.length>200?t.slice(0,197)+"...":t;
+}
+function _capSurface(msg){var e=new Error(msg);e.__cdbSurface=!0;return e}
 // Async, non-blocking variant of _bridge. Used ONLY for the GNOME portal
 // session lifecycle (session-start/session-end), because session-start blocks
 // on the XDG RemoteDesktop consent dialog for up to timeoutMs — a synchronous
@@ -905,7 +1286,7 @@ function _gnomePortalMarkDown(why){
 }
 function _gnomePortalClearDown(){_gnomePortalDownUntil=0}
 function _gnomePortalDownError(){
-  return new Error("gnome-portal-bridge portal session unavailable - session-start failed within the last "+Math.round(GNOME_PORTAL_COOLDOWN_MS/1000)+"s, so Computer Use input/capture cannot run on this GNOME Wayland session. Run `"+(_gnomeBridgeBin()||"gnome-portal-bridge")+" session-start` in a terminal to see why, and check ~/.config/Claude/logs/claude-patches.log.");
+  return Object.assign(new Error("gnome-portal-bridge portal session unavailable - session-start failed within the last "+Math.round(GNOME_PORTAL_COOLDOWN_MS/1000)+"s, so Computer Use input/capture cannot run on this GNOME Wayland session. Run `"+(_gnomeBridgeBin()||"gnome-portal-bridge")+" session-start` in a terminal to see why, and check ~/.config/Claude/logs/claude-patches.log."),{__cdbPortalDown:!0});
 }
 // Return {bin, name, timeout} for the active covered Wayland session, or null.
 function _wlBridge(){
@@ -982,7 +1363,35 @@ function _gnomeLatchStopped(why){
   _gnomeStoppedByUser=!0;_gnomeSessionActive=!1;_gnomeDaemonMayExist=!0;_gnomeMouseHeld=!1;_wlScreensInvalidate();
   globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge: screen sharing was stopped ("+why+"); no new session until the task ends or "+Math.round(CU_PORTAL_IDLE_MS/1000)+" s pass without Computer Use actions");
   _gnomeIdleArm();_gnomeCheckArm();
+  _gnomeShareEnded(why);
 }
+// STOP SHARING = ABORT THE TURN (maintainer ruling 2026-11-10). The latch alone
+// only refused the NEXT action; the turn kept going until the model tried one.
+// Upstream's own "user stopped sharing" abort (globalThis.__cdbCuShareEnded,
+// sub-patch 17c; it stops the lock holder and every app-mode holder, as its
+// Escape does) runs once per lock hold and once per task within a hold (cloud
+// Cowork holds one lock across tasks): the watch below and a command's exit 5
+// both end up here.
+var _gnomeShareFireArmed=!0;
+function _gnomeShareEnded(why){
+  if(!_gnomeShareFireArmed)return;
+  _gnomeShareFireArmed=!1;
+  var s=globalThis.__cdbCuShareStop;
+  if(s&&typeof s.fire==="function")s.fire("gnome-portal-bridge",why);
+}
+// The daemon writes the stopped-by-user marker and exits; it is a setsid'd
+// grandchild (session-start returns once it is ready), so there is no exit
+// event of ours to wait for: watch its runtime dir (js/cu_share_stop.js) from
+// the moment a session is up until it ends.
+var _gnomeShareWatch=null;
+function _gnomeShareWatchArm(){
+  if(_gnomeShareWatch)return;
+  var s=globalThis.__cdbCuShareStop;if(!s||typeof s.watch!=="function")return;
+  _gnomeShareWatch=s.watch("gnome-portal-bridge",function(){
+    if(_gnomeSessionActive&&!_gnomeSessionEnding&&!_gnomeStoppedByUser&&_gnomeStoppedMarker())_gnomeMarkStopped("stopped-by-user marker appeared");
+  });
+}
+function _gnomeShareWatchClose(){if(_gnomeShareWatch){_gnomeShareWatch.close();_gnomeShareWatch=null}}
 // A portal COMMAND answered exit 5: latch and return the error for the model.
 // Not while a start or an end is in flight: those own the flags (a marker left
 // from before this lock's session-start is that start's to remove), so the
@@ -1104,6 +1513,9 @@ var _gnomePortalCmds={"zoom":1,"screenshot":1,"pointer-move":1,"pointer-click":1
 function _wlBridgeCall(args){
   if(_tgt&&_tgt.refuse)throw _tgtErr();
   var b=_wlBridge();if(!b)throw new Error("no covered Wayland bridge available");
+  // The glow overlay's debug trace (CDB_CU_DEBUG=1, js/cu_wl_glow.js): the real
+  // pointer commands, on the overlay commands' clock. A flag check when off.
+  if(!_tgt&&/^(?:pointer-|left-mouse-)/.test(args[0])){try{var _wg=globalThis.__cdbCuWlGlow;if(_wg&&typeof _wg.input==="function")_wg.input(args)}catch(ge){}}
   if(b.name==="gnome-portal-bridge")_gnomeCheckTouch();
   var portalCmd=b.name==="gnome-portal-bridge"&&_gnomePortalCmds[args[0]]===1;
   // A portal command with no portal session behind it can only fail. Running it
@@ -1139,23 +1551,34 @@ function _wlBridgeCall(args){
 // ASYNC twin of _wlBridgeCall, used by the screenshot path (issue #232). Same
 // portal rules, but it AWAITS the async session ensure instead of running the
 // blocking sync backstop, so a hung portal cannot freeze the main process.
-async function _wlBridgeCallAsync(args,timeoutOverrideMs){
+// The portal session a gnome-portal-bridge portal command needs. This path can
+// await the consent dialog, so a vanished daemon is simply replaced here (one
+// dialog, full budget) instead of failing the call - unless the user stopped
+// sharing, which is never undone behind their back. A capture runs it BEFORE
+// it hides the overlay (_captureRegion), so nothing slow sits between the
+// hide's ack and the capture (gnome-portal-bridge DESIGN.md "Capture
+// freshness"); the call then only checks the state (prepped).
+async function _gnomePortalPrep(cmd){
+  _gnomeCmdSeen(cmd);
+  if(_gnomeStoppedCheck())throw _gnomeStoppedError();
+  if(_gnomeSessionActive&&_gnomeDaemonGone())_gnomeSessionLost("no session daemon");
+  if(!_gnomeSessionActive&&_gnomePortalDown())throw _gnomePortalDownError();
+  await _gnomeEnsureSession();
+  if(_gnomeStoppedByUser)throw _gnomeStoppedError();
+  if(!_gnomeSessionActive)throw _gnomePortalDownError();
+}
+// prepped: the caller ran _gnomePortalPrep just before (a capture, ahead of
+// its hide): only the cheap state checks run here, never a session start.
+async function _wlBridgeCallAsync(args,timeoutOverrideMs,prepped){
   if(_tgt&&_tgt.refuse)throw _tgtErr();
   var b=_wlBridge();if(!b)throw new Error("no covered Wayland bridge available");
   if(b.name==="gnome-portal-bridge")_gnomeCheckTouch();
   var portalCmd=b.name==="gnome-portal-bridge"&&_gnomePortalCmds[args[0]]===1;
-  if(portalCmd){
-    // This path can await the consent dialog, so a vanished daemon is simply
-    // replaced here (one dialog, full budget) instead of failing the call -
-    // unless the user stopped sharing, which is never undone behind their back.
+  if(portalCmd&&prepped===!0){
     _gnomeCmdSeen(args[0]);
     if(_gnomeStoppedCheck())throw _gnomeStoppedError();
-    if(_gnomeSessionActive&&_gnomeDaemonGone())_gnomeSessionLost("no session daemon");
-    if(!_gnomeSessionActive&&_gnomePortalDown())throw _gnomePortalDownError();
-    await _gnomeEnsureSession();
-    if(_gnomeStoppedByUser)throw _gnomeStoppedError();
     if(!_gnomeSessionActive)throw _gnomePortalDownError();
-  }
+  }else if(portalCmd)await _gnomePortalPrep(args[0]);
   var t=timeoutOverrideMs||(b.name==="gnome-portal-bridge"&&!portalCmd?15000:b.timeout);
   var ok=!1,query=b.name==="gnome-portal-bridge"&&!portalCmd;
   if(portalCmd)_gnomeCmdBegin();
@@ -1189,9 +1612,9 @@ function _gnomeEnsureSessionSync(){
   var bin=_gnomeBridgeBin();if(!bin)return !1;
   if(!_gnomeExitHooked){_gnomeExitHooked=!0;process.once("exit",function(){if(_gnomeSessionActive||_gnomeDaemonMayExist){try{_cp.execFileSync(_gnomeBridgeBin(),["session-end"],{timeout:5000,stdio:"ignore"})}catch(e){}}})}
   _gnomeDaemonMayExist=!0;
-  try{_bridge(bin,["session-start"],GNOME_SYNC_START_MS);_gnomeSessionActive=!0;_gnomePortalClearDown();_wlScreensInvalidate();_gnomeIdleArm();_gnomeCheckArm();globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session started (sync backstop)");return !0}
+  try{_bridge(bin,["session-start"],GNOME_SYNC_START_MS);_gnomeSessionActive=!0;_gnomePortalClearDown();_wlScreensInvalidate();_gnomeIdleArm();_gnomeCheckArm();_gnomeShareWatchArm();globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session started (sync backstop)");return !0}
   catch(e){
-    if(_gnomeAlreadyActive(e)){_gnomeSessionActive=!0;_gnomePortalClearDown();_wlScreensInvalidate();_gnomeIdleArm();_gnomeCheckArm();globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session already active (sync backstop); using it");return !0}
+    if(_gnomeAlreadyActive(e)){_gnomeSessionActive=!0;_gnomePortalClearDown();_wlScreensInvalidate();_gnomeIdleArm();_gnomeCheckArm();_gnomeShareWatchArm();globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session already active (sync backstop); using it");return !0}
     // Closed before it became ready: a stop, not a fault - latch, no cooldown, no retry.
     if(e&&e.__cdbStoppedByUser){_gnomeLatchStopped("sync backstop session-start exit 5");return !1}
     // No restore token (the user left "Remember this selection" unticked, or
@@ -1290,15 +1713,29 @@ async function _wlBridgeScreens(){
 }
 // Map a global-logical region to the bridge monitor containing its top-left,
 // returning {name, x, y} with monitor-relative x/y (mirrors _x11MonForRegion).
+function _wlScreenAt(screens,x,y){
+  for(var i=0;i<screens.length;i++){var g=screens[i].geometry||{};if(x>=g.x&&x<g.x+g.width&&y>=g.y&&y<g.y+g.height)return screens[i]}
+  return null;
+}
 async function _wlMonForRegion(x,y){
   var screens=await _wlBridgeScreens();
   if(!screens.length)return null;
-  var pick=null;
-  for(var i=0;i<screens.length;i++){var g=screens[i].geometry||{};if(x>=g.x&&x<g.x+g.width&&y>=g.y&&y<g.y+g.height){pick=screens[i];break}}
+  var pick=_wlScreenAt(screens,x,y);
+  // A point on no monitor of the cached list: the layout changed since it was
+  // cached (a monitor plugged in or moved; Electron already knows it, so
+  // switch_display and the click mapping use it). Enumerate once more before
+  // falling back, or the region is sent with an old monitor's name and the
+  // bridge refuses every capture there ("does not intersect").
+  if(!pick&&screens===_wlScreensCache){
+    _wlScreensInvalidate();
+    globalThis.__cdbDiag("[claude-cu] "+(_wlBridge()?_wlBridge().name:"bridge")+" screens: "+x+","+y+" is on no known monitor - monitor list refreshed");
+    var fresh=await _wlBridgeScreens();
+    if(fresh.length){screens=fresh;pick=_wlScreenAt(screens,x,y)}
+  }
   if(!pick){for(var j=0;j<screens.length;j++){if(screens[j].is_primary){pick=screens[j];break}}}
   if(!pick)pick=screens[0];
   var pg=pick.geometry||{x:0,y:0};
-  return{name:pick.name||pick.id,x:x-pg.x,y:y-pg.y};
+  return{name:pick.name||pick.id,x:x-pg.x,y:y-pg.y,geo:pick.geometry||null};
 }
 // Default display for a GNOME capture that names no display (issue #293).
 // The portal ScreenCast session streams only the monitor(s) the user shared in
@@ -1377,9 +1814,9 @@ function _gnomeAlreadyActive(e){return /already active/i.test(String(e&&(e.messa
 async function _gnomeSessionStart(){
   var bin=_gnomeBridgeBin();if(!bin)return;
   _gnomeDaemonMayExist=!0;
-  try{await _bridgeAsync(bin,["session-start"],GNOME_SESSION_START_MS);_gnomeSessionActive=!0;_gnomePortalClearDown();_wlScreensInvalidate();_gnomeIdleArm();_gnomeCheckArm();globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session started")}
+  try{await _bridgeAsync(bin,["session-start"],GNOME_SESSION_START_MS);_gnomeSessionActive=!0;_gnomePortalClearDown();_wlScreensInvalidate();_gnomeIdleArm();_gnomeCheckArm();_gnomeShareWatchArm();globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session started")}
   catch(e){
-    if(_gnomeAlreadyActive(e)){_gnomeSessionActive=!0;_gnomePortalClearDown();_wlScreensInvalidate();_gnomeIdleArm();_gnomeCheckArm();globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session already active; using it");return}
+    if(_gnomeAlreadyActive(e)){_gnomeSessionActive=!0;_gnomePortalClearDown();_wlScreensInvalidate();_gnomeIdleArm();_gnomeCheckArm();_gnomeShareWatchArm();globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge session already active; using it");return}
     // The new daemon was closed before it became ready (the user stopped
     // sharing, or the desktop ended the session): latch for this lock instead
     // of the cooldown, so nothing starts it again until the lock ends.
@@ -1413,7 +1850,7 @@ async function _gnomeSessionEnd(why){
   // Every end cancels the idle timer and drops a held button (the daemon that
   // pressed it goes away); the next session arms the timer afresh.
   _gnomeIdleCancel();_gnomeMouseHeld=!1;_gnomeHeldDeferred=!1;
-  _gnomeCheckStop(why||"lock released");
+  _gnomeCheckStop(why||"lock released");_gnomeShareWatchClose();
   if(_gnomeSessionEnding)return _gnomeSessionEnding;
   var bin=_gnomeBridgeBin();
   // Snapshot BEFORE clearing: the skip below has to ask whether a session was up
@@ -1504,10 +1941,15 @@ function _findMonByPoint(px,py){
 async function _x11MonForRegion(x,y){
   var screens=await _x11BridgeScreens();
   if(!screens.length)return null;
-  var pick=null;
-  for(var i=0;i<screens.length;i++){
-    var g=screens[i].geometry||{};
-    if(x>=g.x&&x<g.x+g.width&&y>=g.y&&y<g.y+g.height){pick=screens[i];break}
+  var pick=_wlScreenAt(screens,x,y);
+  // A point on no monitor of the cached list: the layout changed since it was
+  // cached (same fix as _wlMonForRegion). Enumerate once more before falling
+  // back; a fresh list that still misses is a point outside every monitor.
+  if(!pick&&screens===_x11ScreensCache){
+    _x11ScreensInvalidate();
+    globalThis.__cdbDiag("[claude-cu] x11-bridge screens: "+x+","+y+" is on no known monitor - monitor list refreshed");
+    var fresh=await _x11BridgeScreens();
+    if(fresh.length){screens=fresh;pick=_wlScreenAt(screens,x,y)}
   }
   if(!pick){
     for(var j=0;j<screens.length;j++){if(screens[j].is_primary){pick=screens[j];break}}
@@ -1515,7 +1957,7 @@ async function _x11MonForRegion(x,y){
     _x11DiagOnce("region:"+x+","+y,"x11 capture origin "+x+","+y+" (root px) is on no RandR monitor - using "+(pick.name||pick.id));
   }
   var pg=pick.geometry||{x:0,y:0};
-  return{name:pick.name||pick.id,x:x-pg.x,y:y-pg.y};
+  return{name:pick.name||pick.id,x:x-pg.x,y:y-pg.y,geo:pick.geometry||null};
 }
 // The bridges' frame-size rule (compute_target_dims in x11/wlroots/gnome/kwin
 // bridges): long edge <= 1568 px, total <= 1_150_000 px, keep the aspect ratio,
@@ -1525,6 +1967,29 @@ var CU_MAX_LONG_EDGE=1568,CU_MAX_PIXELS=1150000;
 function _cuTargetDims(w,h){
   var pw=Math.max(1,w),ph=Math.max(1,h),s=Math.min(1,CU_MAX_LONG_EDGE/Math.max(pw,ph),Math.sqrt(CU_MAX_PIXELS/(pw*ph)));
   return{width:Math.max(1,Math.round(pw*s)),height:Math.max(1,Math.round(ph*s))};
+}
+// Whether the next full screenshot keeps the native size (the
+// COWORK_SCREENSHOT_CMD and KDE spectacle tiers of _captureRegion) instead of
+// the rule above: true / false, or null when that depends on a mask answer not
+// known yet. asked = the capture passes an allowlist (a masked capture is the
+// bridge's, downscaled). Read the way _captureRegion picks its tier.
+function _cuShotNative(asked){
+  if(process.env.COWORK_SCREENSHOT_CMD)return !0;
+  if(_tgt||_wayland&&_wlBridge())return !1;
+  if(!(_desktopId().indexOf("kde")>=0&&_hasCmd("spectacle")))return !1;
+  if(!asked)return !0;
+  var be=_bcBridge();if(!be)return !0;
+  var c=_bcNow(be);return c?!c.mask:null;
+}
+// The frame (image size) the next full screenshot of display d will have: d
+// is a _getMonitors() entry or a getDisplaySize() result (matched by its
+// origin). Null when it cannot be told (see _cuShotNative).
+function _cuShotFrame(d,asked){
+  if(!d||!(d.width>0)||!(d.height>0))return null;
+  var nat=_cuShotNative(asked);if(nat===null)return null;
+  var sf=d.scaleFactor||1,ox=d.originX||0,oy=d.originY||0,xr=_x11PxRect(ox,oy,d.width,d.height,typeof d.displayId==="number"?d.displayId:void 0);
+  var pw=xr?xr.w:Math.round(d.width*sf),ph=xr?xr.h:Math.round(d.height*sf),t=nat?{width:Math.max(1,pw),height:Math.max(1,ph)}:_cuTargetDims(pw,ph);
+  return{imgW:t.width,imgH:t.height,dispW:d.width,dispH:d.height,originX:ox,originY:oy};
 }
 // True when a thumbnail of size sz is what Chromium makes of monitor m's frame:
 // it fits the frame inside the requested box keeping the aspect ratio.
@@ -1606,6 +2071,9 @@ async function _desktopCapturerRegion(lx,ly,lw,lh,displayIdx,xr){
 // uses imgW/imgH to map model image-pixel coordinates back to root pixels.
 // mk (from _maskFor): mask mode - the masking bridge only, never another tier.
 async function _captureRegion(x,y,w,h,sf,displayIdx,mk){
+  // The lock this capture belongs to (_capLockGen): a release meanwhile ends
+  // it with the cancellation, on every tier.
+  var _capGen=_capLockGen;
   if(!sf){var _m=_findMonByPoint(x,y);sf=_m?_m.scaleFactor:1}
   var _lx0=x,_ly0=y,_lw0=w,_lh0=h;
   // X11: per-display DIP -> root-pixel transform shared with the pointer paths
@@ -1616,7 +2084,10 @@ async function _captureRegion(x,y,w,h,sf,displayIdx,mk){
   var tmp=_path.join(_os.tmpdir(),"claude-cu-"+Date.now()+"-"+Math.random().toString(36).slice(2)+".png");
   if(_tgt&&_tgt.refuse)throw _tgtErr();
   // x11-bridge takes the root-pixel region, wlroots-bridge the logical one.
-  if(mk)return mk.be.kind==="x11"?await _captureMasked(mk,x,y,w,h):await _captureMasked(mk,Math.round(_lx0),Math.round(_ly0),Math.round(_lw0),Math.round(_lh0));
+  if(mk){
+    try{return await _withCursorHidden(function(){return mk.be.kind==="x11"?_captureMasked(mk,x,y,w,h):_captureMasked(mk,Math.round(_lx0),Math.round(_ly0),Math.round(_lw0),Math.round(_lh0))})}
+    catch(me){if(_capGen!==_capLockGen)throw _capCancelled();throw me}
+  }
   var _de=_desktopId();
   // Native (non-downscaling) tiers crop to exactly w x h at native resolution
   // and emit PNG.
@@ -1625,8 +2096,11 @@ async function _captureRegion(x,y,w,h,sf,displayIdx,mk){
     // Intentionally shell-evaluated: this is a user-supplied command template
     // from the user's own environment (pipes/redirects are part of the
     // contract). Only {FILE}/{X}/{Y}/{W}/{H} are substituted, all local values.
+    // A command the user named: it runs with the APP PATH.
     try{var cmd=process.env.COWORK_SCREENSHOT_CMD.replace(/\{FILE\}/g,tmp).replace(/\{X\}/g,x).replace(/\{Y\}/g,y).replace(/\{W\}/g,w).replace(/\{H\}/g,h);
-    _cp.execSync(cmd,_spo({timeout:15000}));globalThis.__cdbDiag("[claude-cu] screenshot: captured via COWORK_SCREENSHOT_CMD");return _nativePng(_readClean(tmp))}catch(e){globalThis.__cdbDiag("[claude-cu] COWORK_SCREENSHOT_CMD failed: "+e.message)}
+    var _co={timeout:15000},_ce=_envFor("app");if(_ce)_co.env=_ce;// The hide is acknowledged BEFORE the command runs: _withCursorHidden awaits its hide, then
+    // calls this function, whose execSync blocks the loop only after the arrow is off screen.
+    await _withCursorHidden(function(){_cp.execSync(cmd,_co)});globalThis.__cdbDiag("[claude-cu] screenshot: captured via COWORK_SCREENSHOT_CMD");return _nativePng(_readClean(tmp))}catch(e){globalThis.__cdbDiag("[claude-cu] COWORK_SCREENSHOT_CMD failed: "+e.message)}
   }
   // Covered Wayland sessions (wlroots / GNOME): the bundled bridge is the SOLE
   // screenshot backend (no third-party fallback, per design). Like x11-bridge,
@@ -1644,32 +2118,66 @@ async function _captureRegion(x,y,w,h,sf,displayIdx,mk){
   // Wayland desktop takes the x11-bridge tier below, a wlroots target this one.
   var _wlb=_tgt||_wayland?_wlBridge():null;
   if(_wlb){
+    var _wlErr=null;
     try{
       var _lx=Math.round(x/(sf||1)),_ly=Math.round(y/(sf||1)),_lw=Math.round(w/(sf||1)),_lh=Math.round(h/(sf||1));
-      for(var _wtry=0,_wzr;;_wtry++){
+      for(var _wtry=0,_wzr,_wretried=!1;;_wtry++){
         var _wmr=await _wlMonForRegion(_lx,_ly);
         var _wzargs=["zoom","--x",String(_wmr?_wmr.x:_lx),"--y",String(_wmr?_wmr.y:_ly),"--w",String(_lw),"--h",String(_lh)];
         if(_wmr&&_wmr.name){_wzargs.push("--display",_wmr.name)}
-        try{_wzr=await _wlBridgeCallAsync(_wzargs);break}
-        catch(ze){if(_wtry||!_wmr||!_wmr.name||!_cuDisplayNotFound(ze))throw ze;globalThis.__cdbDiag("[claude-cu] "+_wlb.name+" zoom: display "+_wmr.name+" not found - monitor list refreshed, retrying once");_wlScreensInvalidate()}
+        // GNOME: the portal session first (it can wait for the consent
+        // dialog), then the hide, so the capture follows the hide's ack at once.
+        var _wprep=_wlb.name==="gnome-portal-bridge";
+        if(_wprep)await _gnomePortalPrep("zoom");
+        try{_wzr=await _withCursorHidden(function(){return _wlBridgeCallAsync(_wzargs,void 0,_wprep)});break}
+        catch(ze){
+          if(!_wtry&&_wmr&&_wmr.name&&_cuDisplayNotFound(ze)){globalThis.__cdbDiag("[claude-cu] "+_wlb.name+" zoom: display "+_wmr.name+" not found - monitor list refreshed, retrying once");_wlScreensInvalidate();continue}
+          // A frame that did not arrive in time (gnome-portal-bridge: "timed
+          // out waiting for PipeWire frame", seen once in 18 turns on a GNOME
+          // 48 VM) is retried ONCE, async, while the same lock is held, and
+          // only as the first retry of this capture (two zooms at most). Not:
+          // an instruction for the model (not shared, stopped, reset), a
+          // bridge call that hit its process timeout (that budget is spent),
+          // another bridge error, or a lock released meanwhile.
+          if(_wretried||_wtry||!_capRetryable(ze)||_capGen!==_capLockGen)throw ze;
+          _wretried=!0;
+          globalThis.__cdbDiag("[claude-cu] "+_wlb.name+" zoom failed ("+_capShort(ze)+") - retrying once");
+        }
       }
-      if(_wzr&&_wzr.base64){globalThis.__cdbDiag("[claude-cu] screenshot: captured via "+_wlb.name);return{base64:_wzr.base64,imgW:_wzr.width||w,imgH:_wzr.height||h,mimeType:"image/jpeg"}}
+      if(_wzr&&_wzr.base64){_capFails=0;globalThis.__cdbDiag("[claude-cu] screenshot: captured via "+_wlb.name+(_wretried?" (second attempt)":""));return{base64:_wzr.base64,imgW:_wzr.width||w,imgH:_wzr.height||h,mimeType:"image/jpeg"}}
     }catch(e){
+      _wlErr=e;
       globalThis.__cdbDiag("[claude-cu] "+_wlb.name+" zoom failed: "+(e.message||e));
       // A monitor the user did not share, or a session that was reset: no
-      // other tier can fix that (the desktopCapturer fallback would raise a
-      // portal dialog of its own), and the model needs the instruction, not
+      // other tier can fix that, and the model needs the instruction, not
       // "every tier failed".
+      if(_capGen!==_capLockGen)throw _capCancelled();
+      // Instructions and known permanent states go to the model verbatim: a
+      // monitor not shared, a stop or reset (surfaced), the portal latched
+      // down (its text names the session-start check to run).
       if(e&&(e.__cdbNotShared||e.__cdbSurface))throw e;
+      if(e&&e.__cdbPortalDown){_capFails++;globalThis.__cdbDiag("[claude-cu] "+_wlb.name+" screenshot failed on a covered Wayland session (portal session down) - no third-party fallback, no desktopCapturer");throw _capSurface(String(e.message||e))}
     }
-    // Covered session with a resolved bridge: do NOT fall through to deleted
-    // third-party tools. Last resort is the Electron desktopCapturer tier below.
-    globalThis.__cdbDiag("[claude-cu] "+_wlb.name+" screenshot failed on a covered Wayland session — no third-party fallback (set COWORK_SCREENSHOT_CMD to override)");
+    // Covered session with a resolved bridge whose capture FAILED: no
+    // third-party tools, and no desktopCapturer either. On Wayland Electron's
+    // desktopCapturer goes through the xdg-desktop-portal ScreenCast picker:
+    // GNOME raises its "share your screen" dialog, xdg-desktop-portal-wlr /
+    // -hyprland their output chooser. That dialog blocks the tool call until
+    // the user answers it, outlives the lock, and cannot be cancelled from
+    // here. X11 (x11-bridge below) keeps the silent desktopCapturer tier.
+    globalThis.__cdbDiag("[claude-cu] "+_wlb.name+" screenshot failed on a covered Wayland session - no third-party fallback, and no desktopCapturer (its portal picker would raise a desktop dialog); set COWORK_SCREENSHOT_CMD to override");
+    if(_capGen!==_capLockGen)throw _capCancelled();
+    // The first failure of this lock: a retry is reasonable. From the second
+    // one in a row on: stop and tell the user (no retry loop).
+    _capFails++;
+    if(_tgt)throw new Error("Screenshot of the background display "+_tgt.display+" failed ("+_capShort(_wlErr)+"); "+(_capFails>1?"it failed before in this task too - stop retrying and tell the user. Details are in claude-patches.log.":"taking the screenshot again is reasonable. Details in claude-patches.log."));
+    if(_capFails>1)throw _capSurface("Screenshot failed again: "+_wlb.name+" could not capture the screen ("+_capShort(_wlErr)+"). Stop retrying: tell the user that screenshots are failing on this computer, that the details are in claude-patches.log (in Claude's logs folder, ~/.config/Claude/logs/), and that a different capture command can be set with COWORK_SCREENSHOT_CMD.");
+    throw _capSurface("Screenshot failed: "+_wlb.name+" could not capture the screen ("+_capShort(_wlErr)+"). This can be temporary - taking the screenshot again once is reasonable. If it keeps failing, details are in claude-patches.log.");
   }
   if(!_tgt&&_de.indexOf("kde")>=0&&_hasCmd("spectacle")){
     try{var stmp=_path.join(_os.tmpdir(),"claude-cu-spectacle-"+Date.now()+".png");
-    _cp.execFileSync("spectacle",["-b","-n","-f","-o",stmp],{timeout:10000});
-    if(_fs.existsSync(stmp)){try{_cp.execFileSync("convert",[stmp,"-crop",w+"x"+h+"+"+x+"+"+y,"+repage",tmp],{timeout:5000});try{_fs.unlinkSync(stmp)}catch(e){}globalThis.__cdbDiag("[claude-cu] screenshot: captured via spectacle+convert (KDE)");return _nativePng(_readClean(tmp))}catch(ce){try{_fs.renameSync(stmp,tmp)}catch(re){}globalThis.__cdbDiag("[claude-cu] screenshot: captured via spectacle (KDE, uncropped)");return _nativePng(_readClean(tmp))}}
+    await _withCursorHidden(function(){_cp.execFileSync(_toolCmd("spectacle")||"spectacle",["-b","-n","-f","-o",stmp],{timeout:10000})});
+    if(_fs.existsSync(stmp)){try{_cp.execFileSync(_toolCmd("convert")||"convert",[stmp,"-crop",w+"x"+h+"+"+x+"+"+y,"+repage",tmp],{timeout:5000});try{_fs.unlinkSync(stmp)}catch(e){}globalThis.__cdbDiag("[claude-cu] screenshot: captured via spectacle+convert (KDE)");return _nativePng(_readClean(tmp))}catch(ce){try{_fs.renameSync(stmp,tmp)}catch(re){}globalThis.__cdbDiag("[claude-cu] screenshot: captured via spectacle (KDE, uncropped)");return _nativePng(_readClean(tmp))}}
     }catch(e){globalThis.__cdbDiag("[claude-cu] spectacle failed: "+e.message)}
   }
   // X11 (and XWayland fallback): single first-party tier — x11-bridge zoom.
@@ -1690,7 +2198,7 @@ async function _captureRegion(x,y,w,h,sf,displayIdx,mk){
           var _mr=await _x11MonForRegion(x,y);
           var _zargs=["zoom","--x",String(_mr?_mr.x:x),"--y",String(_mr?_mr.y:y),"--w",String(w),"--h",String(h)];
           if(_mr&&_mr.name){_zargs.push("--display",_mr.name)}
-          try{_zr=await _x11BridgeAsync(_zargs);break}
+          try{_zr=await _withCursorHidden(function(){return _x11BridgeAsync(_zargs)});break}
           catch(ze){if(_xtry||!_mr||!_mr.name||!_cuDisplayNotFound(ze))throw ze;globalThis.__cdbDiag("[claude-cu] x11-bridge zoom: display "+_mr.name+" not found - monitor list refreshed, retrying once");_x11ScreensInvalidate()}
         }
         if(_zr&&_zr.base64){globalThis.__cdbDiag("[claude-cu] screenshot: captured via x11-bridge"+(_wayland?" (XWayland)":""));return{base64:_zr.base64,imgW:_zr.width||w,imgH:_zr.height||h,mimeType:"image/jpeg"}}
@@ -1701,11 +2209,14 @@ async function _captureRegion(x,y,w,h,sf,displayIdx,mk){
       globalThis.__cdbDiag("[claude-cu] no x11-bridge on an X11 session: "+_bridgeWhy("x11-bridge","X11_BRIDGE_BIN"));
     }
   }
+  // The turn ended while a tier ran (its bridge process was ended at the
+  // release): no further tier, no image after the turn.
+  if(_capGen!==_capLockGen)throw _capCancelled();
   // Target mode: desktopCapturer would capture the user's desktop. Fail here.
   if(_tgt)throw new Error("Screenshot of the background display "+_tgt.display+" failed (details in claude-patches.log).");
   // Electron desktopCapturer last resort: display-relative crop, downscaled by
   // the bridges' rule (see _desktopCapturerRegion).
-  try{var _dc=await _desktopCapturerRegion(_lx0,_ly0,_lw0,_lh0,displayIdx,_xr);globalThis.__cdbDiag("[claude-cu] screenshot: captured via desktopCapturer (Electron fallback, source by "+_dc.via+", "+_dc.imgW+"x"+_dc.imgH+")");return{base64:_dc.png.toString("base64"),imgW:_dc.imgW,imgH:_dc.imgH,mimeType:"image/png"}}catch(dce){globalThis.__cdbDiag("[claude-cu] desktopCapturer fallback failed: "+(dce&&dce.message||dce))}
+  try{var _dc=await _withCursorHidden(function(){return _desktopCapturerRegion(_lx0,_ly0,_lw0,_lh0,displayIdx,_xr)});if(_capGen!==_capLockGen){globalThis.__cdbDiag("[claude-cu] desktopCapturer answered after the turn ended - image discarded");throw _capCancelled()}globalThis.__cdbDiag("[claude-cu] screenshot: captured via desktopCapturer (Electron fallback, source by "+_dc.via+", "+_dc.imgW+"x"+_dc.imgH+")");return{base64:_dc.png.toString("base64"),imgW:_dc.imgW,imgH:_dc.imgH,mimeType:"image/png"}}catch(dce){if(_capGen!==_capLockGen)throw _capCancelled();globalThis.__cdbDiag("[claude-cu] desktopCapturer fallback failed: "+(dce&&dce.message||dce))}
   // Name the cause when it is a bridge that is missing or cannot run; when the
   // bridge is there, the per-tier failures are already in claude-patches.log.
   var _noX11=!_x11BridgeBin()&&(!_wayland||(globalThis.__cuBridgeFail&&globalThis.__cuBridgeFail["x11-bridge"]));
@@ -1738,7 +2249,7 @@ if(_wayland){globalThis.__cdbDiag("[claude-cu] Wayland session detected"+(_isWlr
   globalThis.__cdbDiag("[claude-cu] diagnostics: XDG_CURRENT_DESKTOP="+(process.env.XDG_CURRENT_DESKTOP||"(unset)")+" XDG_SESSION_DESKTOP="+(process.env.XDG_SESSION_DESKTOP||"(unset)")+" XDG_SESSION_TYPE="+(process.env.XDG_SESSION_TYPE||"(unset)")+" kwin-mode="+!!globalThis.__cuKwinMode);
   try{var _diagMons=_getMonitors();globalThis.__cdbDiag("[claude-cu] diagnostics: displays=["+_diagMons.map(function(m){return m.label+"("+m.width+"x"+m.height+"+"+m.originX+"+"+m.originY+" sf="+m.scaleFactor+(m.isPrimary?" primary":"")+")"}).join(", ")+"]")}catch(me){}
   globalThis.__cdbDiag("[claude-cu] diagnostics: available=["+avail.join(", ")+"]");
-  if(missing.length)globalThis.__cdbDiag("[claude-cu] diagnostics: missing=["+missing.join(", ")+"] (install for the residual fallback paths)");
+  if(missing.length)globalThis.__cdbDiag("[claude-cu] diagnostics: missing=["+missing.join(", ")+"]"+_toolIgnoredMsg(missing)+" (install for the residual fallback paths)");
   globalThis.__cdbDiag("[claude-cu] diagnostics: x11-bridge="+_bridgeState("x11-bridge",_x11BridgeBin()));
   globalThis.__cdbDiag("[claude-cu] diagnostics: wlroots-bridge="+_bridgeState("wlroots-bridge",_wlrootsBridgeBin()));
   globalThis.__cdbDiag("[claude-cu] diagnostics: gnome-portal-bridge="+_bridgeState("gnome-portal-bridge",_gnomeBridgeBin()));
@@ -1776,6 +2287,12 @@ function _tgtMonitors(){
 }
 // Async entry points call this first, so the sync _getMonitors has the
 // target's list even when upstream calls in before our handler's gate.
+// A Computer Use ACTION (capture, input, opening an app; not enumeration,
+// icons or capability probes, which upstream also runs between turns): the
+// Escape watcher (community switch, js/cu_esc_watch.js) re-arms a watcher it
+// parked at a cloud turn end. Sync and cheap (a flag check); absent or off =
+// nothing.
+function _escAct(){try{globalThis.__cdbCuEscWatch?.toolCall?.()}catch(ee){}}
 async function _tgtPrime(){var g=_tgtGen;await _tgtSync("tool call");if(_tgtGen!==g)throw _tgtChangedErr();if(!_tgt||_tgt.mons||!_tgt.bin||_tgt.refuse)return;var c=_tgt.kind==="x11"?_x11ScreensCache:_wlScreensCache;if(!(Array.isArray(c)&&c.length))await _tgtProbe(_tgt)}
 function _getMonitors(){
   if(_tgt)return _tgtMonitors();
@@ -1799,6 +2316,318 @@ function _findMon(displayId){
   for(var i=0;i<mons.length;i++){if(mons[i].isPrimary)return mons[i]}
   return mons[0];
 }
+// Upstream's overlay display resolver (glow, teach overlay, screenshot target
+// label) looks a display up in Electron's getAllDisplays() by `display.id`: the
+// macOS executor's display ids are Electron ids. Ours are _getMonitors() list
+// indexes, and on EDID-less X11 outputs (VMs, Xvfb, XWayland, dummy plugs)
+// Electron's ids are small integers too, from the RandR output index, so an
+// index can name a DIFFERENT monitor as an Electron id. Sub-patches 10b1-10b5
+// of fix_computer_use_linux.nim therefore translate the SELECTED display (the
+// session's cuSelectedDisplayId, a screenshot's displayId) here, where it
+// enters upstream's overlay code; upstream's main-window fallback (a real
+// Electron id) never passes through this. Returns the Electron display id of
+// the monitor at that index, matched by its DIP bounds (desktop mode builds
+// the list from getAllDisplays() itself, so the match is exact on every
+// session and the order is not relied on). Anything it cannot map comes back
+// unchanged: not a non-negative integer (undefined / null keep upstream's
+// fallback firing), no Electron displays, no monitor with that index, no
+// geometry match, or a background display (its indexes name the target's
+// monitors, not the user's; the glow is off there and teach is refused).
+globalThis.__cdbCuElectronDisplayId=function(v){
+  if(typeof v!=="number"||!Number.isInteger(v)||v<0||_tgt)return v;
+  var ds,i,m=null;
+  try{ds=_electron.screen.getAllDisplays()}catch(e){return v}
+  if(!ds||!ds.length)return v;
+  var mons=_getMonitors();
+  for(i=0;i<mons.length;i++){if(mons[i].displayId===v){m=mons[i];break}}
+  if(!m)return v;
+  for(i=0;i<ds.length;i++){var b=ds[i]&&ds[i].bounds||{};if(b.x===m.originX&&b.y===m.originY&&b.width===m.width&&b.height===m.height&&typeof ds[i].id==="number")return ds[i].id}
+  return v;
+};
+// Upstream's glow ("Claude is using your computer", sub-patch 10c) frames the
+// user's monitor. true = upstream's own no-glow path, in two cases:
+// 1. A background display: Computer Use is not using the user's monitor. The
+//    glow is decided when the CU lock is taken, before the executor re-latches
+//    the setting (__setLockHeld awaits the setting's signature first), so this
+//    reads the setting itself; without the reader, the latched state.
+// 2. An X11 session without a compositing manager (issue #327): X has no
+//    alpha blending there, so Electron draws the transparent full-display glow
+//    as an opaque black screen with an orange rim, on the monitor and in every
+//    screenshot. The answer is x11-bridge's doctor `capabilities.compositing`
+//    (owner of _NET_WM_CM_S<screen>), read from the doctor cache: this runs
+//    synchronously in upstream's lock-change handler, so it can only use the
+//    cached answer (primed at executor load, refreshed by captures, 60 s TTL).
+//    Every call also starts a fresh doctor (_glowHostRefresh, the in-flight one
+//    is reused), and _glowEnforce acts on the answer: a compositor that stopped
+//    since the cached answer gets the glow window destroyed before or right
+//    after it is shown (see _glowEnforce), never a whole task in black; one
+//    that started gets the glow from the next lock on.
+//    Unknown (no answer yet, a failed doctor, an older bridge without the key,
+//    no x11-bridge) counts as "no compositor": no glow rather than a risk of a
+//    black screen; Claude's own window still shows that Computer Use runs.
+// 0. Before both: Settings -> Extra -> Cowork (Linux) -> Computer Use ->
+//    "Show the glow while Claude uses the computer" is off
+//    (globalThis.__cdbCuGlowEnabled() === false, js/extra_settings_main.js,
+//    key computerUseGlow). Read on every call, so on every glow show: it
+//    applies from the next Computer Use start. Every session type follows it:
+//    here the X11 Electron glow (and with it the drawn cursor), and
+//    js/cu_wl_glow.js asks this same function before it draws the Wayland
+//    overlay. Nothing else changes (input, locks, screenshots).
+globalThis.__cdbCuGlowOff=function(){
+  if(_glowSwitchOff()){_glowSwitchNote(!0);return !0}
+  _glowSwitchNote(!1);
+  var f=globalThis.__cuTargetRead;
+  if(typeof f==="function"){try{if(f()!=null)return !0}catch(e){return !0}}
+  else if(_tgt)return !0;
+  var why=_glowCmOff();
+  _glowOffNote(why);
+  return !!why;
+};
+// The glow switch (default on: only an explicit false from the reader is off;
+// no reader, or one that throws, keeps the glow).
+function _glowSwitchOff(){var f=globalThis.__cdbCuGlowEnabled;if(typeof f!=="function")return !1;try{return f()===!1}catch(e){return !1}}
+var _glowSwitchLast=null;
+function _glowSwitchNote(off){
+  if(off===_glowSwitchLast||(_glowSwitchLast===null&&!off)){_glowSwitchLast=off;return}
+  _glowSwitchLast=off;
+  globalThis.__cdbDiag("[claude-cu] \"Claude is using your computer\" glow "+(off?"off: switched off in Settings -> Extra -> Cowork (Linux) -> Computer Use":"switched on again in Settings -> Extra -> Cowork (Linux) -> Computer Use"));
+}
+// null = a compositing manager runs (or not an X11 session: upstream shows no
+// glow on Wayland anyway), else why the glow stays off. Exec-free: the host
+// x11-bridge's cached doctor answer; a missing or stale one starts a refresh.
+function _glowCmOff(){
+  if(_wayland)return null;
+  var bin=process.env.X11_BRIDGE_BIN||globalThis.__cuX11BridgeBin;
+  if(!bin)return"no x11-bridge to ask whether a compositing manager runs";
+  var c=_bcCache["x11\n"+bin+"\n"];
+  if(!_tgt)_glowHostRefresh();
+  var r=c&&c.res;
+  if(!r)return"x11-bridge has not answered whether a compositing manager runs";
+  if(r.cm===!0)return null;
+  if(r.cm===!1)return"no compositing manager runs on this X11 display";
+  return"x11-bridge did not say whether a compositing manager runs"+(r.cmWhy?" ("+r.cmWhy+")":" (bridge older than the doctor key)");
+}
+// The host x11-bridge (never a background display's), or null.
+function _glowHostBridge(){
+  if(_wayland||_tgt)return null;
+  var bin=process.env.X11_BRIDGE_BIN||globalThis.__cuX11BridgeBin;
+  return bin?{kind:"x11",name:"x11-bridge",bin:bin}:null;
+}
+// Start a doctor now even when the cached answer is fresh (reuses one in
+// flight; a failed doctor is not retried within its negative TTL).
+function _glowHostRefresh(){
+  var be=_glowHostBridge();if(!be)return;
+  try{
+    var c=_bcCache[_bcKey(be)];
+    if(c&&!c.p&&!c.res&&c.failAt&&Date.now()-c.failAt<CU_BRIDGE_CAPS_FAIL_TTL_MS)return;
+    if(c&&c.res&&!c.p)c.at=0;
+    _bcProbe(be).catch(function(){});
+  }catch(e){}
+}
+// ── The glow window against the compositor's real state (issue #327) ──
+// Chromium picks a window's X visual when it creates it: with a compositing
+// manager an ARGB one, without one an opaque one. So a glow window shown
+// while no compositor runs is black, and one CREATED without a compositor
+// stays black even after one starts (upstream reuses the window, so until a
+// restart). Whenever the host doctor answers "no compositor" (or cannot
+// say), every glow window that is shown or fully loaded is destroyed (a
+// window still loading is left to the show check below, so upstream's own
+// creation does not fail half-way); upstream's own 'closed' handler resets its
+// state (j7=null, the page file removed, the busy flag false) and its next show
+// creates a fresh window with the visual of that moment. A glow window that
+// is shown while the latest answer is not "compositor" is destroyed just after
+// the show (deferred one tick so upstream's show function completes). The
+// window is upstream's cu-glow.html page (no code anchor).
+var CU_GLOW_PAGE_RE=/^file:\/\/.*\/cu-glow\.html$/;
+function _glowWins(){
+  var out=[];
+  try{var B=_electron.BrowserWindow;(B&&typeof B.getAllWindows==="function"?B.getAllWindows():[]).forEach(function(bw){try{if(bw&&!bw.isDestroyed()&&bw.webContents&&!bw.webContents.isDestroyed()&&CU_GLOW_PAGE_RE.test(String(bw.webContents.getURL()||"")))out.push(bw)}catch(e){}})}catch(e){}
+  return out;
+}
+function _glowCmNow(){var be=_glowHostBridge(),c=be&&_bcCache[_bcKey(be)];return c&&c.res?c.res.cm:null}
+function _glowDrop(bw,why){
+  try{
+    if(!bw||bw.isDestroyed())return;
+    globalThis.__cdbDiag("[claude-cu] \"Claude is using your computer\" glow window closed: "+why+" (a fresh one is created the next time the glow is shown with a compositor)");
+    bw.destroy();
+  }catch(e){}
+}
+function _glowEnforce(why){
+  if(_glowCmNow()===!0)return;
+  _glowWins().forEach(function(bw){try{if(bw.isVisible()||!bw.webContents.isLoading())_glowDrop(bw,why)}catch(e){}});
+}
+function _glowShowCheck(bw){
+  try{
+    if(!bw||bw.isDestroyed()||!bw.webContents||!CU_GLOW_PAGE_RE.test(String(bw.webContents.getURL()||"")))return;
+    if(_glowCmNow()!==!0)setTimeout(function(){_glowDrop(bw,"no compositing manager is known to run")},0);
+  }catch(e){}
+}
+var _glowHooked=!1;
+function _glowHook(){
+  if(_glowHooked||_wayland)return;
+  try{
+    var A=_electron.app;if(!A||typeof A.on!=="function")return;
+    _glowHooked=!0;
+    A.on("browser-window-created",function(ev,bw){try{bw.on("show",function(){_glowShowCheck(bw)})}catch(e){}});
+  }catch(e){}
+}
+var _glowOffLast=null;
+function _glowOffNote(why){
+  if(why===_glowOffLast)return;
+  _glowOffLast=why;
+  if(why)globalThis.__cdbDiag("[claude-cu] \"Claude is using your computer\" glow off: "+why+" - without one Electron draws the transparent glow as an opaque black screen");
+  else globalThis.__cdbDiag("[claude-cu] \"Claude is using your computer\" glow on: a compositing manager runs");
+}
+// ── Upstream's drawn pointer in the glow (sub-patch 10d) ──
+// With its GrowthBook flag 1916550538 on, upstream's glow shows a thin rim
+// and its own arrow, which upstream's executors move through the object
+// sub-patch 10d exposes as globalThis.__cdbCuDrawnPointer (upstream's factory
+// with an identity mapper: points are Electron DIP, as ours are):
+//   glideTo(p)            animate the arrow to p; ms until it arrives (0 = none)
+//   jumpTo(p)             place it at p (while a button is held)
+//   press()               press ring; first snaps the arrow to the real pointer
+//                         when that is more than 2 px away
+//   realPointerGoesTo(p)  the real pointer is about to move to p
+//   live()                (ours) the arrow is shown right now
+// Every method is a no-op unless the glow window shows the arrow. It is fed
+// the way upstream's input mixin feeds it, method for method and in the same
+// order relative to the real pointer move. On the user's own X11 desktop
+// that is upstream's object; on a Wayland row whose bridge draws the glow
+// overlay (wlroots, GNOME; XWayland follows the compositor's row) it is
+// js/cu_wl_glow.js's adapter with the same methods and return values, drawn
+// by `<bridge> overlay`. Upstream has no glow on Wayland, so every other
+// Wayland row (KDE < 6.6, exotic) gets none; kwin mode is js/executor_linux.js
+// (it feeds the same adapter itself), a background display and X11 without a
+// compositing manager turn it off (10c); there nothing is called. Cosmetic only: a throwing method is
+// logged once and input goes on.
+var CU_DP_GLIDE_MAX_MS=2000;
+var _dpHeld=!1,_dpSaid=!1;
+function _dpObj(){
+  if(_tgt||globalThis.__cuKwinMode)return null;
+  if(_wayland){
+    var g=globalThis.__cdbCuWlGlow,a=null;
+    try{a=g&&typeof g.pointer==="function"?g.pointer():null}catch(e){a=null}
+    return a&&typeof a==="object"?a:null;
+  }
+  var d=globalThis.__cdbCuDrawnPointer;
+  return d&&typeof d==="object"?d:null;
+}
+// The real pointer's last position on a Wayland row (it cannot be queried
+// there): js/cu_wl_glow.js presses its arrow there and starts the next glow's
+// arrow there. Exec-free.
+function _wlPtr(x,y){
+  if(!_wayland||_tgt)return;
+  try{var g=globalThis.__cdbCuWlGlow;if(g&&typeof g.pointerAt==="function")g.pointerAt(x,y)}catch(e){}
+}
+// ── The Wayland glow overlay's bridge (js/cu_wl_glow.js) ──
+// The bridge that would draw the glow for this session: the input bridge of
+// a wlroots row (wlroots-bridge) or of GNOME Wayland (gnome-portal-bridge).
+// None on X11, in kwin mode (js/executor_linux.js answers for KDE Plasma
+// Wayland itself), on a background display, on KDE < 6.6 or exotic Wayland (no first-party bridge).
+// Its overlay capability is the bridge's `doctor` capabilities.overlay, read
+// through the same cached async doctor as the screenshot mask (_bcProbe).
+function _wlGlowBridge(){
+  if(!_wayland||_tgt||globalThis.__cuKwinMode)return null;
+  var b=_wlBridge();
+  if(!b)return null;
+  return{kind:b.name==="wlroots-bridge"?"wlroots":"gnome",name:b.name,bin:b.bin};
+}
+// ── The drawn cursor and the badge stay out of Claude's screenshots ──
+// Upstream keeps its overlay out of captures on macOS (content protection);
+// X11 and Wayland have none, so the drawn arrow covered the spot Claude had
+// just clicked and the glow's "Claude is using your computer" badge sat over
+// kept app windows. Around each bridge capture (_captureRegion: the masked
+// capture, the Wayland and the x11-bridge zoom) the arrow, the press ring and
+// the badge are hidden and restored in a finally; the rim / classic glow
+// stays up, so the indicator does not blink at every screenshot (except on
+// GNOME, where nothing can keep it out of the image otherwise). The masked
+// capture is wrapped as a whole (_captureMasked, its one retry after a stale
+// window list included): both attempts run hidden under one hide, instead of
+// the arrow flashing back between them.
+//  - Wayland overlay rows: js/cu_wl_glow.js captureCursor (`capture` scope
+//    "cursor"), its ack awaited at most CU_CAP_WL_ACK_MS. The layer-shell
+//    overlay acks after a compositor round trip (measured on headless sway:
+//    0.4 ms median, 1.3 ms max); 50 ms leaves a loaded compositor 40x that
+//    and still costs a screenshot almost nothing when no ack comes. GNOME's
+//    overlay is an XWayland window (cu-overlay's x11 backend) that is in
+//    every capture: the module hides all of it (scope "all": glow and rim
+//    too) and waits for its ack at least 150 ms itself (it comes 50-64 ms
+//    after the hide, by design).
+//  - X11: upstream's glow window (cu-glow.html) gets a class on <html> that a
+//    style of ours (inserted once per page load) turns into visibility:hidden
+//    for #cursor, #cursor-press and #badge (the arrow, the ring and bloom, the
+//    pill: upstream's own element ids). The page answers after two animation
+//    frames (the frame without them was submitted), then CU_CAP_X11_SETTLE_MS
+//    more for the compositing manager to put that frame on screen (one 60 Hz
+//    refresh); all of it bounded by CU_CAP_X11_MAX_MS. When the page shows
+//    none of the three (the arrow off, the badge faded out) it answers at once
+//    and nothing waits.
+//  - KDE kwin mode (js/executor_linux.js): kwin-portal-bridge keeps both its
+//    own session glow and the glow overlay out of its captures (KWin
+//    excludeFromCapture): nothing to do. Background display: the overlay is
+//    not on the captured display.
+// Never blocks: async only, every wait bounded, failures ignored (the capture
+// runs regardless); the capture's own retry / failure accounting is untouched.
+var CU_CAP_WL_ACK_MS=50,CU_CAP_X11_MAX_MS=80,CU_CAP_X11_SETTLE_MS=17,CU_CAP_HIDE_CLASS="cdb-cu-capture";
+var CU_CAP_HIDE_JS='(()=>{const d=document,r=d.documentElement;if(!d.getElementById("cdb-cu-capture-style")){const s=d.createElement("style");s.id="cdb-cu-capture-style";s.textContent="html.'+CU_CAP_HIDE_CLASS+' #cursor,html.'+CU_CAP_HIDE_CLASS+' #cursor-press,html.'+CU_CAP_HIDE_CLASS+' #badge{visibility:hidden!important}";(d.head||r).appendChild(s)}'+
+  'const o=d.getElementById("overlay");if(!o||+getComputedStyle(o).opacity===0)return!1;'+
+  'const on=e=>{if(!e)return!1;const c=getComputedStyle(e);return c.visibility!=="hidden"&&c.display!=="none"&&+c.opacity>0};'+
+  'const any=on(d.getElementById("cursor"))||on(d.getElementById("cursor-ring"))||on(d.getElementById("cursor-bloom"))||on(d.getElementById("badge"));'+
+  'if(!any)return!1;r.classList.add("'+CU_CAP_HIDE_CLASS+'");return new Promise(f=>requestAnimationFrame(()=>requestAnimationFrame(()=>f(!0))))})()';
+var CU_CAP_SHOW_JS='document.documentElement.classList.remove("'+CU_CAP_HIDE_CLASS+'")';
+function _capTrace(m){try{if(process.env.CDB_CU_DEBUG==="1")globalThis.__cdbDiag("[claude-cu] glow trace: t="+(typeof performance!=="undefined"?performance.now():Date.now()).toFixed(1)+" "+m)}catch(e){}}
+function _capWait(p,ms){var t;return Promise.race([p,new Promise(function(r){t=setTimeout(function(){r("timeout")},ms)})]).then(function(v){clearTimeout(t);return v},function(){clearTimeout(t);return !1})}
+// -> a token for _capRestore, or null (nothing hidden, nothing to restore).
+async function _capHide(){
+  try{
+    if(_tgt||globalThis.__cuKwinMode||_glowSwitchOff())return null;
+    if(_wayland){
+      var g=globalThis.__cdbCuWlGlow;
+      var p=g&&typeof g.captureCursor==="function"?g.captureCursor(CU_CAP_WL_ACK_MS):null;
+      if(!p)return null;
+      var wt=await p;
+      return wt?{wl:wt}:null;
+    }
+    var wins=_glowWins().filter(function(w){try{return w.isVisible()}catch(e){return !1}});
+    if(!wins.length)return null;
+    var t0=Date.now();
+    var r=await _capWait(Promise.all(wins.map(function(w){try{return w.webContents.executeJavaScript(CU_CAP_HIDE_JS).then(function(v){return v===!0},function(){return !1})}catch(e){return Promise.resolve(!1)}})),CU_CAP_X11_MAX_MS-CU_CAP_X11_SETTLE_MS);
+    // A page that did not answer in time may still hide: restore it too.
+    var hid=r==="timeout"||(Array.isArray(r)&&r.some(function(v){return v}));
+    if(!hid){_capTrace("capture hide x11: nothing shown, no wait ("+(Date.now()-t0)+" ms)");return null}
+    await new Promise(function(f){setTimeout(f,CU_CAP_X11_SETTLE_MS)});
+    _capTrace("capture hide x11: "+(r==="timeout"?"page did not answer within the bound":"hidden")+" after "+(Date.now()-t0)+" ms");
+    return{x11:wins};
+  }catch(e){return null}
+}
+function _capRestore(tok){
+  if(!tok)return;
+  try{
+    if(tok.wl){var g=globalThis.__cdbCuWlGlow;if(g&&typeof g.captureRestore==="function")g.captureRestore(tok.wl);return}
+    (tok.x11||[]).forEach(function(w){try{if(!w.isDestroyed())w.webContents.executeJavaScript(CU_CAP_SHOW_JS).catch(function(){})}catch(e){}});
+    _capTrace("capture restore x11");
+  }catch(e){}
+}
+// fn's result or rejection unchanged; the restore always runs.
+async function _withCursorHidden(fn){
+  var tok=null;
+  try{tok=await _capHide()}catch(e){tok=null}
+  try{return await fn()}finally{_capRestore(tok)}
+}
+function _dpFail(m,e){
+  if(_dpSaid)return;_dpSaid=!0;
+  try{globalThis.__cdbDiag("[claude-cu] drawn pointer: "+m+" failed ("+(e&&e.message||e)+") - input goes on without it")}catch(de){}
+}
+// The live drawn pointer, or null.
+function _dpLive(){
+  var d=_dpObj();if(!d||typeof d.live!=="function")return null;
+  try{return d.live()===!0?d:null}catch(e){_dpFail("live",e);return null}
+}
+function _dpCall(d,m,x,y){
+  if(!d||typeof d[m]!=="function")return void 0;
+  try{return x===void 0?d[m]():d[m]({x:x,y:y})}catch(e){_dpFail(m,e);return void 0}
+}
+function _dpAborted(f){try{return typeof f==="function"&&!!f()}catch(e){return !0}}
 // X11 HiDPI: Electron reports displays in DIP, but x11-bridge (XTest motion,
 // GetImage crop) works in X root PIXELS. Chromium does not lay DIP origins out
 // as px/scale: ConvertDisplayBoundsToDips (ui/base/x/x11_display_util.cc)
@@ -1898,6 +2727,47 @@ function _x11PxRect(x,y,w,h,displayIdx){
 }
 var _inputLogDone={mouse:false,click:false,key:false,type:false,scroll:false,drag:false,window:false,app:false};
 function _logFirstUse(op,backend){if(!_inputLogDone[op]){_inputLogDone[op]=true;globalThis.__cdbDiag("[claude-cu] "+op+": using "+backend)}}
+// A model-injected Escape must not trip the user's Escape watcher (js/
+// cu_esc_watch.js, community switch "Escape stops Computer Use"): every input
+// that can carry one runs inside its suspendAround, which only talks to an
+// armed watcher that is not syntheticSafe (KDE kglobalaccel) and else just runs
+// it. Other input is never wrapped; without the community patch, or with its
+// switch off, fn just runs.
+// An injection that carries an Escape (a key, a chord, held keys, typed text).
+// The community Escape watcher suspends itself around it (suspendAround).
+// X11: while Anthropic's own Escape grab is registered (the switch off, or the
+// watcher fell back to it) the grab would swallow Claude's Escape, so the app
+// never got it (sub-patch 17h): the grab is dropped, the key is injected after
+// one event-loop turn (Chromium sends the ungrab to the X server then;
+// measured: injecting in the same turn still hits the grab), and upstream's
+// own lock-change function registers it again (logged if that fails twice).
+// The user's Escape is not a stop key only for the length of the injection.
+function _escAround(esc,fn,ms){
+  var w=globalThis.__cdbCuEscWatch;
+  var run=function(){return esc&&typeof w?.suspendAround==="function"?w.suspendAround(fn,ms):fn()};
+  var g=globalThis.__cdbCuEscGrab,off=!1;
+  if(esc&&!_wayland&&g&&typeof g.suspend==="function"){try{off=g.suspend()===!0}catch(e){off=!1}}
+  if(!off)return run();
+  var back=function(){try{g.resume("Claude's own Escape")}catch(e){}};
+  return new Promise(function(r){setTimeout(r,10)}).then(run).then(function(v){back();return v},function(e){back();throw e});
+}
+function _escKeys(v){var w=globalThis.__cdbCuEscWatch;return typeof w?.hasEscape==="function"&&w.hasEscape(v)===!0}
+// Upstream's own executor marks each key / holdKey whose keys are exactly one
+// Escape as expected (sub-patch 17e: globalThis.__cdbCuExpectEscape, a 100 ms
+// counter its X11 Escape grab reads), so the grab absorbs the model's Escape
+// instead of stopping the turn. Same rule here, called right before the
+// injection: one mark per press (a repeated key marks each repetition).
+function _escExpect(keys,n){
+  try{
+    var f=globalThis.__cdbCuExpectEscape;if(typeof f!=="function")return;
+    var t=(Array.isArray(keys)?keys:String(keys==null?"":keys).split("+")).filter(function(k){return String(k).length>0});
+    if(t.length!==1)return;
+    var k=String(t[0]).trim().toLowerCase();
+    if(k!=="escape"&&k!=="esc")return;
+    for(var i=0,m=Math.max(1,n|0);i<m;i++)f();
+  }catch(e){}
+}
+function _escText(t){return typeof t==="string"&&t.indexOf("\x1b")>=0}
 // True when a covered Wayland session (wlroots/GNOME) has a resolved bridge —
 // input/screenshot/windows all route through it and the ydotool path is skipped.
 function _useWlBridge(){return(_tgt||_wayland)&&!!_wlBridge()}
@@ -1907,6 +2777,7 @@ function _tgtCursorSet(x,y){if(_tgt)_tgt.cursor={x:Math.round(x),y:Math.round(y)
 function _tgtCursor(){var c=_tgt&&_tgt.cursor;if(c)return c;var m=_findMon(null)||_defaultMon;return{x:Math.round(m.originX+m.width/2),y:Math.round(m.originY+m.height/2)}}
 function _moveMouse(x,y){
   _tgtCursorSet(x,y);
+  _wlPtr(x,y);
   if(_useWlBridge()){
     _logFirstUse("mouse",_wlBridge().name);_wlBridgeCall(["pointer-move","--x",String(Math.round(x)),"--y",String(Math.round(y))]);return;
   }
@@ -1987,7 +2858,8 @@ function _appRefFromCommand(result,wins,pick){
 //   hitTest     native = appUnderPoint asks the window system (x11-bridge
 //               app-under-point; wlroots-bridge with window geometry: a JS
 //               hit test of `windows` by stacking_order); none = null
-//   frontmost   native = the window system names the focused window
+//   frontmost   native = the window system names the focused window (GNOME:
+//               only once its Introspect answered, see _gnIntroNow)
 //   windowList  full | partial (XWayland: X clients only) | best-effort (GNOME
 //               Introspect, may be []) | none
 //   windowPositions  window rects map to the screenshot's displays
@@ -1998,8 +2870,10 @@ function _appBackend(){
     var b=_wlBridge();
     // sway / Hyprland (doctor window_geometry): positions and a JS hit test
     // by stacking_order; niri, river: no positions, no hit test.
-    if(b.name==="wlroots-bridge"){var gc=_bcNow(_bcBridge(!0)),geo=!!(gc&&gc.geometry);return{name:"wlroots-bridge"+(_tgt?" (background display "+_tgt.display+")":""),hitTest:geo?"native":"none",frontmost:"native",windowList:"full",windowPositions:geo}}
-    return{name:b.name,hitTest:"none",frontmost:"native",windowList:"best-effort",windowPositions:!1};
+    if(b.name==="wlroots-bridge"){_bcNow(_bcBridge(!0));var geo=_wlGeoCached();return{name:"wlroots-bridge"+(_tgt?" (background display "+_tgt.display+")":""),hitTest:geo===!1?"none":"native",frontmost:"native",windowList:"full",windowPositions:geo===!0}}
+    // GNOME: Introspect gives no window positions (no hit test) and names the
+    // front window only where the shell lets the bridge call it (_gnIntroNow).
+    return{name:b.name,hitTest:"none",frontmost:_gnIntroNow()===!0?"native":"none",windowList:"best-effort",windowPositions:!1};
   }
   if(_wayland&&!_tgt&&_checkYdotool()){none.name="ydotool";return none}
   if(!_x11BridgeBin())return none;
@@ -2081,12 +2955,21 @@ async function _dtResolve(bundleIds){
 //   geometry  wlroots-bridge `window_geometry`: windows carry geometry,
 //             output, is_visible and stacking_order (x11-bridge always does).
 //   gaps      wlroots-bridge `screenshot_mask_gaps`: what the mask cannot cover.
+//   ignore    x11-bridge `capabilities.screenshot_mask_ignore`: mask mode takes
+//             --ignore-window <xid> for Claude's own see-through overlays
+//             (_ownOverlayXids).
 // A bridge that answers without the keys (or exits 2: contract 0) cannot mask:
 // {mask:false}. A doctor that fails (timeout, crash, non-JSON) is {error}:
 // capture with an allowlist then FAILS CLOSED rather than guess "cannot mask".
 // GNOME, ydotool, XWayland-only, COWORK_SCREENSHOT_CMD and the desktopCapturer
 // fallback have no masking bridge at all (_bcBridge null).
 var CU_BRIDGE_CAPS_TTL_MS=60000,CU_BRIDGE_DOCTOR_MS=8000;
+// A failed doctor is asked again on the next capture (_bcProbe), but the sync
+// capability reads (_bcNow: capabilitiesNow, the capabilities getter, which
+// upstream's supported-features build reads on every call) wait this long
+// before they start another one, so a doctor that keeps failing cannot be
+// spawned per read.
+var CU_BRIDGE_CAPS_FAIL_TTL_MS=30000;
 var _bcCache={};
 // windows=true: the bridge whose window list is used (COWORK_SCREENSHOT_CMD
 // only replaces the capture).
@@ -2102,10 +2985,33 @@ function _bcKey(be){return be.kind+"\n"+be.bin+"\n"+(_tgt?_tgt.key:"")}
 function _bcParse(be,doc){
   if(!doc||typeof doc!=="object"||Array.isArray(doc))return{error:be.name+" doctor answered no JSON object"};
   if(typeof doc.contract!=="number"||doc.contract<1)return{mask:!1,geometry:be.kind==="x11",gaps:[],why:"contract 0"};
+  // wlroots-bridge answers window_geometry / screenshot_mask false both where
+  // the compositor has no geometry (niri, river) and where it could not tell
+  // (sway / Hyprland IPC over its budget, Wayland connect failed). Only the
+  // first is a negative; the second is an unknown and stays fail-closed: no
+  // whole-screen gate, no unmasked capture (issue #326).
+  if(be.kind==="wlroots"&&doc.window_geometry!==!0){var amb=_wlDoctorUnsure(doc);if(amb)return{error:be.name+" doctor: "+amb}}
   var c=doc.capabilities&&typeof doc.capabilities==="object"?doc.capabilities:{};
   var mask=doc.screenshot_mask===!0||c.screenshot_mask===!0;
   var gaps=Array.isArray(doc.screenshot_mask_gaps)?doc.screenshot_mask_gaps.filter(function(g){return typeof g==="string"}):[];
-  return{mask:mask,geometry:be.kind==="x11"||doc.window_geometry===!0,gaps:mask?gaps:[]};
+  // wlroots-bridge: how a masked capture is made (issue #329) - "toplevel"
+  // (each kept window on its own) or "output"; informational, the capture
+  // result's mask.capture is what counts.
+  var mmode=doc.screenshot_mask_mode==="toplevel"||doc.screenshot_mask_mode==="output"?doc.screenshot_mask_mode:null;
+  var mproto=typeof doc.screenshot_mask_protocol==="string"&&/^[\w.-]{1,64}$/.test(doc.screenshot_mask_protocol)?doc.screenshot_mask_protocol:null;
+  return{mask:mask,mmode:mask?mmode:null,mproto:mask?mproto:null,geometry:be.kind==="x11"||doc.window_geometry===!0,gaps:mask?gaps:[],ignore:mask&&be.kind==="x11"&&c.screenshot_mask_ignore===!0,cm:c.compositing===!0?!0:c.compositing===!1?!1:null,cmWhy:typeof c.compositing_error==="string"?c.compositing_error:null,overlay:c.overlay===!0};
+}
+// Why a wlroots-bridge doctor's "no window geometry" is not a real negative,
+// or "" when it is (the compositor was reached and is not one that has
+// geometry). sway / Hyprland: the doctor's compositor field (the bridge's own
+// environment, so a background display's compositor too) and, on the user's
+// desktop, our own SWAYSOCK / HYPRLAND_INSTANCE_SIGNATURE.
+function _wlDoctorUnsure(doc){
+  if(doc.backend_reachable!==!0)return"the compositor was not reached ("+(typeof doc.backend_error==="string"&&doc.backend_error?doc.backend_error:"backend_reachable false")+")";
+  var comp=String(doc.compositor||"").toLowerCase();
+  if(comp==="sway"||comp==="hyprland")return comp+" did not report window geometry (its IPC did not answer in time)";
+  if(!_tgt&&(process.env.SWAYSOCK||process.env.HYPRLAND_INSTANCE_SIGNATURE))return"no window geometry on a sway / Hyprland session (its IPC did not answer in time)";
+  return"";
 }
 // -> Promise<{mask, geometry, gaps} | {error}>, or null without a bridge.
 function _bcProbe(be){
@@ -2121,9 +3027,16 @@ function _bcProbe(be){
     if(_bcCache[k]!==ent)return res;
     ent.p=null;
     // A failed doctor is asked again on the next capture, not kept a minute.
-    if(res.error){ent.res=null;ent.at=0}else{ent.res=res;ent.at=Date.now()}
-    var line="[claude-cu] "+be.name+" capabilities: "+(res.error?res.error:"screenshot mask "+(res.mask?"yes"+(res.gaps.length?" (not covered: "+res.gaps.join(", ")+")":""):"no"+(res.why?" ("+res.why+")":""))+", window geometry "+(res.geometry?"yes":"no"));
+    if(res.error){ent.res=null;ent.at=0;ent.failAt=Date.now()}else{ent.res=res;ent.at=Date.now();ent.failAt=0;ent.geo=ent.geo===!0||!!res.geometry}
+    var line="[claude-cu] "+be.name+" capabilities: "+(res.error?res.error:"screenshot mask "+(res.mask?"yes"+(res.gaps.length?" (not covered: "+res.gaps.join(", ")+")":""):"no"+(res.why?" ("+res.why+")":""))+", window geometry "+(res.geometry?"yes":"no")+(res.mmode?", mask capture "+res.mmode+(res.mproto?" ("+res.mproto+")":""):""));
     if(ent.line!==line){ent.line=line;globalThis.__cdbDiag(line)}
+    // The per-app access answer upstream's UI shows may follow the mask
+    // (js/cu_consent.js capChanged re-signals the renderer when it changed).
+    _cuCapChanged(be.name+" doctor answered");
+    // The host x11-bridge says no compositor (or cannot say): no glow window
+    // may stay (issue #327).
+    var hb=_glowHostBridge();
+    if(hb&&_bcKey(hb)===k&&!(ent.res&&ent.res.cm===!0))_glowEnforce(res.error?"x11-bridge doctor failed":res.cm===!1?"no compositing manager runs on this X11 display":"x11-bridge did not say whether a compositing manager runs");
     return res;
   });
   return ent.p;
@@ -2133,12 +3046,148 @@ function _bcProbe(be){
 function _bcNow(be){
   if(!be)return null;
   var c=_bcCache[_bcKey(be)];
-  if(!c||!c.res||Date.now()-c.at>=CU_BRIDGE_CAPS_TTL_MS){try{_bcProbe(be).catch(function(){})}catch(e){}}
+  var recentFail=!!(c&&!c.res&&c.failAt&&Date.now()-c.failAt<CU_BRIDGE_CAPS_FAIL_TTL_MS);
+  if(!recentFail&&(!c||!c.res||Date.now()-c.at>=CU_BRIDGE_CAPS_TTL_MS)){try{_bcProbe(be).catch(function(){})}catch(e){}}
   return c&&c.res||null;
 }
 function _bcWarm(){try{_bcNow(_bcBridge(!0))}catch(e){}}
-function _bcForget(be){if(be)delete _bcCache[_bcKey(be)]}
+// Remote device (cloud Cowork / Dispatch): js/cu_mode_preamble.js decides once
+// at start whether a first-party bridge is usable on this Wayland session
+// (globalThis.__cdbCuWaylandAnnounce, which sub-patch 4g's
+// isBridgeComputerUsePlatform follows). A background display turned off or
+// broken at run time can leave only paths the preamble reserves for Code
+// sessions (XWayland x11-bridge, ydotool, spectacle), so the latch only ever
+// moves to false here (exec-free: env, globals and the latched target), with
+// one log line; a display turned on later stays refused until a restart.
+function _cuAnnounceCheck(why){
+  if(globalThis.__cdbCuWaylandAnnounce!==!0)return;
+  var ok=_tgt?!_tgt.refuse&&!!_tgt.bin:!!(_wayland&&_useWlBridge());
+  if(ok)return;
+  globalThis.__cdbCuWaylandAnnounce=!1;
+  globalThis.__cdbDiag("[claude-cu] remote device: computer tools withdrawn on Wayland ("+why+"): no first-party bridge usable now - cloud Cowork and Dispatch are refused until a restart");
+}
+function _cuCapChanged(why){try{var cc=globalThis.__cdbCuConsent;if(cc&&typeof cc.capChanged==="function")cc.capChanged(why)}catch(e){}}
+// The window-geometry answer survives (_wlGeoCached: a forgotten entry must
+// not turn a hit-test backend into a "none" one).
+function _bcForget(be){if(!be)return;var k=_bcKey(be),c=_bcCache[k];delete _bcCache[k];if(c&&typeof c.geo==="boolean")_bcCache[k]={res:null,at:0,p:null,geo:c.geo}}
 function _filteringNow(){var r=_bcNow(_bcBridge());return r&&r.mask?"mask":"none"}
+// ── Backends without window info (issue #326) ──
+// Upstream's dispatch (cloud Cowork / Dispatch, teach mode) reads
+// capabilities.hitTest on every click and key gate. "none" selects the rules of
+// upstream's own Wayland executor: no appUnderPoint, the app in front stands
+// for the click target, Claude's own window in front stands for the shared
+// screen (the pseudo-app CU_SCREEN_APP), and a Claude dialog blocks input.
+// Backends with a real hit test (x11-bridge on X11 or a background display,
+// wlroots-bridge with window geometry: sway / Hyprland) keep upstream's per-app
+// gate. Exec-free (env, the latched background display, the cached doctor
+// answer warmed at executor load and on every lock acquire by _bcWarm): the
+// getter is read on every gate. wlroots-bridge counts as hit-test capable
+// until its doctor says otherwise for certain (_wlDoctorUnsure): before the
+// first answer, after failed or inconclusive doctors (appUnderPoint then
+// waits for the doctor and refuses the click rather than guess), and for good
+// once it reported window geometry for this bridge.
+var CU_SCREEN_APP="com.anthropic.cu.screen",CU_DIALOG_SUFFIX=" (dialog)";
+// true / false = the doctor's window_geometry (a seen true is kept for the
+// bridge; the last certain answer survives a failed doctor and _bcForget);
+// null = not known.
+function _wlGeoCached(){var be=_bcBridge(!0),c=be?_bcCache[_bcKey(be)]:null;if(!c)return null;if(c.geo===!0)return!0;if(c.res)return!!c.res.geometry;return typeof c.geo==="boolean"?c.geo:null}
+// Latched for the Computer Use lock: once a gate could see "none", every input
+// until the next lock transition is delivered marked (_markInput), so an
+// answer that changes between upstream's gate and the delivery never skips
+// the guard. The gate itself always reads the live, fail-closed answer.
+var _blindSeen=!1;
+function _hitTestNow(){var r=_hitTestLive();if(r==="none")_blindSeen=!0;return r}
+function _hitTestLive(){
+  if(_tgt&&(_tgt.refuse||!_tgt.bin))return"none";
+  // wlroots-bridge: "none" only on the doctor's explicit no (niri, river).
+  // Unknown (no answer yet, or only failed doctors) counts as a hit test, so
+  // upstream asks appUnderPoint, which waits for the doctor and refuses the
+  // click while it cannot tell (fail closed).
+  if(_useWlBridge())return _wlBridge().name==="wlroots-bridge"&&_wlGeoCached()!==!1?"native":"none";
+  // XWayland x11-bridge, ydotool, no bridge: no hit test on a Wayland desktop.
+  if(_wayland&&!_tgt)return"none";
+  return _x11BridgeBin()?"native":"none";
+}
+// GNOME Shell Introspect (the bridge's windows / frontmost-app): stock GNOME
+// 41+ refuses it to callers that are not allowlisted, and the bridge then
+// answers windows [] and frontmost-app null - the same as a desktop without
+// windows. A non-empty window list (upstream's listRunningApps at session
+// open, getFrontmostApp) proves Introspect answers; until then the window in
+// front counts as unknown. No probe of its own: nothing is spawned for it.
+var _gnIntro={val:null};
+function _gnIntroSet(v,why){
+  var old=_gnIntro.val;
+  _gnIntro.val=v;
+  if(old===v)return;
+  globalThis.__cdbDiag("[claude-cu] gnome-portal-bridge: GNOME Shell Introspect answers (the window in front is known; "+why+")");
+  _cuCapChanged("gnome-portal-bridge introspect available");
+}
+function _gnIntroNow(){return _isGnomeCovered()?_gnIntro.val:null}
+// "A Claude dialog is open": upstream's own count of open Electron dialog boxes
+// (showMessageBox / showOpenDialog / showSaveDialog), installed by upstream on
+// every Wayland session and exposed by fix_computer_use_linux.nim 17f. Absent
+// (not a Wayland session) = none open.
+function _dialogOpen(){try{var f=globalThis.__cdbCuDialogOpen;return typeof f==="function"&&f()===!0}catch(e){return!1}}
+function _appName(){try{return _electron.app.getName()||"Claude"}catch(e){return"Claude"}}
+// The front app where the backend cannot name the window in front, as
+// upstream's own Wayland executor answers: Claude while one of its windows has
+// focus, else the shared screen. A background display never shows Claude's
+// windows, so there it is always the screen.
+function _screenFront(){
+  if(!_tgt){try{if(_electron.BrowserWindow.getFocusedWindow())return _hostFront()}catch(e){}}
+  return{bundleId:CU_SCREEN_APP,displayName:"Screen"};
+}
+// Claude's own window in front on a backend without a hit test. Upstream
+// takes it for the shared screen (a click there passes its gate) because its
+// Wayland input guard drops Claude's own injected input that lands in a
+// Claude window; _markInput feeds that guard. Where the guard is not
+// installed (globalThis.__cdbCuMarkInput missing: not a Wayland session, or
+// 17g absent) the answer is an id no grant covers, so upstream refuses the
+// input instead of delivering it into Claude's own UI.
+function _hostFront(){
+  if(typeof globalThis.__cdbCuMarkInput==="function")return{bundleId:_hostId(),displayName:_appName()};
+  return{bundleId:_hostId()+CU_WINDOW_SUFFIX,displayName:"Claude's own window"};
+}
+var CU_WINDOW_SUFFIX=" (window)";
+// Run one injected input through upstream's own-input marker (17g), with
+// upstream's kinds (its Wayland executor: motion "move", buttons "button",
+// wheel "wheel", keys and text "key"), on a backend without a hit test and
+// not on the background display (Claude's windows are not there). Elsewhere,
+// or without the marker, fn runs as before. The marker is an async counter:
+// no exec, no wait beyond fn itself.
+// release: a button / key release, which upstream sends even with a dialog
+// open (its own executor skips the dialog check there).
+// With a Claude dialog open the input is refused at delivery as well, with
+// upstream's text (its executor re-checks before every primitive). After the
+// delivery the marker stays held CU_MARK_SETTLE_MS on the event loop, so input
+// events queued while a synchronous bridge call ran are seen while the guard
+// is still armed (costs that much per action, on these backends only).
+var CU_MARK_SETTLE_MS=50,_CU_DIALOG_OPEN="A Claude dialog is open on the screen; wait for the user to answer it before clicking, scrolling or typing.";
+function _markInput(kinds,fn,release){
+  var m=globalThis.__cdbCuMarkInput;
+  if(_tgt)return fn();
+  var blind=_hitTestNow()==="none"||_blindSeen;
+  if(!blind)return fn();
+  if(!release&&_dialogOpen())return Promise.reject(new Error(_CU_DIALOG_OPEN));
+  if(typeof m!=="function")return fn();
+  var run=function(){return Promise.resolve(fn()).then(function(r){return new Promise(function(ok){setTimeout(function(){ok(r)},CU_MARK_SETTLE_MS)})})};
+  for(var i=kinds.length-1;i>=0;i--)run=(function(k,inner){return function(){return m(k,inner)}})(kinds[i],run);
+  return run();
+}
+// One [claude-cu] line per Computer Use lock (and one before the first) when
+// upstream's gate runs in that mode, naming the backend and why.
+var _noInfoSaid=!1;
+function _noInfoNote(be){
+  if(_noInfoSaid)return;
+  _noInfoSaid=!0;
+  var n=be.name,why;
+  if(/^gnome-portal-bridge/.test(n))why=_gnIntro.val===!0?"GNOME Shell Introspect gives no window positions":"GNOME Shell Introspect gave no window list (refused on stock GNOME 41+): no window positions, no window in front";
+  else if(/^wlroots-bridge/.test(n))why="the compositor reports no window geometry (the window in front is still known)";
+  else if(/XWayland/.test(n))why="x11-bridge on XWayland sees only X clients";
+  else if(n==="ydotool")why="ydotool has no window list";
+  else why="no window backend";
+  globalThis.__cdbDiag("[claude-cu] no window info: "+n+" ("+why+") - upstream's whole-screen rules apply: no hit test, the front app is "+(be.frontmost==="native"?"the window in front":"the shared screen, or Claude while one of its windows has focus")+", input refused while a Claude dialog is open, Claude's own windows drop its input");
+}
 // ── Allowlist mask (screenshot / zoom / resolvePrepareCapture) ──
 // allowedBundleIds undefined = legacy unmasked capture: only our own
 // Code-session handler sends that, with "Ask before Computer Use controls an
@@ -2167,9 +3216,12 @@ function _isHostWin(w){
   var r=_aWin(w);
   return !!(r&&(r.host||_akey(r.id)===_akey(_hostId())));
 }
+// Upstream's "Entire screen" pseudo-grant (16d / 16f) is not an app: it owns
+// no window, and the mask keeps nothing for it.
+function _maskPseudo(b){return _akey(b)===_akey(CU_SCREEN_APP)}
 function _maskAllowed(ids){
   var out=[],seen={},h=_akey(_hostId());
-  (Array.isArray(ids)?ids:[]).forEach(function(b){if(typeof b!=="string"||!b.trim())return;var k=_akey(b);if(!k||seen[k]||k===h)return;seen[k]=1;out.push(b)});
+  (Array.isArray(ids)?ids:[]).forEach(function(b){if(typeof b!=="string"||!b.trim()||_maskPseudo(b))return;var k=_akey(b);if(!k||seen[k]||k===h)return;seen[k]=1;out.push(b)});
   return out;
 }
 var _lastCap=null;
@@ -2186,13 +3238,28 @@ async function _maskFor(allowed){
   if(!Array.isArray(allowed))return null;
   var be=_bcBridge();if(!be)return null;
   var caps=await _bcProbe(be);
-  if(caps&&caps.error)throw new Error("Screenshot not taken: could not check whether "+be.name+" can hide the apps that are not allowed ("+caps.error+").");
+  if(caps&&caps.error){
+    globalThis.__cdbDiag("[claude-cu] screenshot: not taken via "+be.name+" (mask: could not check whether it can mask: "+caps.error+")");
+    throw new Error(MK_TXT_NOCHECK);
+  }
   if(!caps||!caps.mask)return null;
-  return{be:be,caps:caps,allowed:_maskAllowed(allowed)};
+  // asked: the caller's allowlist named an app (it may still hold only
+  // Claude's own id, which _maskAllowed drops). Only the pseudo-grant = not
+  // asked: --mask-all, as before.
+  return{be:be,caps:caps,allowed:_maskAllowed(allowed),asked:allowed.some(function(b){return typeof b==="string"&&!!b.trim()&&!_maskPseudo(b)})};
 }
-function _maskErr(mk,why){
-  var e=new Error("Screenshot not taken: "+mk.be.name+" could not hide the apps that are not allowed ("+why+"). Nothing was captured unmasked; try again, or ask the user.");
-  e.__cdbSurface=!0;e.__cdbMask=!0;return e;
+// What the model reads when a masked capture fails: no window id, app id,
+// pid or bridge name (those go to the log line, see _captureMasked).
+var MK_TXT_FAIL="Screenshot not taken: the screen capture could not hide the apps that are not allowed, so nothing was captured. Take the screenshot again; if it keeps failing, ask the user.";
+var MK_TXT_SHIFT="Screenshot not taken: the windows on the screen changed while it was being taken. Take the screenshot again.";
+var MK_TXT_OLD="Screenshot not taken: this Claude Desktop's screen capture helper cannot hide the apps that are not allowed, so nothing was captured. Ask the user to update Claude Desktop.";
+var MK_TXT_NOCHECK="Screenshot not taken: could not check whether the apps that are not allowed can be hidden on this screen, so nothing was captured. Take the screenshot again; if it keeps failing, ask the user.";
+// why: the detail for the log. kind: "shift" (the report disagrees with the
+// window list: retried once with a fresh list), "old" (bridge without the
+// mask flags), else a failed or malformed capture.
+function _maskErr(mk,why,kind){
+  var e=new Error(kind==="shift"?MK_TXT_SHIFT:kind==="old"?MK_TXT_OLD:MK_TXT_FAIL);
+  e.__cdbSurface=!0;e.__cdbMask=!0;e.__cdbMaskWhy=String(why);if(kind==="shift")e.__cdbMaskShift=!0;return e;
 }
 function _maskWindows(mk){return mk.be.kind==="x11"?_x11BridgeAsync(["windows"]):_wlBridgeCallAsync(["windows"])}
 // Canonical ids of masked windows for upstream's "X was hidden" note: no
@@ -2210,27 +3277,274 @@ function _maskHiddenIds(mk,list){
   return out;
 }
 function _rectsMeet(a,b){return !!a&&!!b&&a.width>0&&a.height>0&&b.width>0&&b.height>0&&a.x<b.x+b.width&&b.x<a.x+a.width&&a.y<b.y+b.height&&b.y<a.y+a.height}
+// ── What the model is told about a masked capture (issue #329) ──
+// A masked capture where no window of an approved app is shown is the mask
+// colour alone; returned as a success, the model reads it as "the app shows
+// nothing" and acts on a guess. So a non-empty allowlist never yields such an
+// image: when no kept window is shown, or no window resolves to an approved
+// app at all, the capture throws a __cdbSurface error naming the reason per
+// approved app - upstream's dispatcher hands that to the model as the tool's
+// error text (screenshot: captureError, zoom: "Tool \"zoom\" failed: ..."),
+// with no image. When some are shown, the image goes out with a note
+// (__cdbCuShotNote, sub-patch 5c puts it next to the image) on what covers a
+// shown window and which approved apps are missing and why. Names only:
+// approved apps by their Name, covering apps the same way upstream's
+// hidden-apps note names them, layer surfaces by namespace; never a title.
+// An empty allowlist keeps --mask-all (nothing granted: upstream refuses
+// before it captures).
+var _MK_NAME_RE=/^[\p{L}\p{N}_ .&'()+\-]+$/u;
+function _mkName(s){
+  var t=typeof s==="string"?s.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/g,"").trim():"";
+  return t&&t.length<=40&&_MK_NAME_RE.test(t)?t:null;
+}
+// An approved or covering app id -> its quoted Name (the id when it has no
+// entry, "(name withheld)" when neither reads as a name).
+function _mkApp(id){
+  if(typeof id!=="string")return"\"(name withheld)\"";
+  if(_akey(_acanon(id)||id)===_akey(_hostId()))return"one of Claude's own windows";
+  var r=_arec(_appIndex(),id);
+  var n=_mkName(r&&r.name)||_mkName(r?r.id:_araw(id).split("/").pop());
+  return"\""+(n||"(name withheld)")+"\"";
+}
+function _mkList(a){return a.length<2?a.join(""):a.slice(0,-1).join(", ")+" and "+a[a.length-1]}
+// coveredBy entries (app ids, "layer:<namespace>") -> phrases, deduped.
+// The window list of the capture being described (set by _captureMaskedOnce).
+var _mkWinsNow=null;
+// A covering app id -> the name of the app that owns a listed window with
+// that id (the hidden list's resolution: entry, alias, process), or null when
+// none has an entry (a Chromium app class without one would hand the model a
+// site's host).
+function _mkCoverName(c){
+  var ws=Array.isArray(_mkWinsNow)?_mkWinsNow:[];
+  for(var i=0;i<ws.length;i++){
+    var v=ws[i];if(!v||!_aOwnIds(v).some(function(o){return _akey(o)===_akey(c)}))continue;
+    var r=_aWin(v);
+    if(r&&r.host)return"one of Claude's own windows";
+    if(r&&r.rec){var n=_mkName(r.rec.name);return n?"\""+n+"\"":null}
+  }
+  if(_CR_APP_CLASS_RE.test(c))return null;
+  var e=_arec(_appIndex(),c),en=e&&_mkName(e.name);
+  if(e&&_akey(e.id)===_akey(_hostId()))return"one of Claude's own windows";
+  return en?"\""+en+"\"":null;
+}
+function _mkCovers(list){
+  var out=[];
+  (Array.isArray(list)?list:[]).forEach(function(c){
+    if(typeof c!=="string"||!c.trim())return;
+    var s;
+    if(/^layer:/.test(c)){var ns=_mkName(c.slice(6));s=ns?"a desktop layer (\""+ns+"\")":"a desktop layer"}
+    // wlroots-bridge: a window without an app id.
+    else if(c==="unknown")s="a window without an app name";
+    else s=_mkCoverName(c)||"\"(name withheld)\"";
+    if(out.indexOf(s)<0)out.push(s);
+  });
+  return out;
+}
+// One reason of one approved app -> "<what> - <what would help>".
+function _mkWhy(r){
+  var cv=_mkCovers(r.cover);
+  switch(r.reason){
+    case"no_window":return r.owner?"has no window of its own on screen - "+r.owner:"has no open window - if it was just opened, wait a moment and take the screenshot again; otherwise open it with open_application, or ask the user to open it";
+    case"other_workspace":return"is on another workspace - try open_application to bring it forward; if it stays hidden, ask the user to switch to that workspace";
+    case"minimized":return"is minimized - try open_application to bring it forward; if it stays hidden, ask the user to restore its window";
+    case"other_output":return"is on another monitor - use switch_display to capture that monitor";
+    case"outside_region":return"is not in the zoomed area - zoom on a part of the last screenshot where it is";
+    // open_application raises the window (activate-window); it cannot move a
+    // desktop layer (a notification, a bar): there only waiting or the user helps.
+    case"covered":
+      var lay=(r.cover||[]).length>0&&(r.cover||[]).every(function(v){return /^layer:/.test(v)});
+      if(lay)return"is covered by "+_mkList(cv)+" - wait until "+(cv.length>1?"they close":"it closes")+" and take a screenshot again, or ask the user to close "+(cv.length>1?"them":"it");
+      return"is covered by "+(cv.length?_mkList(cv):"something else on the screen")+" - try open_application to bring it forward; if it stays covered, ask the user to move "+(cv.length>1?"them":"it")+" out of the way";
+    case"capture_failed":return"could not be captured - take the screenshot again, and ask the user if it keeps failing";
+    default:return"could not be shown (no reason was given) - take the screenshot again";
+  }
+}
+// rows: [{app, why:[{reason, cover, owner}]}] -> "\"A\" is ... \"B\" has ...".
+function _mkRows(rows){
+  return rows.map(function(row){
+    var seen={},ph=[];
+    row.why.forEach(function(r){var p=_mkWhy(r);if(!seen[p]){seen[p]=1;ph.push(p)}});
+    return _mkApp(row.app)+" "+ph.join("; another of its windows ")+".";
+  }).join(" ");
+}
+function _mkRefuse(mk,rows){
+  var t=rows.length?"Screenshot not taken: no window of the approved apps can be shown, so the image would be the grey mask alone. "+_mkRows(rows)
+    :"Screenshot not taken: the only approved app is Claude itself, and Claude's own windows are never shown. Call request_access for the app to work in.";
+  var e=new Error(t);e.__cdbSurface=!0;e.__cdbMask=!0;e.__cdbMaskEmpty=!0;return e;
+}
+// The note for an image that shows some of the approved apps.
+var MK_ROWS_MAX=5;
+function _mkNote(rows,covered,capt){
+  var out=[];
+  covered.forEach(function(c){
+    // toplevel: a layer entry only says a shell surface's rect meets the
+    // window (the bridge cannot know what it draws: Omarchy's notification
+    // host spans the output, the bar meets every fullscreen window), and the
+    // window's own pixels are in the image - left out. Windows in front are
+    // real. output: whatever met the window was cut away - all named.
+    var cv=_mkCovers(capt==="toplevel"?c.cover.filter(function(v){return !/^layer:/.test(v)}):c.cover);if(!cv.length)return;
+    var who=_mkList(cv);
+    // Upstream's own note says the covering apps "got hidden": they are left
+    // out of the image, and still in front on the screen.
+    var pl=cv.length>1;
+    out.push(capt==="toplevel"?_mkApp(c.app)+" is shown whole. "+who.charAt(0).toUpperCase()+who.slice(1)+" "+(pl?"are":"is")+" left out of this image but "+(pl?"are":"is")+" in front of part of "+_mkApp(c.app)+" on the screen: a click on that part is refused."
+      :"Part of "+_mkApp(c.app)+" is covered on the screen by "+who+"; that part is painted over in this image.");
+  });
+  // At most MK_ROWS_MAX apps (a wildcard grant can name many).
+  if(rows.length)out.push("Not in this image: "+_mkRows(rows.slice(0,MK_ROWS_MAX))+(rows.length>MK_ROWS_MAX?" And "+(rows.length-MK_ROWS_MAX)+" more approved app"+(rows.length-MK_ROWS_MAX>1?"s":"")+".":""));
+  return out.join(" ");
+}
+// An approved app none of whose windows is in the window list. A web app or a
+// terminal app whose window could not be told apart (see "Web apps" /
+// "Terminal apps") may still be on screen under another app's id: a window of
+// its declared class (terminal) or of a Chromium app class for its host (web)
+// names that app, so the model can ask for it. Names only.
+function _mkNoWindow(app,cand){
+  var idx=_appIndex(),rec=_arec(idx,app),own=[];
+  if(rec&&(rec.term||rec.web))(cand||[]).forEach(function(w){
+    if(!w||w.is_dock===!0||w.is_desktop===!0)return;
+    var ids=_aOwnIds(w);
+    var maybe=rec.term&&ids.some(function(i){return _akey(i)===_akey(rec.term.cls)})||rec.web&&ids.some(function(i){var m=_CR_APP_CLASS_RE.exec(i);return !!m&&_akey(m[1]).indexOf(_akey(rec.web.hostname)+"_")===0});
+    if(!maybe)return;
+    var r=_aWin(w);
+    if(!r||!r.id||r.host||_akey(r.id)===_akey(rec.id))return;
+    if(own.indexOf(r.id)<0)own.push(r.id);
+  });
+  if(!own.length)return{reason:"no_window"};
+  var who=_mkList(own.map(_mkApp));
+  return{reason:"no_window",ownerId:own.join("+"),owner:"a window that may be it belongs to "+who+" here; to work in it, request access to "+who+" (that covers every window of "+(own.length>1?"those apps":who)+")"};
+}
+// The note waits for the image it belongs to: upstream's dispatcher (5c) and
+// our Code-tab handler ask with that image's base64; anything else gets none.
+// Up to MK_NOTES_MAX images keep their note (upstream's live preview and
+// pixel check capture too, between a screenshot and its answer); a note is
+// dropped when handed out, the oldest first beyond the cap.
+var MK_NOTES_MAX=8,_mkNotes=new Map();
+function _mkNoteSet(b64,t){
+  if(typeof b64!=="string"||!b64)return;
+  _mkNotes.delete(b64);
+  if(!t)return;
+  _mkNotes.set(b64,t);
+  while(_mkNotes.size>MK_NOTES_MAX)_mkNotes.delete(_mkNotes.keys().next().value);
+}
+globalThis.__cdbCuShotNote=function(b64){
+  if(typeof b64!=="string"||!b64||!_mkNotes.has(b64))return[];
+  var t=_mkNotes.get(b64);_mkNotes.delete(b64);
+  return[{type:"text",text:t}];
+};
+// One line per masked capture (claude-patches.log): mode, capture kind,
+// kept / shown counts and, when not everything is shown, why and for which
+// app ids (ids only, never titles).
+function _mkLog(be,taken,o){
+  var s="[claude-cu] screenshot: "+(taken?"captured":"not taken")+" via "+be.name+" (mask "+o.mode+(o.capt?", capture "+o.capt:"")+", kept "+o.kept+" window(s)"+(o.shown!=null?", shown "+o.shown:"");
+  if(o.rows&&o.rows.length)s+=", not shown: "+o.rows.map(function(r){return r.app+" ("+r.why.map(function(w){return w.reason+(w.reason!=="outside_region"&&w.cover&&w.cover.length?" by "+w.cover.join("+"):"")+(w.ownerId?" -> window of "+w.ownerId:"")}).join(", ")+")"}).join(", ");
+  if(o.covered&&o.covered.length)s+=", covered: "+o.covered.map(function(c){return c.app+" by "+c.cover.join("+")}).join(", ");
+  if(o.extra)s+=o.extra;
+  globalThis.__cdbDiag(s+")");
+}
+// ── Claude's own see-through overlays (issue #327) ──
+// Upstream's "Claude is using your computer" glow (<tmpdir>/cu-glow.html: the
+// whole display, transparent, click-through, always on top, shown on every
+// non-Wayland session while Computer Use holds the lock) and its teach overlay
+// (<tmpdir>/cu-teach-<ms>.html, the work area) are BrowserWindows with
+// focusable:false, which Electron creates override-redirect on X11. Upstream
+// hides its windows from capture with setContentProtection, a no-op on X11,
+// so x11-bridge's mask saw one window above every app and masked the whole
+// image (kept [], kept_hidden [the app]). The ids go to x11-bridge with
+// --ignore-window (doctor capabilities.screenshot_mask_ignore); the bridge
+// treats such a window as absent and honours an id only for a viewable
+// override-redirect window whose _NET_WM_PID is its parent (this process), so
+// a wrong id here can never uncover another app's window. Found by the page
+// each window loaded (no upstream code anchor): a renamed page finds nothing
+// and capture stays as before (masked under the overlay);
+// scripts/tests/linux/test-cu-screenshot-mask.mjs [I] checks both names in
+// the bundle. XID = getNativeWindowHandle() (X11: the window's XID as an
+// unsigned long, little-endian; XIDs fit in 29 bits). Only for the host
+// display: a background display (_tgt) never shows Claude's windows.
+var CU_OWN_OVERLAY_PAGE_RE=/^file:\/\/.*\/(?:cu-glow|cu-teach-\d+)\.html$/;
+function _ownOverlayXids(){
+  var out=[];
+  if(_tgt||_wayland)return out;
+  var all;
+  try{var B=_electron.BrowserWindow;all=B&&typeof B.getAllWindows==="function"?B.getAllWindows():[]}catch(e){return out}
+  (all||[]).forEach(function(bw){
+    try{
+      if(!bw||bw.isDestroyed()||!bw.isVisible())return;
+      var wc=bw.webContents;if(!wc||wc.isDestroyed())return;
+      if(!CU_OWN_OVERLAY_PAGE_RE.test(String(wc.getURL()||"")))return;
+      var h=bw.getNativeWindowHandle(),id=h&&h.length>=4?h.readUInt32LE(0):0;
+      if(id>0&&out.indexOf(String(id))<0)out.push(String(id));
+    }catch(e){}
+  });
+  return out;
+}
+// One line per bridge binary whose doctor lacks --ignore-window while an
+// overlay is up (an X11_BRIDGE_BIN override older than the bundled bridge).
+// With such a bridge the glow is always off (no compositing key = unknown),
+// so in practice that overlay is the teach overlay.
+var _ovOldSaid={};
+// Last "did not look through" line: logged when it changes, not per capture.
+var _ovRefusedLast="";
+function _ovOldNote(be){
+  if(_ovOldSaid[be.bin])return;
+  _ovOldSaid[be.bin]=1;
+  globalThis.__cdbDiag("[claude-cu] "+be.name+" ("+be.bin+") does not take --ignore-window (doctor capabilities.screenshot_mask_ignore missing): Claude's teach overlay covers the screen, so masked screenshots during teach mode are refused (the approved apps are covered); the glow stays off with this bridge (it does not report capabilities.compositing) - use the bundled x11-bridge");
+}
 // Masked capture of a region. x/y/w/h: x11-bridge root pixels, or the wlroots
-// global logical region (lx..). Returns {base64, imgW, imgH, mimeType, hidden}.
+// global logical region (lx..). Returns {base64, imgW, imgH, mimeType, hidden}
+// and leaves the image's note for __cdbCuShotNote; throws a __cdbSurface error
+// when the image could show no approved app (see "What the model is told").
+// A report that disagrees with the window list (wlroots ids shift when a
+// window opens or closes; an x11 id that was not asked for) is retried once
+// with a fresh window list; every check holds on both attempts.
 async function _captureMasked(mk,x,y,w,h){
+  // The retry runs only within the lock this capture began in (_capLockGen):
+  // after a release _captureRegion answers with the cancellation.
+  var gen=_capLockGen;
+  for(var at=0;;at++){
+    try{return await _captureMaskedOnce(mk,x,y,w,h)}
+    catch(e){
+      if(!e||!e.__cdbMaskWhy)throw e;
+      var line="[claude-cu] screenshot: not taken via "+mk.be.name+" (mask: "+e.__cdbMaskWhy+")";
+      if(e.__cdbMaskShift&&!at&&gen===_capLockGen){globalThis.__cdbDiag(line+" - the report disagrees with the window list: listing the windows again and capturing once more");continue}
+      globalThis.__cdbDiag(line+(e.__cdbMaskShift?" - again on the second attempt":""));
+      throw e;
+    }
+  }
+}
+async function _captureMaskedOnce(mk,x,y,w,h){
   if(_tgt&&_tgt.refuse)throw _tgtErr();
+
   var be=mk.be,wins;
   try{wins=await _maskWindows(mk)}catch(e){throw _maskErr(mk,"window list failed: "+(e&&e.message||e))}
+  _mkWinsNow=Array.isArray(wins)?wins:null;
   if(!Array.isArray(wins))throw _maskErr(mk,"the window list is not an array");
   var cand=wins.filter(function(v){return v&&!_isHostWin(v)});
   var keep=mk.allowed.length&&globalThis.__cdbCuAppIds?globalThis.__cdbCuAppIds.windowIds(mk.allowed,cand):[];
+  // An allowlist with no window of any approved app: --mask-all would be the
+  // mask colour alone. Nothing is captured; the model is told why.
+  if(mk.asked&&!keep.length){
+    var nrows=mk.allowed.map(function(a){return{app:a,why:[_mkNoWindow(a,cand)]}});
+    _mkLog(be,!1,{mode:"keep",kept:0,shown:0,rows:nrows,extra:nrows.length?"":", only Claude's own id approved"});
+    throw _mkRefuse(mk,nrows);
+  }
   var flags=[];
   if(keep.length)keep.forEach(function(id){flags.push("--keep-window",id)});else flags.push("--mask-all");
-  var x11=be.kind==="x11",r=null;
+  var x11=be.kind==="x11",r=null,ign=[],mr=null;
+  if(x11){
+    var ov=_ownOverlayXids();
+    if(ov.length){if(mk.caps&&mk.caps.ignore===!0)ign=ov;else _ovOldNote(be)}
+    ign.forEach(function(id){flags.push("--ignore-window",id)});
+  }
   for(var tr=0;;tr++){
-    var mr=x11?await _x11MonForRegion(x,y):await _wlMonForRegion(x,y);
+    mr=x11?await _x11MonForRegion(x,y):await _wlMonForRegion(x,y);
     // Bridge zoom coordinates are relative to --display: never without it.
     if(!mr||!mr.name)throw _maskErr(mk,"no monitor list from the bridge");
     var args=["zoom","--x",String(mr.x),"--y",String(mr.y),"--w",String(w),"--h",String(h),"--display",mr.name].concat(flags);
     try{r=x11?await _x11BridgeAsync(args):await _wlBridgeCallAsync(args);break}
     catch(ze){
       if(!tr&&_cuDisplayNotFound(ze)){globalThis.__cdbDiag("[claude-cu] "+be.name+" masked zoom: display "+mr.name+" not found - monitor list refreshed, retrying once");if(x11)_x11ScreensInvalidate();else _wlScreensInvalidate();continue}
-      if(_bridgeExitCode(ze)===2){_bcForget(be);throw _maskErr(mk,"this "+be.name+" does not take --keep-window / --mask-all; update the package")}
+      if(_bridgeExitCode(ze)===2){_bcForget(be);throw _maskErr(mk,"this "+be.name+" does not take --keep-window / --mask-all; update the package","old")}
       if(ze&&ze.__cdbSurface)throw ze;
       throw _maskErr(mk,(ze&&ze.message||String(ze)).trim());
     }
@@ -2242,30 +3556,166 @@ async function _captureMasked(mk,x,y,w,h){
     // x11-bridge: XIDs are stable while it holds the server grab; it reports
     // the masked windows itself (topmost first, client ids as in `windows`).
     var kept=Array.isArray(m.kept)?m.kept.map(String):[];
-    for(var ki=0;ki<kept.length;ki++)if(keep.indexOf(kept[ki])<0)throw _maskErr(mk,"it kept window "+kept[ki]+", which was not asked for");
+    for(var ki=0;ki<kept.length;ki++)if(keep.indexOf(kept[ki])<0)throw _maskErr(mk,"it kept window "+kept[ki]+", which was not asked for","shift");
+    var ignd=Array.isArray(m.ignored)?m.ignored.map(String):[];
+    for(var ii=0;ii<ignd.length;ii++)if(ign.indexOf(ignd[ii])<0)throw _maskErr(mk,"it looked through window "+ignd[ii]+", which was not asked for","shift");
+    if(ign.length&&!Array.isArray(m.ignored))throw _maskErr(mk,"it did not report the --ignore-window outcome");
+    var refused=Array.isArray(m.ignored_refused)?m.ignored_refused:[];
+    var rl=refused.length?"[claude-cu] x11-bridge did not look through Claude's own overlay "+refused.map(function(v){return(v&&v.id)+" ("+(v&&v.reason)+")"}).join(", ")+" - the apps under it are masked":"";
+    if(rl!==_ovRefusedLast){_ovRefusedLast=rl;if(rl)globalThis.__cdbDiag(rl)}
     var byId={};wins.forEach(function(v){if(v&&v.id!=null)byId[String(v.id)]=v});
-    hidden=_maskHiddenIds(mk,(Array.isArray(m.masked)?m.masked:[]).map(function(v){var lw=v&&byId[String(v.id)];return lw?lw:null}).filter(Boolean));
-  }else{
-    // wlroots-bridge ids are per-connection protocol ids that can shift
-    // between our `windows` and its capture: every kept entry (the app id and
-    // title the bridge resolved at capture time) must be a window we asked
-    // for, of an allowed app, and never Claude. A title that changed is fine
-    // (terminals, browsers); an app id that is not allowed discards the image.
-    var listed={};cand.forEach(function(v){if(v&&v.id!=null)listed[String(v.id)]=v});
-    var kl=Array.isArray(m.kept)?m.kept:[];
-    if(kl.length!==keep.length)throw _maskErr(mk,"it reported "+kl.length+" kept window(s) for "+keep.length+" asked for");
-    for(var wi=0;wi<kl.length;wi++){
-      var k=kl[wi]||{},lw2=listed[String(k.id)],aid=typeof k.appId==="string"?k.appId:"";
-      // The listed window (pid included) when it still has this app id, else
-      // the app id alone.
-      var pw=lw2&&aid&&(lw2.desktop_file_name===aid||lw2.resource_class===aid)?lw2:{id:k.id,title:k.title,desktop_file_name:aid||null,resource_class:aid||null,resource_name:null,pid:null};
-      var okWin=!!aid&&keep.indexOf(String(k.id))>=0&&!_isHostWin(pw)&&mk.allowed.some(function(b){return _aOwns(b,pw)});
-      if(!okWin)throw _maskErr(mk,"kept window "+k.id+" ("+(aid||"no app id")+") is not a window of an allowed app any more - the image was discarded");
+    var maskedWins=(Array.isArray(m.masked)?m.masked:[]).map(function(v){var lw=v&&byId[String(v.id)];return lw?lw:null}).filter(Boolean);
+    hidden=_maskHiddenIds(mk,maskedWins);
+    var xextra=(Array.isArray(m.ignored)&&m.ignored.length?", looked through "+m.ignored.length+" Claude overlay(s)":"")+(Array.isArray(m.kept_hidden)&&m.kept_hidden.length?", "+m.kept_hidden.length+" kept window(s) fully covered":"")+(hidden.length?", masked apps "+hidden.join(","):"");
+    if(!keep.length){
+      _mkLog(be,!0,{mode:m.mode,kept:0,extra:xextra});
+      return{base64:r.base64,imgW:r.width||w,imgH:r.height||h,mimeType:"image/jpeg",hidden:hidden};
     }
-    var reg={x:x,y:y,width:w,height:h};
-    hidden=_maskHiddenIds(mk,wins.filter(function(v){return v&&keep.indexOf(String(v.id))<0&&v.is_minimized!==!0&&v.is_visible!==!1&&_rectsMeet(v.geometry,reg)}));
+    // Which approved app is in the image (issue #329): `kept` = asked-for ids
+    // with visible pixels, `kept_hidden` = viewable but no pixel here (outside
+    // the region, or fully covered), `kept_missing` = not viewable (unmapped:
+    // another workspace, minimized). None kept = the mask colour alone: the
+    // reasons as text instead of the image.
+    var xh=m.kept_hidden==null?[]:m.kept_hidden,xm=m.kept_missing==null?[]:m.kept_missing,xa=m.auto_kept==null?[]:m.auto_kept;
+    if(!Array.isArray(xh)||!Array.isArray(xm)||!Array.isArray(xa))throw _maskErr(mk,"its kept_hidden / kept_missing / auto_kept are not lists");
+    xh=xh.map(String);xm=xm.map(String);
+    for(var xi=0;xi<xh.length+xm.length;xi++){var xid=xi<xh.length?xh[xi]:xm[xi-xh.length];if(keep.indexOf(xid)<0)throw _maskErr(mk,"it reported window "+xid+", which was not asked for","shift")}
+    var xreg={x:x,y:y,width:w,height:h},xrows=[];
+    mk.allowed.forEach(function(a){
+      var mine=keep.filter(function(id){var lw=byId[id];return !!lw&&_aOwns(a,lw)});
+      if(mine.some(function(id){return kept.indexOf(id)>=0}))return;
+      xrows.push({app:a,why:mine.length?mine.map(function(id){
+        var lw=byId[id];
+        if(xm.indexOf(id)>=0)return{reason:lw.is_minimized===!0?"minimized":"other_workspace"};
+        if(xh.indexOf(id)<0)return{reason:""};
+        // Not on the captured monitor: switch_display; on it but outside a zoom: zoom elsewhere.
+        if(lw.geometry&&mr&&mr.geo&&!_rectsMeet(lw.geometry,mr.geo))return{reason:"other_output"};
+        if(lw.geometry&&!_rectsMeet(lw.geometry,xreg))return{reason:"outside_region"};
+        // Masked windows above it (the window list's stacking order), by app.
+        var cov=[];
+        maskedWins.forEach(function(v){
+          if(!_rectsMeet(v.geometry,lw.geometry)||typeof v.stacking_order==="number"&&typeof lw.stacking_order==="number"&&v.stacking_order<lw.stacking_order||v.is_dock===!0||v.is_desktop===!0)return;
+          var rw=_aWin(v);if(rw&&rw.id&&cov.indexOf(rw.id)<0)cov.push(rw.host?_hostId():rw.id);
+        });
+        // Claude's own overlay the bridge would not look through (not in `windows`).
+        if(refused.length&&cov.indexOf(_hostId())<0)cov.push(_hostId());
+        return{reason:"covered",cover:cov};
+      }):[_mkNoWindow(a,cand)]});
+    });
+    // auto_kept: an approved window's own menus / tooltips with pixels here
+    // (a zoom on a menu hanging past its window): the app is in the image,
+    // but whose it is the report does not say - image, no note.
+    if(!kept.length&&!xa.length){
+      _mkLog(be,!1,{mode:m.mode,kept:keep.length,shown:0,rows:xrows,extra:xextra});
+      throw _mkRefuse(mk,xrows);
+    }
+    if(!kept.length)xrows=[];
+    _mkNoteSet(r.base64,_mkNote(xrows,[],"output"));
+    _mkLog(be,!0,{mode:m.mode,kept:keep.length,rows:xrows,extra:xextra});
+    return{base64:r.base64,imgW:r.width||w,imgH:r.height||h,mimeType:"image/jpeg",hidden:hidden};
   }
-  globalThis.__cdbDiag("[claude-cu] screenshot: captured via "+be.name+" (mask "+m.mode+", kept "+keep.length+" window(s)"+(hidden.length?", masked apps "+hidden.join(","):"")+")");
+  // wlroots-bridge ids are per-connection protocol ids that can shift
+  // between our `windows` and its capture: every kept entry (the app id and
+  // title the bridge resolved at capture time) must be a window we asked
+  // for, of an allowed app, and never Claude. A title that changed is fine
+  // (terminals, browsers); an app id that is not allowed discards the image.
+  // Per kept window the bridge says whether its pixels are in the image
+  // (shown), why not (reason) and what sits over it (coveredBy); mask.capture
+  // says how ("toplevel": each kept window on its own, "output": the
+  // composited output with the rest cut away; missing = "output"). A bridge
+  // without `shown` (older) is read from `visible` and `regions`. A field of
+  // the wrong type discards the image.
+  var listed={};cand.forEach(function(v){if(v&&v.id!=null)listed[String(v.id)]=v});
+  var kl=Array.isArray(m.kept)?m.kept:[];
+  if(kl.length!==keep.length)throw _maskErr(mk,"it reported "+kl.length+" kept window(s) for "+keep.length+" asked for","shift");
+  var reg={x:x,y:y,width:w,height:h};
+  // --mask-all (nothing approved yet): the mask over everything, as before.
+  if(!keep.length){
+    hidden=_maskHiddenIds(mk,wins.filter(function(v){return v&&v.is_minimized!==!0&&v.is_visible!==!1&&_rectsMeet(v.geometry,reg)}));
+    _mkLog(be,!0,{mode:m.mode,kept:0,extra:hidden.length?", masked apps "+hidden.join(","):""});
+    return{base64:r.base64,imgW:r.width||w,imgH:r.height||h,mimeType:"image/jpeg",hidden:hidden};
+  }
+  var capt=m.capture==null?"output":m.capture;
+  if(capt!=="toplevel"&&capt!=="output")throw _maskErr(mk,"it reported an unknown capture kind "+String(JSON.stringify(m.capture)).slice(0,40));
+  var regs=m.regions==null?null:m.regions;
+  if(regs!==null&&!Array.isArray(regs))throw _maskErr(mk,"its regions are not a list");
+  var hasShown=kl.some(function(k){return !!k&&typeof k==="object"&&k.shown!==void 0});
+  if(!hasShown&&regs===null)throw _maskErr(mk,"it reported neither shown windows nor regions");
+  var ents=[],seenK={};
+  for(var wi=0;wi<kl.length;wi++){
+    var k=kl[wi];
+    if(!k||typeof k!=="object")throw _maskErr(mk,"a kept entry is not an object");
+    var lw2=listed[String(k.id)],aid=typeof k.appId==="string"?k.appId:"";
+    // The listed window (pid included) when it still has this app id, else
+    // the app id alone.
+    var pw=lw2&&aid&&(lw2.desktop_file_name===aid||lw2.resource_class===aid)?lw2:{id:k.id,title:k.title,desktop_file_name:aid||null,resource_class:aid||null,resource_name:null,pid:null};
+    // Same app id, another process (an id that moved to a window of another
+    // app with the same class, told apart by its process): not the listed window.
+    if(pw===lw2&&typeof k.pid==="number"&&typeof lw2.pid==="number"&&k.pid!==lw2.pid)throw _maskErr(mk,"kept window "+k.id+" has pid "+k.pid+" at capture, "+lw2.pid+" in the window list","shift");
+    var owner=null;
+    if(aid&&keep.indexOf(String(k.id))>=0&&!_isHostWin(pw))for(var oi=0;oi<mk.allowed.length&&!owner;oi++)if(_aOwns(mk.allowed[oi],pw))owner=mk.allowed[oi];
+    if(!owner)throw _maskErr(mk,"kept window "+k.id+" ("+(aid||"no app id")+") is not a window of an allowed app any more - the image was discarded","shift");
+    if(seenK[String(k.id)])throw _maskErr(mk,"it reported window "+k.id+" twice");
+    seenK[String(k.id)]=1;
+    if(hasShown&&typeof k.shown!=="boolean")throw _maskErr(mk,"kept window "+k.id+" has no shown flag");
+    if(k.reason!=null&&typeof k.reason!=="string")throw _maskErr(mk,"kept window "+k.id+" has a reason that is not a string");
+    if(k.coveredBy!=null&&!(Array.isArray(k.coveredBy)&&k.coveredBy.every(function(c){return typeof c==="string"})))throw _maskErr(mk,"kept window "+k.id+" has a coveredBy that is not a list of strings");
+    if(k.pid!=null&&!(typeof k.pid==="number"&&k.pid>0))throw _maskErr(mk,"kept window "+k.id+" has a pid that is not a number");
+    var shown=hasShown?k.shown:k.visible!==!1&&regs.length>0;
+    if(shown&&k.visible===!1)throw _maskErr(mk,"it showed window "+k.id+", which it reported not visible");
+    // Not shown: the bridge's reason, else what the window list says.
+    var why=hasShown?(k.reason||""):k.visible===!1?"":"covered";
+    if(!shown&&!why&&lw2){
+      if(lw2.is_minimized===!0)why="minimized";
+      else if(lw2.is_visible===!1)why="other_workspace";
+      else if(lw2.geometry&&!_rectsMeet(lw2.geometry,reg))why=lw2.output&&mr&&mr.name&&lw2.output!==mr.name||mr&&mr.geo&&!_rectsMeet(lw2.geometry,mr.geo)?"other_output":"outside_region";
+    }
+    if(!shown&&!why&&k.visible===!1)why="other_workspace";
+    ents.push({id:String(k.id),app:owner,shown:shown,reason:why,geo:lw2&&lw2.geometry&&lw2.geometry.width>0&&lw2.geometry.height>0?lw2.geometry:null,pid:typeof k.pid==="number"?k.pid:null,cover:(k.coveredBy||[]).filter(function(c){return !!c.trim()})});
+  }
+  var nShown=ents.filter(function(e){return e.shown}).length;
+  if(nShown&&regs!==null&&!regs.length)throw _maskErr(mk,"it showed "+nShown+" window(s) but reported no region");
+  // Popups / menus the bridge drew with a kept window (toplevel capture,
+  // Hyprland): each must belong to a kept window that is shown, by the pid
+  // the compositor gave both at capture time.
+  var nCh=0,chExtra="";
+  if(m.children!=null){
+    if(!Array.isArray(m.children))throw _maskErr(mk,"its children are not a list");
+    var isN=function(v){return typeof v==="number"&&isFinite(v)};
+    m.children.forEach(function(c){
+      if(!c||typeof c!=="object"||typeof c.address!=="string"||!isN(c.pid)||(typeof c.parent!=="string"&&!isN(c.parent))||!c.rect||typeof c.rect!=="object"||!isN(c.rect.x)||!isN(c.rect.y)||!isN(c.rect.width)||!isN(c.rect.height))throw _maskErr(mk,"a child entry is malformed");
+      var pe=null;for(var ci=0;ci<ents.length;ci++)if(ents[ci].id===String(c.parent))pe=ents[ci];
+      if(!pe||!pe.shown)throw _maskErr(mk,"it drew a child of window "+c.parent+", which is not a shown kept window","shift");
+      if(pe.pid===null||pe.pid!==c.pid)throw _maskErr(mk,"it drew a child of window "+c.parent+" whose pid does not match that window's","shift");
+    });
+    nCh=m.children.length;
+  }
+  if(m.childrenSkipped!=null&&!(typeof m.childrenSkipped==="number"&&m.childrenSkipped>=0))throw _maskErr(mk,"its childrenSkipped is not a number");
+  if(nCh||m.childrenSkipped>0)chExtra=", children "+nCh+(m.childrenSkipped>0?" ("+m.childrenSkipped+" skipped)":"");
+  // A zoom that meets none of the shown windows: the bridge's `shown` is per
+  // output, so the crop would be the mask colour alone. Only when every shown
+  // window has a listed rect and no child was drawn (a child may reach out).
+  var shownE=ents.filter(function(e){return e.shown});
+  if(shownE.length&&!nCh&&shownE.every(function(e){return !!e.geo})&&!shownE.some(function(e){return _rectsMeet(e.geo,reg)})){
+    shownE.forEach(function(e){e.shown=!1;e.reason="outside_region"});
+    nShown=0;
+  }
+  // Per approved app, in grant order: shown when any of its windows is.
+  var rows=[],covered=[];
+  mk.allowed.forEach(function(a){
+    var mine=ents.filter(function(e){return e.app===a});
+    var vis=mine.filter(function(e){return e.shown});
+    vis.forEach(function(e){if(e.cover.length)covered.push({app:a,cover:e.cover})});
+    if(vis.length)return;
+    rows.push({app:a,why:mine.length?mine.map(function(e){return{reason:e.reason,cover:e.cover}}):[_mkNoWindow(a,cand)]});
+  });
+  if(!nShown){
+    _mkLog(be,!1,{mode:m.mode,capt:capt,kept:keep.length,shown:0,rows:rows});
+    throw _mkRefuse(mk,rows);
+  }
+  hidden=_maskHiddenIds(mk,wins.filter(function(v){return v&&keep.indexOf(String(v.id))<0&&v.is_minimized!==!0&&v.is_visible!==!1&&_rectsMeet(v.geometry,reg)}));
+  _mkNoteSet(r.base64,_mkNote(rows,covered,capt));
+  _mkLog(be,!0,{mode:m.mode,capt:capt,kept:keep.length,shown:nShown,rows:rows,covered:covered,extra:chExtra+(hidden.length?", masked apps "+hidden.join(","):"")});
   return{base64:r.base64,imgW:r.width||w,imgH:r.height||h,mimeType:"image/jpeg",hidden:hidden};
 }
 // wlroots-bridge with window geometry: the app whose window is topmost
@@ -2282,16 +3732,206 @@ function _wlHitTest(wins,x,y){
   }
   return best;
 }
+// X11: upstream docks Claude's main window into a side panel when the Computer
+// Use lock is taken and restores it at release (always on top while docked).
+// Both end with setAlwaysOnTop on that window, which emits
+// "always-on-top-changed" once its bounds are applied: the real signal used
+// here, per lock change, on the windows that can dock (visible, focusable;
+// Claude's overlays are not focusable), bounded by a timeout.
+//  - The first capture after an acquire waits for the dock, so Claude's own
+//    window no longer covers the app in it (__lockSettled does not wait for
+//    it; _x11DockWait() is awaited by screenshot / resolvePrepareCapture, and
+//    by the Linux tool handler before its first hit test, via __dockWait).
+//  - After the dock and the restore the window's input shape is sent again:
+//    xfwm4 keeps the frame's input shape from the last ShapeNotify, so a
+//    shape change made while docked left the restored window clickable only
+//    in the dock-sized corner. Re-sending it is a no-op where nothing was wrong.
+// Only on an X11 session in regular mode without the background display
+// (kwin mode uses the other executor; Wayland windows have no X shape).
+function _isX11Dock(){return !_wayland&&!globalThis.__cuKwinMode&&!_tgt}
+// ── X11 dock: input shape and first capture (begin)
+var X11_DOCK_WAIT_MS=1500,X11_RESTORE_WAIT_MS=4000,_x11DockWaiter=null,_x11DockGen=0;
+function _x11DockWindows(){try{return _electron.BrowserWindow.getAllWindows().filter(function(w){return !w.isDestroyed()&&w.isVisible()&&w.isFocusable()})}catch(e){return[]}}
+// Send the window's input shape again: a lone setIgnoreMouseEvents(false) on a
+// window that is not ignored changes nothing (measured: xfwm4 keeps the stale
+// frame shape), so it is set and reset back to back - two ShapeNotify, the
+// window manager recomputes the frame from the full shape. Only the window
+// that docked (it is never click-through otherwise).
+function _x11Reshape(w,why){try{if(!w.isDestroyed()){w.setIgnoreMouseEvents(!0);w.setIgnoreMouseEvents(!1);globalThis.__cdbDiag?.("[claude-cu] x11 dock: input shape sent again ("+why+")")}}catch(e){}}
+function _x11DockOnLock(held){
+  var gen=++_x11DockGen;
+  _x11DockWaiter=null;
+  if(!_isX11Dock())return;
+  var wins=_x11DockWindows();
+  // Docked already (always on top): upstream's dock changes nothing, no signal.
+  if(!wins.length||held&&wins.some(function(w){return w.isAlwaysOnTop()}))return;
+  var offs=[],timer=null,done=!1;
+  var p=new Promise(function(resolve){
+    function finish(why){if(done)return;done=!0;if(timer)clearTimeout(timer);offs.forEach(function(f){f()});resolve(why)}
+    wins.forEach(function(w){
+      function onTop(e,v){
+        if(v!==held||gen!==_x11DockGen)return;
+        _x11Reshape(w,held?"docked":"restored");
+        // A maximize after the restore resizes once more: send it again then.
+        var again=function(){_x11Reshape(w,"resized after "+(held?"dock":"restore"))};
+        w.once("resize",again);
+        var t2=setTimeout(function(){try{w.removeListener("resize",again)}catch(e){}},1000);if(t2&&t2.unref)t2.unref();
+        finish(held?"docked":"restored");
+      }
+      w.on("always-on-top-changed",onTop);
+      offs.push(function(){try{w.removeListener("always-on-top-changed",onTop)}catch(e){}});
+    });
+    timer=setTimeout(function(){finish("no "+(held?"dock":"restore")+" signal")},held?X11_DOCK_WAIT_MS:X11_RESTORE_WAIT_MS);
+    if(timer&&timer.unref)timer.unref();
+  });
+  if(held)_x11DockWaiter=p;
+}
+// ── Dock check (every session where upstream docks) ──
+// Upstream's [cu-side-panel] controller docks Claude's main window when the
+// lock is taken: a maximized window is unmaximize()d, then animated with
+// setBounds over ~220 ms to a 520x720 panel at the top right of its work area,
+// then setAlwaysOnTop(true, "screen-saver"). GNOME Wayland applies the
+// unmaximize asynchronously and, now and then, only AFTER the animation: its
+// restore of the pre-maximize size (e.g. 1085x778) then overrides the dock and
+// the large window stays over the target app (on a row without a hit test the
+// model's clicks then land on Claude's own window, which drops them).
+// The check: the target is the last bounds upstream itself passed to
+// setBounds during this acquire (recorded on the window instance, no bundle
+// anchor; the animation's last frame is exactly the target), else the bounds
+// at the dock signal (nothing to animate). After the dock's own signal
+// (always-on-top-changed true) the window is checked on every resize /
+// unmaximize for DOCK_VERIFY_MS (and once DOCK_SETTLE_MS after the signal
+// when it was off already then and no event came): more than DOCK_TOLERANCE_PX off
+// the target size (a window still maximized has the maximized size), and
+// still docked (always on top, same
+// lock) -> asked ONCE more (unmaximize if needed, then setBounds(target)).
+// Size only: Wayland ignores a client's position. Not in kwin mode (its own
+// executor docks through the bridge) and not with the background display
+// (nothing on the user's desktop is involved). The release is left alone:
+// upstream's restore ends with its own maximize() and nothing races it.
+var DOCK_VERIFY_MS=1500,DOCK_SETTLE_MS=400,DOCK_TOLERANCE_PX=32,_dockGen=0,_dockOff=null;
+function _dockVerifyOnLock(held){
+  var gen=++_dockGen;
+  if(_dockOff){var f=_dockOff;_dockOff=null;f()}
+  if(!held||globalThis.__cuKwinMode||_tgt)return;
+  var wins=_x11DockWindows();
+  if(!wins.length||wins.some(function(w){return w.isAlwaysOnTop()}))return;
+  var offs=[],timer=null;
+  function cleanup(){if(timer){clearTimeout(timer);timer=null}offs.splice(0).forEach(function(f){try{f()}catch(e){}})}
+  _dockOff=cleanup;
+  wins.forEach(function(w){
+    var proto=w.setBounds,asked=null;
+    var rec=function(b){if(b&&typeof b==="object"&&b.width>0&&b.height>0)asked={x:b.x,y:b.y,width:b.width,height:b.height};return proto.apply(this,arguments)};
+    function unrec(){if(w.setBounds===rec){try{delete w.setBounds}catch(e){}if(w.setBounds===rec)w.setBounds=proto}}
+    w.setBounds=rec;
+    offs.push(unrec);
+    function onTop(e,v){
+      if(v!==!0||gen!==_dockGen)return;
+      try{w.removeListener("always-on-top-changed",onTop)}catch(er){}
+      unrec();
+      var b0=w.getBounds(),target=asked||{x:b0.x,y:b0.y,width:b0.width,height:b0.height},again=!1;
+      // Size only. isMaximized() alone is no miss: at the dock signal GNOME
+      // may not have confirmed the unmaximize yet while the size is right; the
+      // miss is the size its late restore then applies.
+      function off(){if(w.isDestroyed())return !1;var b=w.getBounds();return Math.abs(b.width-target.width)>DOCK_TOLERANCE_PX||Math.abs(b.height-target.height)>DOCK_TOLERANCE_PX}
+      function check(why){
+        if(gen!==_dockGen||again||w.isDestroyed()||!w.isAlwaysOnTop()||!off())return;
+        again=!0;
+        var b=w.getBounds();
+        globalThis.__cdbDiag("[claude-cu] dock: Claude's window is "+b.width+"x"+b.height+(w.isMaximized()?" (maximized)":"")+" after the dock, not the "+target.width+"x"+target.height+" upstream asked for ("+why+") - asking once more");
+        try{if(w.isMaximized())w.unmaximize();proto.call(w,target)}catch(er){}
+      }
+      // A resize that leaves the size the signal saw is no news (the
+      // configure of upstream's own last frame): the late one changes it.
+      var bs=w.getBounds();
+      var onResize=function(){var b=w.getBounds();if(Math.abs(b.width-bs.width)<=1&&Math.abs(b.height-bs.height)<=1)return;check("late resize")},onUnmax=function(){check("late unmaximize")};
+      w.on("resize",onResize);w.on("unmaximize",onUnmax);
+      offs.push(function(){try{w.removeListener("resize",onResize);w.removeListener("unmaximize",onUnmax)}catch(er){}});
+      // Off already at the signal (GNOME may still report the maximized
+      // size): the window manager's own late resize / unmaximize, which
+      // follows, owns the one re-assert - spending it now would leave that
+      // late restore in place. Only when none comes within DOCK_SETTLE_MS is
+      // it asked from here.
+      if(off()){var ts=setTimeout(function(){check("still off "+DOCK_SETTLE_MS+" ms after the dock signal")},DOCK_SETTLE_MS);if(ts&&ts.unref)ts.unref();offs.push(function(){clearTimeout(ts)})}
+      if(timer)clearTimeout(timer);
+      timer=setTimeout(function(){
+        timer=null;
+        if(gen!==_dockGen)return;
+        if(!w.isDestroyed()&&w.isAlwaysOnTop()&&off()){var b=w.getBounds();globalThis.__cdbDiag("[claude-cu] dock: Claude's window stayed "+b.width+"x"+b.height+", not the docked "+target.width+"x"+target.height+" - it may cover part of the screen while Computer Use runs")}
+        else if(again)globalThis.__cdbDiag("[claude-cu] dock: the docked size holds after asking once more");
+        cleanup();if(_dockOff===cleanup)_dockOff=null;
+      },DOCK_VERIFY_MS);
+      if(timer&&timer.unref)timer.unref();
+    }
+    w.on("always-on-top-changed",onTop);
+    offs.push(function(){try{w.removeListener("always-on-top-changed",onTop)}catch(e){}});
+  });
+  // No dock signal at all within the X11 wait budget plus the check window:
+  // stop recording (upstream did not dock, e.g. the window was hidden).
+  var t0=setTimeout(function(){if(gen===_dockGen&&!timer){cleanup();if(_dockOff===cleanup)_dockOff=null}},X11_DOCK_WAIT_MS+DOCK_VERIFY_MS);
+  if(t0&&t0.unref)t0.unref();
+  offs.push(function(){clearTimeout(t0)});
+}
+// The first capture or pointer hit test after a lock acquire waits for the
+// dock (bounded); whichever comes first uses the waiter up.
+async function _x11DockWait(what){var p=_x11DockWaiter;_x11DockWaiter=null;if(p){var why=await p;if(why!=="docked")globalThis.__cdbDiag?.("[claude-cu] x11 dock: first "+(what||"capture")+" after "+why)}}
+// ── X11 dock: input shape and first capture (end)
+// The latest __setLockHeld run (see __lockSettled).
+var _lockHookTail=Promise.resolve();
+// Text with a character beyond the BMP (a surrogate pair in JS).
+function _nonBmp(t){return typeof t==="string"&&/[\uD800-\uDBFF][\uDC00-\uDFFF]/.test(t)}
+// The wlroots bridge types through its own virtual keyboard (the only row known
+// to cut such characters in Chromium); a background x11 target is not it.
+function _wlrootsNative(){return _useWlBridge()&&_wlBridge().name==="wlroots-bridge"&&!(_tgt&&_tgt.kind==="x11")}
+// Terminals take the characters intact from the bridge's typing, and Ctrl+V is
+// no paste there: the clipboard route is only for a window known to be a
+// non-terminal app. An unknown front app keeps typing key by key.
+var WL_TERMINAL_RX=/^(foot|footclient|kitty|alacritty|st|st-256color|xterm|urxvt|rxvt.*|konsole|yakuake|wezterm|ghostty|terminal|gnome-terminal.*|console|kgx|ptyxis|xfce4-terminal|terminator|tilix|lxterminal|qterminal|sakura|termite|contour|blackbox|cool-retro-term)$/i;
+// The id is the canonical desktop id (foot, org.codeberg.dnkl.foot,
+// org.gnome.Terminal, org.kde.konsole): test the whole id and its last segment.
+function _wlTerminalId(id){var b=String(id).replace(/\.desktop$/i,"");return WL_TERMINAL_RX.test(b)||WL_TERMINAL_RX.test(b.slice(b.lastIndexOf(".")+1))}
+async function _wlPasteTarget(){
+  var f;try{f=await _ex.getFrontmostApp()}catch(e){return!1}
+  var id=f&&f.bundleId;
+  return typeof id==="string"&&id!==""&&id!==CU_SCREEN_APP&&id.indexOf(CU_DIALOG_SUFFIX)<0&&!_wlTerminalId(id);
+}
+// Type the BMP runs through the bridge, paste the runs beyond the BMP. The
+// clipboard (the target's own one in target mode) is saved once, restored in
+// finally, after a short wait: a Wayland client asks for the selection's data
+// after Ctrl+V, and replacing the selection first would lose the paste.
+async function _typeWlMixed(text){
+  var saved,have=!1;
+  try{saved=_tgt?await _tgtClipRead():await _electron.clipboard.readText("clipboard");have=typeof saved==="string"}catch(e){}
+  var parts=text.split(/((?:[\uD800-\uDBFF][\uDC00-\uDFFF])+)/).filter(function(p){return p!==""});
+  var pasted=!1;
+  try{
+    for(var i=0;i<parts.length;i++){
+      var p=parts[i];
+      if(_nonBmp(p)){
+        if(_tgt)await _tgtClipWrite(p);else await _electron.clipboard.writeText(p,"clipboard");
+        pasted=!0;
+        _wlBridgeCall(["key-sequence","--keys","ctrl+v"]);
+        await new Promise(function(r){setTimeout(r,150)});
+      }else{
+        await _escAround(_escText(p),function(){_wlBridgeCall(["type","--text",p])},p.length*12);
+      }
+    }
+  }finally{
+    if(pasted&&have){try{if(_tgt)await _tgtClipWrite(saved);else await _electron.clipboard.writeText(saved,"clipboard")}catch(e){}}
+  }
+}
 var _ex=globalThis.__linuxExecutor={
   // Read by upstream's dispatch on every call (platform, hostBundleId,
   // screenshotFiltering, hitTest): request_access's result and the session
   // tools read executor.capabilities.screenshotFiltering live, so it is a
   // getter with capabilitiesNow()'s value ("mask" when the live bridge masks,
-  // else "none"; "none" too until its doctor answered once). No hitTest key:
-  // it stays as before; the live per-backend values are capabilitiesNow().
-  // hostBundleId is Claude's own canonical id (com.anthropic.Claude), the id
-  // its windows resolve to.
-  capabilities:{get screenshotFiltering(){return _filteringNow()},platform:"linux",get hostBundleId(){return _hostId()}},
+  // else "none"; "none" too until its doctor answered once). hitTest is "none"
+  // on a backend without a hit test (see _hitTestNow; upstream's click and key
+  // gates then use its whole-screen rules) and undefined where appUnderPoint
+  // asks the window system, as upstream expects from a real hit test. Both
+  // getters are exec-free. hostBundleId is Claude's own canonical id
+  // (com.anthropic.Claude), the id its windows resolve to.
+  capabilities:{get screenshotFiltering(){return _filteringNow()},platform:"linux",get hostBundleId(){return _hostId()},get hitTest(){return _hitTestNow()==="none"?"none":void 0}},
   // CU lock lifecycle hook, invoked by the upstream lock holder (Patches 4b/4b.2
   // call __linuxExecutor?.__setLockHeld?.(!0/!1) on every Linux lock transition
   // and chain .catch() — so this MUST return a Promise, hence async). On GNOME
@@ -2302,6 +3942,25 @@ var _ex=globalThis.__linuxExecutor={
     // (4b passes upstream's exclusiveHolder; 4b.2 releases without one).
     _gnomeHolder=held&&typeof holder==="string"?holder:null;
     globalThis.__cdbDiag?.("[claude-cu] "+(held?"lock taken by "+(_gnomeHolder||"none"):"lock released"));
+    // The Wayland glow overlay follows the lock (js/cu_wl_glow.js): this runs
+    // synchronously before upstream's lock-change handlers show or hide the
+    // glow. Release stops its child.
+    try{var _wg=globalThis.__cdbCuWlGlow;if(_wg&&typeof _wg.lock==="function")_wg.lock(!!held)}catch(we){}
+    var _settle;_lockHookTail=new Promise(function(r){_settle=r});
+    // The drawn pointer's "button held" state does not outlive a lock: a turn
+    // that ended with the button down must not make the next turn's moves jump.
+    _dpHeld=!1;
+    // A capture of the previous hold does not retry into this one, and its
+    // bridge process does not outlive the release.
+    _capLockGen++;_capFails=0;
+    if(!held)_capKillPending("lock release");
+    // X11: follow upstream's side-panel dock / restore of this lock change.
+    try{_x11DockOnLock(!!held)}catch(de){}
+    // Every session where upstream docks: check the dock landed.
+    try{_dockVerifyOnLock(!!held)}catch(de){}
+    try{
+    _blindSeen=!1;
+    if(held){_gnomeShareFireArmed=!0;_noInfoSaid=!1}
     if(!held)_gnomeCheckStop("lock released");
     // The ask-before-control notes ("screenshots are not filtered") are once
     // per session and lock (js/cu_consent.js).
@@ -2329,6 +3988,44 @@ var _ex=globalThis.__linuxExecutor={
     // counts its idle time from here.
     _gnomeIdleCancel();
     if(held){_gnomeStoppedClear("new lock");await _gnomeEnsureSession();if(_gnomeSessionActive&&!_gnomeIdleTimer)_gnomeIdleArm();_gnomeCheckArm()}else await _gnomeSessionEnd();
+    }finally{_settle()}
+  },
+  // Settles once the latest lock hook has (the portal session started or
+  // ended, the background display latched). The Linux tool handler
+  // (js/cu_handler_injection.js) awaits it after it takes the lock, so the
+  // first action of a turn never races the session start.
+  __lockSettled(){return _lockHookTail},
+  // X11: the side-panel dock of the latest acquire (see _x11DockOnLock),
+  // awaited by the Linux tool handler before its first pointer hit test;
+  // resolves at once when nothing docks or the waiter was used.
+  __dockWait(){return _x11DockWait("pointer action")},
+  // The Wayland glow overlay's row (js/cu_wl_glow.js): {name, bin, overlay}
+  // with overlay = the bridge's doctor capabilities.overlay from the cached
+  // answer (true / false; null while unknown or after a failed doctor), or
+  // null on a row without one (see _wlGlowBridge). Exec-free.
+  __wlGlowRow(){
+    var be=_wlGlowBridge();if(!be)return null;
+    var c=_bcCache[_bcKey(be)],r=c&&c.res;
+    return{name:be.name,bin:be.bin,overlay:r?r.overlay===!0:null};
+  },
+  // -> Promise<true|false|null>: the overlay capability from a fresh or cached
+  // doctor (async, the shared _bcProbe; never blocks).
+  __wlGlowProbe(){
+    var be=_wlGlowBridge();if(!be)return Promise.resolve(null);
+    return _bcProbe(be).then(function(r){return r&&!r.error?r.overlay===!0:null},function(){return null});
+  },
+  // What draws "Claude is using your computer" on this session, for the
+  // Computer Use page: "x11" (upstream's Electron glow), "overlay" (the
+  // Wayland bridge overlay), "none" (no glow: background display, a Wayland
+  // row without the overlay), "unknown" (its doctor has not answered yet).
+  // The glow switch is not part of it. Exec-free (may start an async doctor).
+  __glowNow(){
+    if(_tgt)return{where:"none",why:"background display"};
+    if(!_wayland)return{where:"x11"};
+    var be=_wlGlowBridge();if(!be)return{where:"none",why:"no bridge draws the glow on this session"};
+    var r=_bcNow(be);
+    if(!r)return{where:"unknown",bridge:be.name};
+    return r.overlay===!0?{where:"overlay",bridge:be.name}:{where:"none",bridge:be.name,why:be.name+" does not draw the glow overlay"};
   },
   // Task-end event: upstream's renderer IPC releaseRemoteCuLock (a cloud
   // session's running->idle edge, Stop, archive, delete), forwarded by
@@ -2340,12 +4037,15 @@ var _ex=globalThis.__linuxExecutor={
   // Then it does what the idle expiry does: end the portal session and lift a
   // stop-sharing latch. Nothing up: silent, it fires on every turn end.
   async __cuTaskBoundary(id,source,holder){
+    // The turn ended: an Escape watcher (community switch) parks until the next action.
+    try{globalThis.__cdbCuEscWatch?.taskEnded?.(id,source,holder)}catch(ee){}
     globalThis.__cdbDiag("[claude-cu] task boundary ("+source+"): received id="+id+" holder="+holder+" active="+_gnomeSessionActive+" starting="+_gnomeSessionStarting+" daemonMayExist="+_gnomeDaemonMayExist+" stoppedByUser="+_gnomeStoppedByUser+" gnomeCovered="+_isGnomeCovered());
     if(!_isGnomeCovered()||!_gnomeBridgeBin())return;
     if(!_gnomeSessionActive&&!_gnomeSessionStarting&&!_gnomeDaemonMayExist&&!_gnomeStoppedByUser)return;
     function key(v){return String(v).toLowerCase().replace(/^(?:session_|cse_)/,"")}
     if(id!=null&&holder!=null&&key(id)!==key(holder)){globalThis.__cdbDiag("[claude-cu] task boundary ("+source+"): ignored, it names another session than the Computer Use lock holder");return}
     globalThis.__cdbDiag("[claude-cu] task boundary ("+source+"): ending the portal session");
+    _gnomeShareFireArmed=!0;
     _gnomeCheckStop("task boundary");
     await _gnomeSessionEnd("task boundary");
   },
@@ -2388,16 +4088,39 @@ var _ex=globalThis.__linuxExecutor={
     return x?{bin:x,name:"x11-bridge",env:_spo({},x).env}:null;
   },
   // The frame the next full screenshot of the monitor holding DIP point (x, y)
-  // will have (same monitor list and _cuTargetDims rule the capture uses), so
-  // app_ax_find can report positions before any screenshot was taken.
-  __axFrameFor(x,y){
+  // will have (same monitor list and capture tier rule as __coldFrame:
+  // _cuShotFrame), so app_ax_find can report positions before any screenshot
+  // was taken. asked = the handler's screenshot would pass an allowlist ("Ask
+  // before Computer Use controls an app" on: cu_ax_tools.js gets the grants).
+  // Null when the frame cannot be told (a mask answer not known yet).
+  __axFrameFor(x,y,asked){
     var mons=_getMonitors();if(!mons||!mons.length)return null;
     var m=null;
     for(var i=0;i<mons.length;i++){var c=mons[i];if(x>=c.originX&&x<c.originX+c.width&&y>=c.originY&&y<c.originY+c.height){m=c;break}}
     if(!m){for(var j=0;j<mons.length;j++){if(mons[j].isPrimary){m=mons[j];break}}m=m||mons[0]}
-    var sf=m.scaleFactor||1,xr=_x11PxRect(m.originX,m.originY,m.width,m.height,m.displayId);
-    var d=_cuTargetDims(xr?xr.w:Math.round(m.width*sf),xr?xr.h:Math.round(m.height*sf));
-    return{imgW:d.width,imgH:d.height,dispW:m.width,dispH:m.height,originX:m.originX||0,originY:m.originY||0,displayId:m.displayId,label:m.label,count:mons.length};
+    var f=_cuShotFrame(m,asked===!0);if(!f)return null;
+    f.displayId=m.displayId;f.label=m.label;f.count=mons.length;
+    return f;
+  },
+  // No screenshot in this app run (a restart, switch_display): the frame the
+  // model's coordinates are read in - the one the next full screenshot of
+  // display d will have, the size every capture of d has had (the model's last
+  // screenshot, if it showed d whole). Called by our tool handler
+  // (js/cu_handler_injection.js) and by upstream's pixels-mode mapping
+  // (sub-patch 5e of fix_computer_use_linux.nim, d = its getDisplaySize
+  // result, asked = true: upstream always passes an allowlist). Sync, from
+  // cached answers only, the way a click maps its point (_x11PxRect).
+  // Residual: the frame assumes the first tier _captureRegion would try
+  // succeeds. A COWORK_SCREENSHOT_CMD or spectacle capture that fails falls
+  // through to a downscaling tier, so the model's last image may have been
+  // smaller than this native-size frame; which tier produced it is not known
+  // after a restart (nothing is kept across app runs), so a point beyond the
+  // downscaled image is still read in the native frame.
+  // -> {imgW, imgH, dispW, dispH, originX, originY} | null.
+  __coldFrame(d,asked){
+    var f=null;try{f=_cuShotFrame(d,asked===!0)}catch(e){f=null}
+    if(typeof globalThis.__cdbDiag==="function")globalThis.__cdbDiag("[claude-cu] no screenshot yet in this app run: coordinates read in "+(f?"the "+f.imgW+"x"+f.imgH+" frame of the "+f.dispW+"x"+f.dispH+" display at "+f.originX+","+f.originY:"no frame (the capture size is not known yet)"));
+    return f;
   },
   // x11-bridge root pixel -> Electron DIP (inverse of _x11Px), so an element's
   // AT-SPI screen position lands in the screenshot frame on X11 HiDPI.
@@ -2420,14 +4143,25 @@ var _ex=globalThis.__linuxExecutor={
   },
   // opts {displayId, allowedBundleIds, scale}. allowedBundleIds undefined =
   // unmasked; an array = mask mode (see "Allowlist mask"), which throws
-  // rather than capture unmasked.
+  // rather than capture unmasked. No displayId: the display
+  // resolvePrepareCapture would take (on GNOME the monitor shared in the
+  // portal dialog), else Electron's primary.
   async screenshot(opts){
+    _escAct();
     await _tgtPrime();
-    var mon=_findMon(opts&&opts.displayId);
+    await _x11DockWait();
+    var did=opts&&opts.displayId;
+    if(did==null){var sdid=await _gnomeSharedDefaultDisplayId();if(sdid!=null)did=sdid}
+    var mon=_findMon(did);
     var al=opts?opts.allowedBundleIds:void 0,mk=await _maskFor(al);
     var shot=await _screenshotMon(mon,mk);
-    // {base64, imgW, imgH, mimeType, displayWidth, displayHeight, originX,
-    // originY, masked, filtering, maskGaps[, hidden]}
+    // Upstream's ScreenshotResult (computer_batch / teach_batch and the
+    // pixel check capture through screenshot(), not resolvePrepareCapture):
+    // width/height = the image, displayId = the monitor captured (a
+    // _getMonitors() index, as resolvePrepareCapture reports it).
+    shot.width=shot.imgW;shot.height=shot.imgH;shot.displayId=mon.displayId;
+    // {base64, imgW, imgH, width, height, displayId, mimeType, displayWidth,
+    // displayHeight, originX, originY, masked, filtering, maskGaps[, hidden]}
     return _capNote(shot,mk,al);
   },
   // opts {allowedBundleIds, preferredDisplayId, autoResolve, doHide, scale}.
@@ -2437,6 +4171,7 @@ var _ex=globalThis.__linuxExecutor={
   // hidden ... call request_access" note. Nothing is hidden on screen, so
   // __unhideApps stays a no-op.
   async resolvePrepareCapture(opts){
+    await _x11DockWait();
     if(!opts||!Array.isArray(opts.allowedBundleIds))return _ex.__resolvePrepareCapture(opts);
     try{return await _ex.__resolvePrepareCapture(opts)}
     catch(e){
@@ -2446,6 +4181,7 @@ var _ex=globalThis.__linuxExecutor={
     }
   },
   async __resolvePrepareCapture(opts){
+    _escAct();
     await _tgtPrime();
     var did=opts&&opts.preferredDisplayId;
     if(did==null){var sdid=await _gnomeSharedDefaultDisplayId();if(sdid!=null)did=sdid}
@@ -2479,6 +4215,7 @@ var _ex=globalThis.__linuxExecutor={
   // (rect, 1, displayId) call) = unmasked, global coordinates, as before.
   // scale is not used: every tier downscales by the bridges' rule.
   async zoom(rect,allowedBundleIds,displayId,scale,opts){
+    _escAct();
     await _tgtPrime();
     var legacy=allowedBundleIds!==void 0&&!Array.isArray(allowedBundleIds);
     var mon=displayId!=null?_findMon(displayId):_findMonByPoint(rect.x,rect.y);
@@ -2488,7 +4225,9 @@ var _ex=globalThis.__linuxExecutor={
     var mk=legacy?null:await _maskFor(allowedBundleIds);
     globalThis.__cdbDiag("[claude-cu] zoom: rect="+JSON.stringify(rect)+(local?" (display-relative)":"")+" displayId="+displayId+" mon="+((mon&&mon.label)||"?")+" sf="+sf+(mk?" mask "+(mk.allowed.length?mk.allowed.join(","):"all"):Array.isArray(allowedBundleIds)?" unmasked (backend cannot mask)":""));
     var cap=await _captureRegion(rx,ry,rect.w,rect.h,sf,displayId!=null&&mon?mon.displayId:void 0,mk);
-    // {base64, imgW, imgH, mimeType, masked, filtering, maskGaps[, hidden]}
+    cap.width=cap.imgW;cap.height=cap.imgH;
+    // {base64, imgW, imgH, width, height, mimeType, masked, filtering,
+    // maskGaps[, hidden]}
     return _capNote(cap,mk,legacy?void 0:allowedBundleIds);
   },
   async prepareForAction(bundleIds,displayId){return[]},
@@ -2542,6 +4281,7 @@ var _ex=globalThis.__linuxExecutor={
     try{
       _logFirstUse("app",be.name);
       var wins=_appWins(),apps=[],seen={};
+      if(Array.isArray(wins)&&wins.length&&_isGnomeCovered()&&_useWlBridge())_gnIntroSet(!0,"window list");
       if(Array.isArray(wins)){
         for(var i=0;i<wins.length;i++){
           var w=wins[i];
@@ -2559,26 +4299,46 @@ var _ex=globalThis.__linuxExecutor={
   // The focused window's app: the window list's active window (all bridges
   // report is_active; wlroots from the foreign-toplevel activated state);
   // x11-bridge without one falls back to its frontmost-app (GetInputFocus on a
-  // WM without EWMH). null when the backend cannot know: XWayland (a native
-  // Wayland window may have the focus), ydotool, no bridge, no active window
-  // (wlroots-bridge's own frontmost-app would pick the first toplevel), or
-  // nothing focused. A bridge that FAILED throws (an Error with __cdbFront):
-  // "could not tell" is not "nothing in front" - js/cu_consent.js refuses
-  // input then, and upstream's own check (cloud Cowork, teach) fails the
-  // action, as it does with its own executors.
+  // WM without EWMH). null when the backend can name the window in front and
+  // none is (wlroots-bridge's own frontmost-app would pick the first
+  // toplevel). A bridge that FAILED throws (an Error with __cdbFront): "could
+  // not tell" is not "nothing in front" - js/cu_consent.js refuses input then,
+  // and upstream's own check (cloud Cowork, teach) fails the action, as it does
+  // with its own executors.
+  // A backend without a hit test answers as upstream's own Wayland executor
+  // (issue #326): a Claude dialog open -> "<host> (dialog)"; where the backend
+  // cannot name the window in front (GNOME without Introspect, XWayland,
+  // ydotool, no bridge): Claude while one of its windows has focus, else the
+  // shared screen (CU_SCREEN_APP). The GNOME bridge is always asked (plain
+  // D-Bus, no portal); an empty answer there means "cannot name". js/cu_consent.js reads these answers as "unknown" for the Code tab.
   async getFrontmostApp(){
     await _tgtPrime();
-    var be=_appBackend();
-    if(be.frontmost!=="native")return null;
+    // wlroots-bridge before its first doctor answer: wait for it here (the
+    // gates ask the front app before they read capabilities.hitTest), so the
+    // first click is judged with the real answer, not the fail-closed one.
+    if(_useWlBridge()&&_wlBridge().name==="wlroots-bridge"&&_wlGeoCached()===null){try{await _bcProbe(_bcBridge(!0))}catch(pe){}}
+    var be=_appBackend(),blind=_hitTestNow()==="none";
+    if(blind){
+      _noInfoNote(be);
+      if(!_tgt&&_dialogOpen())return{bundleId:_hostId()+CU_DIALOG_SUFFIX,displayName:_appName()+" dialog"};
+    }
+    // Without a hit test upstream's gates take a null front app for "allowed,
+    // no tier to check" (a read-only grant would pass), so a backend that
+    // cannot name the window in front answers the shared screen instead.
+    var unknown=function(){return blind?_screenFront():null};
+    var named=function(r){return r&&blind&&r.bundleId===_hostId()?_hostFront():r||unknown()};
+    var gnome=_useWlBridge()&&_wlBridge().name==="gnome-portal-bridge";
+    if(!gnome&&be.frontmost!=="native")return unknown();
     var wins,act=null;
     try{
       _logFirstUse("window",be.name);
       wins=_appWins();
       if(!Array.isArray(wins))throw new Error("the window list is not an array");
+      if(gnome&&wins.length)_gnIntroSet(!0,"window list");
       for(var i=0;i<wins.length;i++){var w=wins[i];if(w&&w.is_active===true&&(!act||(w.stacking_order||0)>(act.stacking_order||0)))act=w}
-      if(act)return _appRefFromWindow(act);
-      if(_useWlBridge())return null;
-      return _appRefFromCommand(_x11Bridge(["frontmost-app"]),function(){return wins},function(w){return w.is_minimized!==true});
+      if(act)return named(_appRefFromWindow(act));
+      if(_useWlBridge())return unknown();
+      return named(_appRefFromCommand(_x11Bridge(["frontmost-app"]),function(){return wins},function(w){return w.is_minimized!==true}));
     }catch(e){
       var fe=new Error(be.name+": "+String(e&&e.message||e).trim().split("\n").slice(-1)[0]);
       fe.__cdbFront=!0;
@@ -2586,6 +4346,13 @@ var _ex=globalThis.__linuxExecutor={
       throw fe;
     }
   },
+  // Upstream's key-focus check (its keyboard gate and the per-key delivery
+  // check, js chunk "St"/"Tt" in 4.23118.1) calls this on every keyboard action
+  // that targets a granted app; its own Linux executors answer with the
+  // frontmost app, as here (no separate key-focus source on X11 or Wayland).
+  // Same backend calls as getFrontmostApp: window list / frontmost-app, never a
+  // portal command, so it opens no GNOME session and does not block.
+  async getKeyFocusApp(){return _ex.getFrontmostApp()},
   // The app owning the window at DIP point (x, y): x11-bridge's
   // app-under-point (X11, or the background display); wlroots-bridge with
   // window geometry (sway / Hyprland): the topmost window there by
@@ -2602,7 +4369,14 @@ var _ex=globalThis.__linuxExecutor={
     if(_appBackend().hitTest!=="native")return null;
     try{
       var _ap=_x11Px(x,y),px=_ap[0],py=_ap[1];
-      return _appRefFromCommand(_x11Bridge(["app-under-point","--x",String(px),"--y",String(py)]),function(){return _x11Bridge(["windows"])},function(w){var g=w.geometry;return w.is_minimized!==true&&w.is_visible!==false&&!!g&&px>=g.x&&px<g.x+g.width&&py>=g.y&&py<g.y+g.height});
+      var _hr=_appRefFromCommand(_x11Bridge(["app-under-point","--x",String(px),"--y",String(py)]),function(){return _x11Bridge(["windows"])},function(w){var g=w.geometry;return w.is_minimized!==true&&w.is_visible!==false&&!!g&&px>=g.x&&px<g.x+g.width&&py>=g.y&&py<g.y+g.height});
+      // A window that names no app: x11-bridge answers its client window id.
+      // When neither the window list nor its process resolves it to an app,
+      // say so in upstream's own shape ({bundleId:null,
+      // unattributedWindowOwner}), which its gate refuses explicitly ("no
+      // grant can cover it"); null would mean the desktop shell.
+      if(_hr&&typeof _hr.bundleId==="string"&&/^\d+$/.test(_hr.bundleId))return{bundleId:null,displayName:_hr.displayName,unattributedWindowOwner:_hr.displayName&&_hr.displayName!==_hr.bundleId?_hr.displayName:"window "+_hr.bundleId};
+      return _hr;
     }catch(e){return null}
   },
   // Live app-identity capabilities of the current backend (re-evaluated on
@@ -2635,6 +4409,7 @@ var _ex=globalThis.__linuxExecutor={
   appAliases(bundleId){return _aAliases(bundleId)},
   async getAppIcon(appPath){return null},
   async openApp(name){
+    _escAct();
     await _tgtPrime();
     var _appDirs=_xdgAppDirs();
     // Parse all .desktop entries once (shared parser: [Desktop Entry] group,
@@ -2835,11 +4610,48 @@ var _ex=globalThis.__linuxExecutor={
     // emits the original "Opened app" text byte-for-byte.
     return{action:"opened",app:name};
   },
-  async moveMouse(x,y){await _tgtPrime();_moveMouse(x,y)},
-  async click(x,y,button,count,holdKeys){
-    await _tgtPrime();
+  // Upstream's mixin: moveMouse `held?jumpTo(p):glideTo(p)`, then the real
+  // move announced by realPointerGoesTo(p).
+  async moveMouse(x,y){
+    _escAct();await _tgtPrime();
+    var dp=_dpLive();if(dp){_dpCall(dp,_dpHeld?"jumpTo":"glideTo",x,y);_dpCall(dp,"realPointerGoesTo",x,y)}
     _moveMouse(x,y);
+  },
+  // Upstream's click handler glides the drawn pointer to the target first
+  // (await executor.showPointerTravel?.(x,y,isAborted), skipped while another
+  // call runs back to back and for unattended sessions); so does the Linux
+  // tool handler (js/cu_handler_injection.js) for Code-tab and local Cowork
+  // clicks. true = it animated, then the handler checks the abort. Mirrors upstream's mixin: glideTo returns the ms until arrival,
+  // re-asked at most every 50 ms until it arrives or the turn is aborted
+  // (Escape stop key). false when nothing is animated: no live arrow, already
+  // there, reduced motion, a target off the glow's display. Never throws.
+  async showPointerTravel(x,y,isAborted){
+    var dp=_dpLive();if(!dp)return !1;
+    var p={x:x,y:y};
+    try{
+      var r=dp.glideTo(p);
+      if(!(typeof r==="number"&&r>0))return !1;
+      r=Math.min(r,CU_DP_GLIDE_MAX_MS);
+      var end=performance.now()+r;
+      for(var i=r;i>0&&!_dpAborted(isAborted);){
+        await new Promise(function(res){setTimeout(res,Math.min(i,50))});
+        var g=dp.glideTo(p);
+        i=Math.min(end-performance.now(),typeof g==="number"?g:0);
+      }
+      return !0;
+    }catch(e){_dpFail("glideTo",e);return !1}
+  },
+  // Upstream: the real move (realPointerGoesTo first), then press(), then the
+  // click; the glide itself came from showPointerTravel.
+  async click(x,y,button,count,holdKeys){
+    _escAct();
+    await _tgtPrime();
+    var dp=_dpLive();
+    if(dp)_dpCall(dp,"realPointerGoesTo",x,y);
+    _moveMouse(x,y);
+    if(dp)_dpCall(dp,"press");
     var rep=count||1;
+    return _escAround(_escKeys(holdKeys),function(){
     if(_useWlBridge()){
       _logFirstUse("click",_wlBridge().name);
       var _wbtn={left:"left",right:"right",middle:"middle"}[button]||"left";
@@ -2866,15 +4678,23 @@ var _ex=globalThis.__linuxExecutor={
       if(holdKeys&&holdKeys.length>0){for(var i=0;i<holdKeys.length;i++){_cargs.push("--modifier",holdKeys[i])}}
       _x11Bridge(_cargs);
     }
+    });
   },
+  // Upstream: press(), the button, then "held" (moves jump the drawn pointer
+  // instead of gliding it until mouseUp).
   async mouseDown(){
+    _escAct();
     await _tgtPrime();
+    var dp=_dpLive();if(dp)_dpCall(dp,"press");
     if(_useWlBridge()){_logFirstUse("drag",_wlBridge().name);_wlBridgeCall(["left-mouse-down"])}
     else if(_wayland&&_checkYdotool()){_logFirstUse("drag","ydotool");_ydotool(["click","0x40"])}
     else{_logFirstUse("drag","x11-bridge");_x11Bridge(["left-mouse-down"])}
+    _dpHeld=!0;
   },
   async mouseUp(){
+    _escAct();
     await _tgtPrime();
+    _dpHeld=!1;
     if(_useWlBridge()){_wlBridgeCall(["left-mouse-up"])}
     else if(_wayland&&_checkYdotool()){_ydotool(["click","0x80"])}
     else{_x11Bridge(["left-mouse-up"])}
@@ -2890,6 +4710,7 @@ var _ex=globalThis.__linuxExecutor={
     return{x:p.x,y:p.y};
   },
   async drag(start,end){
+    _escAct();
     await _tgtPrime();
     if(_useWlBridge()){
       _logFirstUse("drag",_wlBridge().name);
@@ -2897,6 +4718,13 @@ var _ex=globalThis.__linuxExecutor={
       var _wfx=start?Math.round(start.x):Math.round(_wcp.x);
       var _wfy=start?Math.round(start.y):Math.round(_wcp.y);
       _tgtCursorSet(end.x,end.y);
+      // The Wayland glow overlay's arrow (js/cu_wl_glow.js), in upstream's
+      // mixin order as on X11 below: the real pointer at the start, the press
+      // ring there, the arrow jumps to the end while the button is held.
+      // pointer-drag makes the start move itself, so no extra move is sent.
+      var _wdp=_dpLive();
+      if(_wdp){if(start)_dpCall(_wdp,"realPointerGoesTo",start.x,start.y);_dpCall(_wdp,"press");_dpCall(_wdp,"jumpTo",end.x,end.y);_dpCall(_wdp,"realPointerGoesTo",end.x,end.y)}
+      _wlPtr(end.x,end.y);
       _wlBridgeCall(["pointer-drag","--from-x",String(_wfx),"--from-y",String(_wfy),"--to-x",String(Math.round(end.x)),"--to-y",String(Math.round(end.y))]);
     }else if(_wayland&&_checkYdotool()){
       if(start)_moveMouse(start.x,start.y);
@@ -2907,14 +4735,27 @@ var _ex=globalThis.__linuxExecutor={
       _ydotool(["click","0x80"]);
     }else{
       _logFirstUse("drag","x11-bridge");
+      // Upstream's mixin with its drawn pointer live: a given start is reached
+      // first (realPointerGoesTo, the real move), press() rings it there, the
+      // arrow jumps to the end while the button is held (realPointerGoesTo),
+      // then the button goes up. pointer-drag does start -> end -> release in
+      // one call (its first step is the same move to the start), so the start
+      // move is made beforehand only while the arrow is live, for press() to
+      // find the real pointer on it.
+      var dp=_dpLive();
+      if(dp&&start){_dpCall(dp,"realPointerGoesTo",start.x,start.y);_moveMouse(start.x,start.y)}
       // Both endpoints are DIP (the cursor too: getCursorScreenPoint is DIP on X11).
       var _cur=start||(_tgt?_tgtCursor():_electron.screen.getCursorScreenPoint()),_from=_x11Px(_cur.x,_cur.y),_to=_x11Px(end.x,end.y);
       _tgtCursorSet(end.x,end.y);
+      if(dp){_dpCall(dp,"press");_dpCall(dp,"jumpTo",end.x,end.y);_dpCall(dp,"realPointerGoesTo",end.x,end.y)}
       _x11Bridge(["pointer-drag","--from-x",String(_from[0]),"--from-y",String(_from[1]),"--to-x",String(_to[0]),"--to-y",String(_to[1])]);
     }
   },
+  // Upstream: glideTo(p) (always a glide), the real move, the wheel.
   async scroll(x,y,horizontal,vertical){
+    _escAct();
     await _tgtPrime();
+    var dp=_dpLive();if(dp){_dpCall(dp,"glideTo",x,y);_dpCall(dp,"realPointerGoesTo",x,y)}
     _moveMouse(x,y);
     if(_useWlBridge()){
       _logFirstUse("scroll",_wlBridge().name);
@@ -2933,8 +4774,11 @@ var _ex=globalThis.__linuxExecutor={
     }
   },
   async key(combo,count){
+    _escAct();
     await _tgtPrime();
     var n=count||1;
+    return _escAround(_escKeys(combo),function(){
+    _escExpect(combo,n);
     if(_useWlBridge()){
       // Both Wayland bridges parse the CU key-spec grammar themselves — pass through.
       _logFirstUse("key",_wlBridge().name);
@@ -2959,10 +4803,14 @@ var _ex=globalThis.__linuxExecutor={
       if(n>1){_kargs.push("--repeat",String(n))}
       _x11Bridge(_kargs);
     }
+    });
   },
   async holdKey(keyName,seconds){
+    _escAct();
     await _tgtPrime();
     var secs=Math.min(seconds||0.5,10);
+    return _escAround(_escKeys(keyName),function(){
+    _escExpect([keyName],1);
     if(_useWlBridge()){
       _logFirstUse("key",_wlBridge().name);
       _wlBridgeCall(["hold-key","--key",keyName,"--duration-ms",String(Math.round(secs*1000))]);
@@ -2970,14 +4818,16 @@ var _ex=globalThis.__linuxExecutor={
       _logFirstUse("key","ydotool");
       var k=_mapKeyWayland(keyName);
       _ydotool(["key",k+":1"]);
-      _cp.execFileSync("sleep",[String(secs)]);
+      _cp.execFileSync(_toolCmd("sleep")||"sleep",[String(secs)]);
       _ydotool(["key",k+":0"]);
     }else{
       _logFirstUse("key","x11-bridge");
       _x11Bridge(["hold-key","--key",keyName,"--duration-ms",String(Math.round(secs*1000))]);
     }
+    },secs*1000);
   },
   async type(text,opts){
+    _escAct();
     await _tgtPrime();
     if(_tgt&&opts&&opts.viaClipboard){
       // Paste through the target's own clipboard (never the desktop's).
@@ -2986,13 +4836,21 @@ var _ex=globalThis.__linuxExecutor={
       if(_useWlBridge())_wlBridgeCall(["key-sequence","--keys","ctrl+v"]);else _x11Bridge(["key-sequence","--keys","ctrl+v"]);
       return;
     }
+    if(!(opts&&opts.viaClipboard)&&_wlrootsNative()&&_nonBmp(text)&&await _wlPasteTarget()){
+      // wlroots, text outside the Basic Multilingual Plane (emoji, U+1D11E):
+      // Chromium/Electron on native Wayland keeps a key's character in 16 bits,
+      // so typing it key by key arrives cut (U+1F600 as U+F600). Those runs go
+      // through the clipboard; the rest of the text is typed as always.
+      _logFirstUse("type","wlroots-bridge (clipboard for characters beyond the BMP)");
+      return _typeWlMixed(text);
+    }
     if(_useWlBridge()){
       _logFirstUse("type",_wlBridge().name+(opts&&opts.viaClipboard?" (clipboard)":""));
       if(opts&&opts.viaClipboard){
         await _electron.clipboard.writeText(text,"clipboard");
         _wlBridgeCall(["key-sequence","--keys","ctrl+v"]);
       }else{
-        _wlBridgeCall(["type","--text",text]);
+        return _escAround(_escText(text),function(){_wlBridgeCall(["type","--text",text])},text.length*12);
       }
     }else if(_wayland&&_checkYdotool()){
       _logFirstUse("type","ydotool"+(opts&&opts.viaClipboard?" (clipboard)":""));
@@ -3000,7 +4858,7 @@ var _ex=globalThis.__linuxExecutor={
         await _electron.clipboard.writeText(text,"clipboard");
         _ydotool(["key","29:1","47:1","47:0","29:0"]);
       }else{
-        _ydotool(["type","--",text]);
+        return _escAround(_escText(text),function(){_ydotool(["type","--",text])},text.length*12);
       }
     }else{
       _logFirstUse("type","x11-bridge"+(opts&&opts.viaClipboard?" (clipboard)":""));
@@ -3008,7 +4866,7 @@ var _ex=globalThis.__linuxExecutor={
         await _electron.clipboard.writeText(text,"clipboard");
         _x11Bridge(["key-sequence","--keys","ctrl+v"]);
       }else{
-        _x11Bridge(["type","--text",text]);
+        return _escAround(_escText(text),function(){_x11Type(text)},text.length*12);
       }
     }
   },
@@ -3027,4 +4885,20 @@ var _ex=globalThis.__linuxExecutor={
     await _electron.clipboard.writeText(text||"","clipboard");
   }
 };
+// Upstream's own-input marker around every injected input (see _markInput).
+// Kinds per method as upstream's Wayland executor marks the primitives each
+// one sends: a click moves and presses (and marks keys only while it holds
+// modifier keys), a drag moves and presses, a scroll moves and turns the
+// wheel. mouseUp is a release (sent even with a dialog open).
+(function(){
+  var K={moveMouse:function(){return["move"]},click:function(a){var h=a[4];return h&&(Array.isArray(h)?h.length:String(h).trim())?["move","button","key"]:["move","button"]},mouseDown:function(){return["button"]},mouseUp:function(){return["button"]},drag:function(){return["move","button"]},scroll:function(){return["move","wheel"]},key:function(){return["key"]},holdKey:function(){return["key"]},type:function(){return["key"]}};
+  Object.keys(K).forEach(function(n){var f=_ex[n];if(typeof f!=="function")return;_ex[n]=function(){var a=arguments;return _markInput(K[n](a),function(){return f.apply(_ex,a)},n==="mouseUp")}});
+})();
+// Ask the capture bridge's doctor now (async), so the first prompt suffix and
+// supported-features answer (js/cu_consent.js) already know whether it masks.
+_bcWarm();
+// Ask the host x11-bridge whether a compositing manager runs (the glow, issue
+// #327; the capture bridge above may be another one) and watch glow shows.
+_glowHostRefresh();
+_glowHook();
 })();

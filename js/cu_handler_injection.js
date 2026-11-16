@@ -19,6 +19,54 @@ if(__lxTeachTools.indexOf(__TOOL_NAME__)>=0){const __n=__MAKE_DISPATCH__;const{s
 var __cc=globalThis.__cdbCuConsent,__ask=!!(__cc&&typeof __cc.active==="function"&&__cc.active(__SESSION__));
 if(__ask&&(__TOOL_NAME__==="request_access"||__TOOL_NAME__==="list_granted_applications"))break __cdbLx;
 if(__ask){var __ng=__cc.needsGrant(__SESSION__,__TOOL_NAME__);if(__ng)return __ng}
+// Upstream refuses an ungranted clipboard or app before it looks at the lock;
+// so does this block (both checks are pure).
+if(__ask){var __pg=__TOOL_NAME__==="read_clipboard"?__cc.clipboard(__SESSION__,"read"):__TOOL_NAME__==="write_clipboard"?__cc.clipboard(__SESSION__,"write"):__TOOL_NAME__==="open_application"?__cc.openApp(__SESSION__,__INPUT__.app||__INPUT__.application||""):null;if(__pg)return __pg}
+// The exclusive Computer Use lock, checked and taken the way upstream's own
+// dispatcher does it (this block returns before that dispatcher runs). Another
+// session holding it refuses every tool here; the first tool that upstream does
+// not exempt takes it; the session's turn end releases it (upstream). The lock
+// change starts what follows it: the GNOME portal session, the Escape stop key,
+// the glow, the side panel. Exempt: the access tools, wait, switch_display and
+// a batch of only those two. The app-scoped tools (here: the accessibility
+// tools) only check for another holder, as upstream's own do. A sub-action of
+// our computer_batch runs under the batch's lock (upstream takes it once per
+// batch). A session without the lock functions is not locked (as upstream).
+// The texts are upstream's (pinned by scripts/tests/linux/test-cu-code-tab-lock.mjs).
+var __lkS=__SESSION__,__lkSubs=globalThis.__cdbCuBatchSubs||(globalThis.__cdbCuBatchSubs=new WeakSet());
+if(__lkS&&typeof __lkS.checkCuLock==="function"&&!(__INPUT__&&typeof __INPUT__==="object"&&__lkSubs.has(__INPUT__))){
+  var __LK_HELD="Another Claude session is currently using the computer. Wait for the user to acknowledge it is finished (stop button in the Claude window), or find a non-computer-use approach if one is readily apparent.";
+  var __LK_LOST="Another Claude session is currently using the computer. Wait for that session to finish, or find a non-computer-use approach.";
+  var __lkAppTools=["app_release","request_full_control","release_full_control","app_list_windows","app_screenshot","app_zoom","app_ax_find","app_click","app_scroll","app_drag","app_type","app_key","app_menu","app_batch","app_bring_to_current_space","app_focus"];
+  var __lkFree=["request_access","request_teach_access","list_granted_applications","list_apps","wait","switch_display"];
+  var __lkActs=__INPUT__&&__INPUT__.actions;
+  var __lkReadOnlyBatch=__TOOL_NAME__==="computer_batch"&&Array.isArray(__lkActs)&&__lkActs.length>0&&__lkActs.every(function(a){return a&&typeof a==="object"&&(a.action==="wait"||a.action==="switch_display")});
+  var __lkR=await(typeof __lkS.checkCuExclusiveLock==="function"?__lkS.checkCuExclusiveLock():__lkS.checkCuLock());
+  var __lkApp=__lkAppTools.indexOf(__TOOL_NAME__)>=0;
+  if(__lkR&&__lkR.holder!==void 0&&!__lkR.isSelf&&!(__lkApp&&__TOOL_NAME__==="app_release")){(globalThis.__cdbDiag||console.log)("[claude-cu] tool call refused ("+__TOOL_NAME__+"): the Computer Use lock is held by another session");return{isError:!0,content:[{type:"text",text:__LK_HELD}]}}
+  if(!__lkApp){
+    if(__lkR&&__lkR.holder===void 0&&!(__lkFree.indexOf(__TOOL_NAME__)>=0||__lkReadOnlyBatch)){
+      // A turn that already ended (Stop, or a call arriving after the turn's
+      // result) never takes the lock: no turn end would release it again.
+      // Synchronous with the acquire below (both sessions' acquires are), so a
+      // Stop cannot land in between. Upstream's own "stopped" test and wording.
+      if(typeof __lkS.isAborted==="function"&&__lkS.isAborted()===!0){(globalThis.__cdbDiag||console.log)("[claude-cu] tool call refused ("+__TOOL_NAME__+"): the turn has ended, the Computer Use lock is not taken");return{isError:!0,content:[{type:"text",text:__TOOL_NAME__+" aborted (user interrupt)."}]}}
+      if(typeof __lkS.acquireCuLock==="function")await __lkS.acquireCuLock();
+      var __lkE=await __lkS.checkCuLock();
+      if(!__lkE||!__lkE.isSelf)return{isError:!0,content:[{type:"text",text:__lkE&&__lkE.holder!==void 0?__LK_HELD:__LK_LOST}]};
+      // Upstream releases a held mouse button at a lock change (only acted on
+      // with the ask-before-control switch on, like every held-button step here).
+      if(__ask&&globalThis.__cuMouseHeld===!0){try{await globalThis.__linuxExecutor.mouseUp();globalThis.__cuMouseHeld=!1}catch(__me){(globalThis.__cdbDiag||console.log)("[claude-cu] could not release the held mouse button at the lock change: "+(__me&&__me.message||__me))}}
+      // The executor's lock hook (portal session start, background display
+      // latch) settles before the turn's first action runs.
+      try{var __lkX=globalThis.__linuxExecutor;if(__lkX&&typeof __lkX.__lockSettled==="function")await __lkX.__lockSettled()}catch(__le){}
+      // The turn ended while that ran (a GNOME consent dialog can take long):
+      // the action does not run. The lock was held when the turn ended, so the
+      // turn end released it (upstream releases this session's hold there).
+      if(typeof __lkS.isAborted==="function"&&__lkS.isAborted()===!0)return{isError:!0,content:[{type:"text",text:__TOOL_NAME__+" aborted (user interrupt)."}]};
+    }
+  }
+}
 if(__TOOL_NAME__==="request_access"){var __apps=__INPUT__.apps||[];
   // Dedup grants by a normalized key so multiple spellings of one app
   // (e.g. "Sublime Text" and "sublime_text") collapse to a single grant.
@@ -39,13 +87,16 @@ globalThis.__cuActiveOrigin=globalThis.__cuActiveOrigin||{x:0,y:0};
 // that screenshot) can be mapped to root/screen pixels, and cursor_position can
 // be mapped back. imgW/imgH = emitted (possibly downscaled) image size;
 // dispW/dispH = the display's native size; originX/originY = display origin.
-// Null until the first screenshot — then transforms fall back to origin-only.
+// Null until the first screenshot of this app run, and again after
+// switch_display or a background display change: then __coldGuard below
+// supplies the frame for this call (__cold).
 globalThis.__cuLastShot=globalThis.__cuLastShot||null;
+var __cold=null;
 // Model image-pixel coord -> root/screen pixel. Uses the last screenshot's
-// image:display ratio + origin. Falls back to __cuActiveOrigin (origin only,
-// 1:1 scale) when no screenshot has been taken yet.
+// image:display ratio + origin (or this call's __cold frame). Falls back to
+// __cuActiveOrigin (origin only, 1:1 scale) when neither is there.
 function __txC(c){
-  var ix=c[0]||0,iy=c[1]||0,ls=globalThis.__cuLastShot;
+  var ix=c[0]||0,iy=c[1]||0,ls=globalThis.__cuLastShot||__cold;
   if(ls&&ls.imgW>0&&ls.imgH>0){
     return[Math.round(ls.originX+ix*(ls.dispW/ls.imgW)),Math.round(ls.originY+iy*(ls.dispH/ls.imgH))];
   }
@@ -55,12 +106,56 @@ function __txC(c){
 // Root/screen pixel -> model image-pixel coord (inverse of __txC), for
 // cursor_position, which the schema says returns image-pixel coordinates.
 function __untxC(x,y){
-  var rx=x||0,ry=y||0,ls=globalThis.__cuLastShot;
+  var rx=x||0,ry=y||0,ls=globalThis.__cuLastShot||__cold;
   if(ls&&ls.dispW>0&&ls.dispH>0){
     return[Math.round((rx-ls.originX)*(ls.imgW/ls.dispW)),Math.round((ry-ls.originY)*(ls.imgH/ls.dispH))];
   }
   var o=globalThis.__cuActiveOrigin;
   return[Math.round(rx-(o?o.x:0)),Math.round(ry-(o?o.y:0))];
+}
+// No screenshot in this app run (an app restart in the middle of a session,
+// switch_display, a background display change): the model's coordinates are
+// still in the frame of the screenshot it took last, and that frame follows
+// from the display - the one a screenshot would capture now (the pinned
+// display, else the executor's default, else the primary, as the screenshot
+// case below picks it) at the size the executor's capture gives it
+// (__coldFrame). That is an assumption (the last image may have been a zoom,
+// another display, or taken before a resolution change), so a point outside
+// the frame is refused with upstream's own text for this case, as is a call
+// whose frame cannot be told; the model takes a screenshot and goes on.
+// pts: [[name, [x, y]], ...]; cursor_position passes none (never refused).
+// An executor without __coldFrame keeps the old origin-only fallback
+// (undefined); null = no frame, refused.
+async function __coldShot(){
+  if(typeof ex.__coldFrame!=="function"||typeof ex.listDisplays!=="function")return void 0;
+  var dl=await ex.listDisplays();if(!Array.isArray(dl)||!dl.length)return null;
+  var did=globalThis.__cuPinnedDisplay,m=null;
+  if(did===void 0){var sd=typeof ex.__defaultDisplayId==="function"?await ex.__defaultDisplayId():null;if(typeof sd==="number")did=sd;else{for(var i=0;i<dl.length;i++){if(dl[i].isPrimary){did=dl[i].displayId;break}}if(did===void 0)did=dl[0].displayId}}
+  for(var j=0;j<dl.length;j++){if(dl[j].displayId===did){m=dl[j];break}}
+  if(!m)return null;
+  var f=ex.__coldFrame(m,__ask);
+  return f&&f.imgW>0&&f.imgH>0&&f.dispW>0&&f.dispH>0?f:null;
+}
+async function __coldGuard(pts){
+  if(globalThis.__cuLastShot||!pts)return null;
+  var f=null;try{f=await __coldShot()}catch(e){f=null}
+  if(f===void 0)return null;
+  function no(t){(globalThis.__cdbDiag||console.log)("[claude-cu] tool call refused ("+__TOOL_NAME__+"): no screenshot yet in this app run, "+t);return{isError:!0,content:[{type:"text",text:t}]}}
+  if(!f)return pts.length?no("There is no prior screenshot to interpret "+pts[0][0]+" against. Take a screenshot first."):null;
+  for(var i=0;i<pts.length;i++){var p=pts[i][1]||[],x=+(p[0]||0),y=+(p[1]||0);if(!(x>=0&&y>=0&&x<=f.imgW&&y<=f.imgH))return no(pts[i][0]+" is outside the display bounds, and there is no prior screenshot to interpret it against. Take a screenshot first.")}
+  __cold=f;return null;
+}
+// The image-pixel points a tool reads (null: none).
+function __coldPts(){
+  var I=__INPUT__||{};
+  switch(__TOOL_NAME__){
+    case"left_click":case"right_click":case"double_click":case"triple_click":case"middle_click":case"mouse_move":return[["coordinate",I.coordinate||[I.x,I.y]]];
+    case"scroll":return[["coordinate",I.coordinate||[I.x||0,I.y||0]]];
+    case"left_click_drag":return(I.start_coordinate?[["start_coordinate",I.start_coordinate]]:[]).concat([["coordinate",I.coordinate||[]]]);
+    case"zoom":return Array.isArray(I.region)&&I.region.length===4?[["region",[I.region[0],I.region[1]]],["region",[I.region[2],I.region[3]]]]:[["coordinate",I.coordinate||[960,540]]];
+    case"cursor_position":return[];
+  }
+  return null;
 }
 // Teach mode (teach_step/teach_batch) is NOT handled here — the top-of-handler
 // __lxTeachTools branch forwards it to upstream's dispatch, which maps the
@@ -76,12 +171,81 @@ function __untxC(x,y){
 // getLastScreenshotDims), so Eq's pixels branch reproduces __txC exactly:
 // displayWidth/width == dispW/imgW, originX == originX. This makes teach anchors
 // and teach action coordinates land identically to our click path.
+// The monitor names the model reads and passes to switch_display, upstream's
+// own rule (its dispatcher's display-name map, 5.1231.2, used by its
+// screenshot note and switch_display): a label that is trimmed, NFC, plain
+// quotes, at most 40 characters of letters, digits and _ .&'"()+-
+// –—→⌘⌥⌃⇧, else "display <id>"; in
+// displayId order a repeated name gets " (2)", " (3)", ... So two monitors
+// Electron labels alike ("Unknown Display" in a VM, two identical monitors)
+// stay apart. Unique, well-formed labels are their own names, so every text
+// below reads as before. -> Map displayId -> name.
+var __DISP_OK=/^[\p{L}\p{N}_ .&'"()+\-–—→⌘⌥⌃⇧]+$/u;
+function __dispNfc(t){return t.length>256?t:t.normalize("NFC")}
+function __dispLabel(l){
+  var t=typeof l==="string"?l.trim():"";if(!t)return void 0;
+  t=__dispNfc(t).replace(/‘|’/g,"'").replace(/“|”/g,'"').replace(/…/g,"...");
+  return t.length<=40&&__DISP_OK.test(t)?t:void 0;
+}
+function __dispNames(dl){
+  var s=(Array.isArray(dl)?dl:[]).slice().sort(function(a,b){return a.displayId-b.displayId}),seen=new Map,r=new Map;
+  for(var i=0;i<s.length;i++){var t=__dispLabel(s[i].label);if(t===void 0)t="display "+s[i].displayId;var c=(seen.get(t)||0)+1;seen.set(t,c);r.set(s[i].displayId,c===1?t:t+" ("+c+")")}
+  return r;
+}
+function __dispName(names,id){var n=names.get(id);return n!==void 0?n:"display "+id}
+// switch_display's display argument: a name above (case-insensitive,
+// trimmed; a repeated label alone is its first monitor's name, as upstream
+// resolves it), else the raw label when no other monitor has it, else the
+// displayId (as before). -> the listDisplays entry or undefined.
+function __dispFind(dl,names,target){
+  var q=__dispNfc(String(target).trim()).toLowerCase(),i;
+  for(i=0;i<dl.length;i++){if(__dispName(names,dl[i].displayId).toLowerCase()===q)return dl[i]}
+  var same=dl.filter(function(d){return d.label===target});
+  if(same.length===1)return same[0];
+  for(i=0;i<dl.length;i++){if(String(dl[i].displayId)===String(target))return dl[i]}
+  return void 0;
+}
+// The screenshot note naming the captured monitor, upstream's own words (its
+// dispatcher adds it to every screenshot with two or more monitors; the
+// switch_display description tells the model to take names from it). prev =
+// the display of the previous screenshot; upstream treats undefined and 0
+// alike (no "different from" clause), kept as is. -> text or null.
+function __dispNote(dl,id,prev){
+  if(!Array.isArray(dl)||dl.length<2)return null;
+  var names=__dispNames(dl),s=__dispName(names,id),o=dl.filter(function(d){return d.displayId!==id}).map(function(d){return __dispName(names,d.displayId)});
+  var u=o.length>0?" Other attached monitors: "+o.map(function(n){return"\""+n+"\""}).join(", ")+"."+" Use switch_display to capture a different monitor.":"";
+  if(prev===void 0||prev===0)return"This screenshot was taken on monitor \""+s+"\"."+u;
+  if(prev!==id)return"This screenshot was taken on monitor \""+s+"\", which is different from your previous screenshot (taken on \""+__dispName(names,prev)+"\")."+u;
+  return null;
+}
 // switch_display's pin, shared with the accessibility tools (app_ax_find makes
 // the display holding the searched window current): the next screenshot, zoom
 // and click use display d; the old screenshot geometry is dropped.
 function __pinDisplay(d){globalThis.__cuPinnedDisplay=d.displayId;globalThis.__cuActiveOrigin={x:d.originX||0,y:d.originY||0};globalThis.__cuLastShot=null;__syncUpstreamShotDims(void 0)}
 function __syncUpstreamShotDims(dims){
   try{if(__SESSION__&&typeof __SESSION__.onCuScreenshotDimsUpdated==="function")__SESSION__.onCuScreenshotDimsUpdated(dims)}catch(e){}
+}
+// The display Computer Use works on, reported to the session the way upstream's
+// dispatcher does (5.1231.2): a screenshot on another display than the
+// session's selected one -> onResolvedDisplayUpdated(id) (the session's
+// onCuSelectedDisplayUpdated), switch_display -> onDisplayPinned(id | undefined
+// for auto) (onCuDisplayPinned). Both set the session's cuSelectedDisplayId and
+// emit cuSelectedDisplayChanged, which moves the glow (sub-patch 10b1) and the
+// teach overlay (10b4); the glow at the next lock reads it too (10b2). The id
+// is our executor's (a monitor index): those entry points translate it to
+// Electron's id. Unlike upstream's batch (whose screenshots always capture the
+// selected display) a screenshot in our batch reports too, because ours picks
+// its display itself. Nothing on a background display (not the user's
+// monitors) or for a context without these callbacks.
+function __reportDisplay(id,pinned){
+  try{
+    if(ex.__targetActive&&ex.__targetActive())return;
+    var s=__SESSION__;if(!s)return;
+    if(pinned){if(typeof s.onCuDisplayPinned==="function")s.onCuDisplayPinned(id);return}
+    if(typeof id!=="number"||typeof s.onCuSelectedDisplayUpdated!=="function")return;
+    var cur=typeof s.getCuSelectedDisplayId==="function"?s.getCuSelectedDisplayId():void 0;
+    if(cur!==id)s.onCuSelectedDisplayUpdated(id);
+  }catch(e){}
 }
 // The grant gate for one input action (null = allowed). kind: "pointer" with
 // root/screen points, "keyboard" (opts.chord for key combos), "move".
@@ -101,23 +265,56 @@ var __actionTools=new Set(["left_click","right_click","double_click","triple_cli
 // executor re-checks it and, when down, the not-running refusal replaces the
 // raw bridge error (and refuses every following call until it answers).
 async function __tgtErr(err){try{if(ex.__targetAfterError){var m=await ex.__targetAfterError(err);if(m){(globalThis.__cdbDiag||console.log)("[claude-cu] tool call refused ("+__TOOL_NAME__+"): "+m);return{isError:!0,content:[{type:"text",text:m}]}}}}catch(e){}return null}
-async function __hideWindows(fn){if(ex.__targetActive&&ex.__targetActive())return await fn();var __bws=require("electron").BrowserWindow.getAllWindows().filter(function(w){return!w.isDestroyed()});for(var __i=0;__i<__bws.length;__i++)__bws[__i].setIgnoreMouseEvents(true);try{await new Promise(function(r){setTimeout(r,50)});return await fn()}finally{for(var __i=0;__i<__bws.length;__i++){if(!__bws[__i].isDestroyed())__bws[__i].setIgnoreMouseEvents(false)}}}
+// X11 with a hit test (x11-bridge): Claude's windows stay clickable for the
+// user (Stop in the docked panel) and the model's pointer input that would land
+// on one is refused instead, with upstream's own refusal for that case (its
+// click gate does the same for cloud sessions). The hit test looks through
+// Claude's click-through overlays (glow, teach). Elsewhere (Wayland, X11
+// without a hit test) Claude's windows are made click-through around the
+// action as before; its overlays (not focusable) are click-through already and
+// are left alone.
+function __x11Hit(){var st=String(process.env.XDG_SESSION_TYPE||"").toLowerCase(),wl=st==="wayland"?!0:st==="x11"?!1:!!process.env.WAYLAND_DISPLAY;var c=ex.capabilities;return !wl&&!(ex.__targetActive&&ex.__targetActive())&&!!c&&c.hitTest!=="none"&&typeof ex.appUnderPoint==="function"}
+// X11: the first pointer action after the lock was taken waits for upstream's
+// side-panel dock first (the executor's real always-on-top signal, bounded, a
+// no-op when nothing docks or the waiter was used), so the hit test sees the
+// docked layout, as the first capture does.
+async function __selfHit(pts){try{if(typeof ex.__dockWait==="function")await ex.__dockWait()}catch(__dw){}if(!__x11Hit())return null;var host=ex.capabilities.hostBundleId;for(var __si=0;__si<pts.length;__si++){var __sp=pts[__si];if(!__sp)continue;var __sa=null;try{__sa=await ex.appUnderPoint(__sp[0],__sp[1])}catch(__se){__sa=null}if(__sa&&host&&__sa.bundleId===host){(globalThis.__cdbDiag||console.log)("[claude-cu] tool call refused ("+__TOOL_NAME__+"): the target is a Claude window");return{isError:!0,content:[{type:"text",text:"Could not verify the click target \u2014 the Claude overlay intercepted the hit test. Retry."}]}}}return null}
+// Upstream's click handler glides its drawn pointer to the target first
+// (5.1231.2): `if(!r.pointerActionsBackToBack&&!r.isUnattended&&await(t.executor.
+// showPointerTravel?.(h,g,r.isAborted))&&r.isAborted?.())return R("Click aborted
+// (user interrupt).")`, its state from the session adapter: isAborted =
+// session.isAborted() || altToolModeCalls.timeLimitPassed, isUnattended =
+// session.isUnattendedSession(), pointerActionsBackToBack =
+// altToolModeCalls.anyRunning (another call answered by the alternate tool
+// mode; a batch's sub-actions glide too). Here after the refusal checks, so a
+// refused click never animates. The executor's showPointerTravel is false at
+// once wherever no drawn pointer shows (flag off, Wayland, kwin, background
+// display, no compositor).
+function __abortedNow(){try{return __SESSION__&&typeof __SESSION__.isAborted==="function"&&__SESSION__.isAborted()===!0||!!(__STATE__&&__STATE__.altToolModeCalls&&__STATE__.altToolModeCalls.timeLimitPassed===!0)}catch(e){return !0}}
+async function __travel(p){
+  if(typeof ex.showPointerTravel!=="function")return null;
+  try{if(__STATE__&&__STATE__.altToolModeCalls&&__STATE__.altToolModeCalls.anyRunning===!0)return null;if(__SESSION__&&typeof __SESSION__.isUnattendedSession==="function"&&__SESSION__.isUnattendedSession())return null}catch(e){return null}
+  var __tm=!1;try{__tm=await ex.showPointerTravel(p[0],p[1],__abortedNow)===!0}catch(e){__tm=!1}
+  return __tm&&__abortedNow()?{isError:!0,content:[{type:"text",text:"Click aborted (user interrupt)."}]}:null;
+}
+async function __hideWindows(fn){if(ex.__targetActive&&ex.__targetActive())return await fn();if(__x11Hit())return await fn();var __bws=require("electron").BrowserWindow.getAllWindows().filter(function(w){return!w.isDestroyed()&&(typeof w.isFocusable!=="function"||w.isFocusable())});for(var __i=0;__i<__bws.length;__i++)__bws[__i].setIgnoreMouseEvents(true);try{await new Promise(function(r){setTimeout(r,50)});return await fn()}finally{for(var __i=0;__i<__bws.length;__i++){if(!__bws[__i].isDestroyed())__bws[__i].setIgnoreMouseEvents(false)}}}
 // Accessibility tools (issue #306, js/cu_ax_tools.js): only while their switch
 // is on (__cdbAxHandles), otherwise these names fall through as before.
-if(typeof globalThis.__cdbAxHandles==="function"&&globalThis.__cdbAxHandles(__TOOL_NAME__)){try{return await globalThis.__cdbAxCall(__TOOL_NAME__,__INPUT__,Object.assign({sid:__SESSION__&&__SESSION__.sessionId,pin:__pinDisplay,sync:__syncUpstreamShotDims},__ask?__cc.axOpts(__SESSION__):{}))}catch(err){return(await __tgtErr(err))||{content:[{type:"text",text:"Error: "+(err&&err.message||err)}],isError:!0}}}
+if(typeof globalThis.__cdbAxHandles==="function"&&globalThis.__cdbAxHandles(__TOOL_NAME__)){try{return await globalThis.__cdbAxCall(__TOOL_NAME__,__INPUT__,Object.assign({sid:__SESSION__&&__SESSION__.sessionId,aborted:__abortedNow,lock:async function(){if(!__lkS||typeof __lkS.checkCuLock!=="function")return!0;var __lr=await(typeof __lkS.checkCuExclusiveLock==="function"?__lkS.checkCuExclusiveLock():__lkS.checkCuLock());return!(__lr&&__lr.holder!==void 0&&!__lr.isSelf)},pin:function(d){__pinDisplay(d);__reportDisplay(d.displayId,!0)},sync:__syncUpstreamShotDims,dname:async function(id){return __dispName(__dispNames(await ex.listDisplays()),id)}},__ask?__cc.axOpts(__SESSION__):{}))}catch(err){return(await __tgtErr(err))||{content:[{type:"text",text:"Error: "+(err&&err.message||err)}],isError:!0}}}
+var __cg=await __coldGuard(__coldPts());if(__cg)return __cg;
 if(__actionTools.has(__TOOL_NAME__)){try{return await __hideWindows(async function(){switch(__TOOL_NAME__){
-case"left_click":{await __relHeld();var __lc=__txC(__INPUT__.coordinate||[__INPUT__.x,__INPUT__.y]),__g=await __gate("pointer",[__lc]);if(__g)return __g;await ex.click(__lc[0],__lc[1],"left",1);return{content:[{type:"text",text:"Clicked at ("+__lc[0]+","+__lc[1]+")"}]}}
-case"right_click":{await __relHeld();var __rc=__txC(__INPUT__.coordinate||[__INPUT__.x,__INPUT__.y]),__g=await __gate("pointer",[__rc]);if(__g)return __g;await ex.click(__rc[0],__rc[1],"right",1);return{content:[{type:"text",text:"Right clicked"}]}}
-case"double_click":{await __relHeld();var __dc=__txC(__INPUT__.coordinate||[__INPUT__.x,__INPUT__.y]),__g=await __gate("pointer",[__dc]);if(__g)return __g;await ex.click(__dc[0],__dc[1],"left",2);return{content:[{type:"text",text:"Double clicked"}]}}
-case"triple_click":{await __relHeld();var __tc=__txC(__INPUT__.coordinate||[__INPUT__.x,__INPUT__.y]),__g=await __gate("pointer",[__tc]);if(__g)return __g;await ex.click(__tc[0],__tc[1],"left",3);return{content:[{type:"text",text:"Triple clicked"}]}}
-case"middle_click":{await __relHeld();var __mc=__txC(__INPUT__.coordinate||[__INPUT__.x,__INPUT__.y]),__g=await __gate("pointer",[__mc]);if(__g)return __g;await ex.click(__mc[0],__mc[1],"middle",1);return{content:[{type:"text",text:"Middle clicked"}]}}
+case"left_click":{await __relHeld();var __lc=__txC(__INPUT__.coordinate||[__INPUT__.x,__INPUT__.y]),__g=await __selfHit([__lc])||await __gate("pointer",[__lc]);if(__g)return __g;__g=await __travel(__lc);if(__g)return __g;await ex.click(__lc[0],__lc[1],"left",1);return{content:[{type:"text",text:"Clicked at ("+__lc[0]+","+__lc[1]+")"}]}}
+case"right_click":{await __relHeld();var __rc=__txC(__INPUT__.coordinate||[__INPUT__.x,__INPUT__.y]),__g=await __selfHit([__rc])||await __gate("pointer",[__rc]);if(__g)return __g;__g=await __travel(__rc);if(__g)return __g;await ex.click(__rc[0],__rc[1],"right",1);return{content:[{type:"text",text:"Right clicked"}]}}
+case"double_click":{await __relHeld();var __dc=__txC(__INPUT__.coordinate||[__INPUT__.x,__INPUT__.y]),__g=await __selfHit([__dc])||await __gate("pointer",[__dc]);if(__g)return __g;__g=await __travel(__dc);if(__g)return __g;await ex.click(__dc[0],__dc[1],"left",2);return{content:[{type:"text",text:"Double clicked"}]}}
+case"triple_click":{await __relHeld();var __tc=__txC(__INPUT__.coordinate||[__INPUT__.x,__INPUT__.y]),__g=await __selfHit([__tc])||await __gate("pointer",[__tc]);if(__g)return __g;__g=await __travel(__tc);if(__g)return __g;await ex.click(__tc[0],__tc[1],"left",3);return{content:[{type:"text",text:"Triple clicked"}]}}
+case"middle_click":{await __relHeld();var __mc=__txC(__INPUT__.coordinate||[__INPUT__.x,__INPUT__.y]),__g=await __selfHit([__mc])||await __gate("pointer",[__mc]);if(__g)return __g;__g=await __travel(__mc);if(__g)return __g;await ex.click(__mc[0],__mc[1],"middle",1);return{content:[{type:"text",text:"Middle clicked"}]}}
 case"type":{var __g=await __gate("keyboard");if(__g)return __g;await ex.type(__INPUT__.text||"",{viaClipboard:!1});return{content:[{type:"text",text:"Typed text"}]}}
 case"key":{var __kc=__INPUT__.text||__INPUT__.key||"",__krep=__INPUT__.repeat||__INPUT__.count||1,__g=await __gate("keyboard",null,{chord:__kc});if(__g)return __g;await ex.key(__kc,__krep);return{content:[{type:"text",text:"Pressed key: "+__kc}]}}
-case"scroll":{var __sc=__txC(__INPUT__.coordinate||[__INPUT__.x||0,__INPUT__.y||0]),__dir=__INPUT__.scroll_direction||__INPUT__.direction||"down",__amt=__INPUT__.scroll_amount!=null?__INPUT__.scroll_amount:(__INPUT__.amount!=null?__INPUT__.amount:3),__sv=__dir==="down"?__amt:__dir==="up"?-__amt:0,__sh=__dir==="right"?__amt:__dir==="left"?-__amt:0,__g=await __gate("pointer",[__sc]);if(__g)return __g;await ex.scroll(__sc[0],__sc[1],__sh,__sv);return{content:[{type:"text",text:"Scrolled "+__dir}]}}
-case"left_click_drag":{await __relHeld();var __dsc=__INPUT__.start_coordinate?__txC(__INPUT__.start_coordinate):null,__den=__txC(__INPUT__.coordinate);if(__ask){var __g=await __gate("pointer",[__dsc||await __cursorPt(),__den]);if(__g)return __g}await ex.drag(__dsc?{x:__dsc[0],y:__dsc[1]}:void 0,{x:__den[0],y:__den[1]});__setHeld(!1);return{content:[{type:"text",text:"Dragged"}]}}
-case"mouse_move":{var __mv=__txC(__INPUT__.coordinate||[__INPUT__.x,__INPUT__.y]),__g=await __gate(__held()?"pointer":"move",[__mv]);if(__g)return __g;await ex.moveMouse(__mv[0],__mv[1]);return{content:[{type:"text",text:"Moved to ("+__mv[0]+","+__mv[1]+")"}]}}
+case"scroll":{var __sc=__txC(__INPUT__.coordinate||[__INPUT__.x||0,__INPUT__.y||0]),__dir=__INPUT__.scroll_direction||__INPUT__.direction||"down",__amt=__INPUT__.scroll_amount!=null?__INPUT__.scroll_amount:(__INPUT__.amount!=null?__INPUT__.amount:3),__sv=__dir==="down"?__amt:__dir==="up"?-__amt:0,__sh=__dir==="right"?__amt:__dir==="left"?-__amt:0,__g=await __selfHit([__sc])||await __gate("pointer",[__sc]);if(__g)return __g;await ex.scroll(__sc[0],__sc[1],__sh,__sv);return{content:[{type:"text",text:"Scrolled "+__dir}]}}
+case"left_click_drag":{await __relHeld();var __dsc=__INPUT__.start_coordinate?__txC(__INPUT__.start_coordinate):null,__den=__txC(__INPUT__.coordinate),__dsh=await __selfHit([__dsc||(__x11Hit()?await __cursorPt():null),__den]);if(__dsh)return __dsh;if(__ask){var __g=await __gate("pointer",[__dsc||await __cursorPt(),__den]);if(__g)return __g}await ex.drag(__dsc?{x:__dsc[0],y:__dsc[1]}:void 0,{x:__den[0],y:__den[1]});__setHeld(!1);return{content:[{type:"text",text:"Dragged"}]}}
+case"mouse_move":{var __mv=__txC(__INPUT__.coordinate||[__INPUT__.x,__INPUT__.y]),__g=(__held()?await __selfHit([__mv]):null)||await __gate(__held()?"pointer":"move",[__mv]);if(__g)return __g;await ex.moveMouse(__mv[0],__mv[1]);return{content:[{type:"text",text:"Moved to ("+__mv[0]+","+__mv[1]+")"}]}}
 case"hold_key":{var __g=await __gate("keyboard",null,{chord:String(__INPUT__.text||__INPUT__.key||"")});if(__g)return __g;await ex.holdKey(__INPUT__.text||__INPUT__.key||"",__INPUT__.duration||.5);return{content:[{type:"text",text:"Held key"}]}}
-case"left_mouse_down":{if(__ask){if(__held())return{content:[{type:"text",text:"mouse button already held, call left_mouse_up first"}],isError:!0};var __g=await __gate("pointer",[await __cursorPt()]);if(__g)return __g}await ex.mouseDown();__setHeld(!0);return{content:[{type:"text",text:"Mouse down"}]}}
+case"left_mouse_down":{if(__x11Hit()){var __dsh2=await __selfHit([await __cursorPt()]);if(__dsh2)return __dsh2}if(__ask){if(__held())return{content:[{type:"text",text:"mouse button already held, call left_mouse_up first"}],isError:!0};var __g=await __gate("pointer",[await __cursorPt()]);if(__g)return __g}await ex.mouseDown();__setHeld(!0);return{content:[{type:"text",text:"Mouse down"}]}}
 case"left_mouse_up":{if(__ask){var __ug;try{__ug=await __gate("pointer",[await __cursorPt()])}catch(__ue){__ug={content:[{type:"text",text:"Could not check the app under the pointer ("+(__ue&&__ue.message||__ue)+"); the mouse button was released."}],isError:!0}}if(__ug){try{await ex.mouseUp()}finally{__setHeld(!1)}return __ug}}await ex.mouseUp();__setHeld(!1);return{content:[{type:"text",text:"Mouse up"}]}}
 case"computer_batch":{
   // Mirrors upstream's LXi/r6e: run sub-actions sequentially, stop on first
@@ -132,10 +329,15 @@ case"computer_batch":{
   var __tgB=typeof ex.__targetBatch==="function"&&ex.__targetBatch(1);
   try{
   for(var __bi=0;__bi<__actions.length;__bi++){
+    // A stopped turn (Stop, Escape, Stop sharing) ends the batch, as upstream's does.
+    if(__SESSION__&&typeof __SESSION__.isAborted==="function"&&__SESSION__.isAborted()===!0){await __relHeld();return{content:[{type:"text",text:"Batch aborted after "+__done.length+" of "+__total+" actions (user interrupt)."}],isError:!0}}
     var __ba=__actions[__bi],__bact=__ba.action||__ba.type;
     var __br;
+    var __bsub=__ba&&typeof __ba==="object";
+    if(__bsub)__lkSubs.add(__ba);
     try{__br=await __SELF__.handleToolCall(__STATE__,__bact,__ba,__SESSION__)}
     catch(__be){__br={content:[{type:"text",text:__bact+" threw: "+(__be&&__be.message||__be)}],isError:!0}}
+    finally{if(__bsub)__lkSubs.delete(__ba)}
     __done.push({action:__bact,inner:__br||{content:[]}});
     if(__br&&__br.isError){__failIdx=__bi;break}
   }
@@ -169,7 +371,7 @@ default:return{content:[{type:"text",text:"Unknown action tool: "+__TOOL_NAME__}
 // then the executor's default (on GNOME the monitor shared in the portal
 // dialog), then Electron's primary.
 try{switch(__TOOL_NAME__){
-case"screenshot":{var __dlist=await ex.listDisplays();var __primaryIdx=0;for(var __pi=0;__pi<__dlist.length;__pi++){if(__dlist[__pi].isPrimary){__primaryIdx=__dlist[__pi].displayId;break}}var __did;if(globalThis.__cuPinnedDisplay!==void 0)__did=globalThis.__cuPinnedDisplay;else if(typeof __INPUT__.display_number==="number")__did=__INPUT__.display_number;else if(typeof __INPUT__.display_id==="number")__did=__INPUT__.display_id;else{var __sdid=typeof ex.__defaultDisplayId==="function"?await ex.__defaultDisplayId():null;__did=typeof __sdid==="number"?__sdid:__primaryIdx}var __actMon=__dlist.find(function(d){return d.displayId===__did})||__dlist[0]||{originX:0,originY:0};globalThis.__cuActiveOrigin={x:__actMon.originX||0,y:__actMon.originY||0};var __ss=await ex.screenshot({displayId:__did,allowedBundleIds:__ask?__cc.shotIds(__SESSION__):void 0});if(__ss&&__ss.captureError)return{content:[{type:"text",text:"Screenshot failed: "+__ss.captureError}],isError:!0};globalThis.__cuLastShot={imgW:__ss.imgW||__ss.displayWidth||(__actMon.width||0),imgH:__ss.imgH||__ss.displayHeight||(__actMon.height||0),dispW:__ss.displayWidth||__actMon.width||0,dispH:__ss.displayHeight||__actMon.height||0,originX:__ss.originX!=null?__ss.originX:(__actMon.originX||0),originY:__ss.originY!=null?__ss.originY:(__actMon.originY||0)};__syncUpstreamShotDims({width:globalThis.__cuLastShot.imgW,height:globalThis.__cuLastShot.imgH,displayWidth:globalThis.__cuLastShot.dispW,displayHeight:globalThis.__cuLastShot.dispH,displayId:__did,originX:globalThis.__cuLastShot.originX,originY:globalThis.__cuLastShot.originY});var __sn=__ask?__cc.shotNote(__SESSION__,__ss):null;return{content:[{type:"image",data:__ss.base64,mimeType:__ss.mimeType||"image/jpeg"}].concat(__sn?[{type:"text",text:__sn}]:[])}}
+case"screenshot":{var __dlist=await ex.listDisplays();var __primaryIdx=0;for(var __pi=0;__pi<__dlist.length;__pi++){if(__dlist[__pi].isPrimary){__primaryIdx=__dlist[__pi].displayId;break}}var __did;if(globalThis.__cuPinnedDisplay!==void 0)__did=globalThis.__cuPinnedDisplay;else if(typeof __INPUT__.display_number==="number")__did=__INPUT__.display_number;else if(typeof __INPUT__.display_id==="number")__did=__INPUT__.display_id;else{var __sdid=typeof ex.__defaultDisplayId==="function"?await ex.__defaultDisplayId():null;__did=typeof __sdid==="number"?__sdid:__primaryIdx}var __actMon=__dlist.find(function(d){return d.displayId===__did})||__dlist[0]||{originX:0,originY:0};globalThis.__cuActiveOrigin={x:__actMon.originX||0,y:__actMon.originY||0};var __ss=await ex.screenshot({displayId:__did,allowedBundleIds:__ask?__cc.shotIds(__SESSION__):void 0});if(__ss&&__ss.captureError)return{content:[{type:"text",text:"Screenshot failed: "+__ss.captureError}],isError:!0};globalThis.__cuLastShot={imgW:__ss.imgW||__ss.displayWidth||(__actMon.width||0),imgH:__ss.imgH||__ss.displayHeight||(__actMon.height||0),dispW:__ss.displayWidth||__actMon.width||0,dispH:__ss.displayHeight||__actMon.height||0,originX:__ss.originX!=null?__ss.originX:(__actMon.originX||0),originY:__ss.originY!=null?__ss.originY:(__actMon.originY||0)};__syncUpstreamShotDims({width:globalThis.__cuLastShot.imgW,height:globalThis.__cuLastShot.imgH,displayWidth:globalThis.__cuLastShot.dispW,displayHeight:globalThis.__cuLastShot.dispH,displayId:__did,originX:globalThis.__cuLastShot.originX,originY:globalThis.__cuLastShot.originY});var __sdi=typeof __ss.displayId==="number"?__ss.displayId:__did;__reportDisplay(__sdi,!1);var __mn=__dispNote(__dlist,__sdi,globalThis.__cuNoteShotDisplay);globalThis.__cuNoteShotDisplay=__sdi;var __sn=__ask?__cc.shotNote(__SESSION__,__ss):null;return{content:(__mn?[{type:"text",text:__mn}]:[]).concat([{type:"image",data:__ss.base64,mimeType:__ss.mimeType||"image/jpeg"}],__sn?[{type:"text",text:__sn}]:[],globalThis.__cdbCuShotNote?globalThis.__cdbCuShotNote(__ss.base64):[])}}
 case"zoom":{
   // region=[x0,y0,x1,y1] corner pairs in the coordinate space of the last
   // full-screen screenshot (image pixels). Map both corners to root pixels via
@@ -193,11 +395,11 @@ case"zoom":{
     __zr=await ex.zoom({x:Math.max(0,__zc[0]-__hf),y:Math.max(0,__zc[1]-__hf),w:__sz,h:__sz},__zids,__zdid,void 0,{globalCoords:!0});
   }
   var __zn=__ask?__cc.shotNote(__SESSION__,__zr):null;
-  return{content:[{type:"image",data:__zr.base64,mimeType:__zr.mimeType||"image/jpeg"}].concat(__zn?[{type:"text",text:__zn}]:[])}
+  return{content:[{type:"image",data:__zr.base64,mimeType:__zr.mimeType||"image/jpeg"}].concat(__zn?[{type:"text",text:__zn}]:[],globalThis.__cdbCuShotNote?globalThis.__cdbCuShotNote(__zr.base64):[])}
 }
 case"cursor_position":{var __cp=await ex.getCursorPosition();var __cpr=__untxC(__cp.x,__cp.y);return{content:[{type:"text",text:"("+__cpr[0]+", "+__cpr[1]+")"}]}}
 case"wait":{var __ws=Math.min(__INPUT__.duration||__INPUT__.seconds||1,30);await new Promise(function(__rv){setTimeout(__rv,__ws*1000)});return{content:[{type:"text",text:"Waited "+__ws+"s"}]}}
-case"open_application":{var __oaName=__INPUT__.app||__INPUT__.application||"";if(__ask){var __og=__cc.openApp(__SESSION__,__oaName);if(__og)return __og}var __oa=await ex.openApp(__oaName);
+case"open_application":{var __oaName=__INPUT__.app||__INPUT__.application||"";var __oa=await ex.openApp(__oaName);
   if(__oa&&__oa.isError){var __sug=(__oa.suggestions&&__oa.suggestions.length)?" Did you mean: "+__oa.suggestions.join(", ")+"?":"";return{content:[{type:"text",text:"No application matching '"+(__oa.app||__oaName)+"' was found."+__sug}],isError:!0}}
   if(__oa&&__oa.action==="activated")return{content:[{type:"text",text:"Activated existing window: "+(__oa.windowTitle||__oa.app||__oaName)}]};
   if(__oa&&__oa.action==="launched")return{content:[{type:"text",text:"Launched "+(__oa.app||__oaName)+"; window '"+(__oa.windowTitle||__oa.app||__oaName)+"' is now frontmost"}]};
@@ -205,10 +407,10 @@ case"open_application":{var __oaName=__INPUT__.app||__INPUT__.application||"";if
   // action "opened" = Wayland-native/non-bridge launch-only, or an xdg-open of a
   // path/URL. Byte-for-byte the pre-feature text so non-X11 sessions are unchanged.
   return{content:[{type:"text",text:"Opened app"}]}}
-case"switch_display":{var __displays=await ex.listDisplays();var __target=__INPUT__.display;if(__target==="auto"||!__target){globalThis.__cuPinnedDisplay=void 0;globalThis.__cuLastShot=null;__syncUpstreamShotDims(void 0);return{content:[{type:"text",text:"Display mode set to auto (follows cursor). Available: "+__displays.map(function(d){return d.label+" ("+d.width+"x"+d.height+")"}).join(", ")}]}}var __found=__displays.find(function(d){return d.label===__target||String(d.displayId)===String(__target)});if(__found){__pinDisplay(__found);return{content:[{type:"text",text:"Switched to display: "+__found.label+" ("+__found.width+"x"+__found.height+"). Take a screenshot to refresh coordinates."}]}}return{content:[{type:"text",text:"Display '"+__target+"' not found. Available: "+__displays.map(function(d){return d.label}).join(", ")}]}}
+case"switch_display":{var __displays=await ex.listDisplays(),__dn=__dispNames(__displays);var __target=__INPUT__.display;if(__target==="auto"||!__target){globalThis.__cuPinnedDisplay=void 0;globalThis.__cuLastShot=null;__syncUpstreamShotDims(void 0);__reportDisplay(void 0,!0);return{content:[{type:"text",text:"Display mode set to auto (follows cursor). Available: "+__displays.map(function(d){return __dispName(__dn,d.displayId)+" ("+d.width+"x"+d.height+")"}).join(", ")}]}}var __found=__dispFind(__displays,__dn,__target);if(__found){__pinDisplay(__found);__reportDisplay(__found.displayId,!0);return{content:[{type:"text",text:"Switched to display: "+__dispName(__dn,__found.displayId)+" ("+__found.width+"x"+__found.height+"). Take a screenshot to refresh coordinates."}]}}return{content:[{type:"text",text:"Display '"+__target+"' not found. Available: "+__displays.map(function(d){return __dispName(__dn,d.displayId)}).join(", ")}]}}
 case"list_granted_applications":{return{content:[{type:"text",text:"All applications are accessible on Linux (no grants needed)"}]}}
-case"read_clipboard":{if(__ask){var __cr=__cc.clipboard(__SESSION__,"read");if(__cr)return __cr}var cb=await ex.readClipboard();return{content:[{type:"text",text:cb}]}}
-case"write_clipboard":{if(__ask){var __cw=__cc.clipboard(__SESSION__,"write");if(__cw)return __cw}await ex.writeClipboard(__INPUT__.text||"");return{content:[{type:"text",text:"Written to clipboard"}]}}
+case"read_clipboard":{var cb=await ex.readClipboard();return{content:[{type:"text",text:cb}]}}
+case"write_clipboard":{await ex.writeClipboard(__INPUT__.text||"");return{content:[{type:"text",text:"Written to clipboard"}]}}
 default:return{content:[{type:"text",text:"Unknown tool: "+__TOOL_NAME__}],isError:!0}
 }}catch(err){return(await __tgtErr(err))||{content:[{type:"text",text:"Error: "+err.message}],isError:!0}}
 }}

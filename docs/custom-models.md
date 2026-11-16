@@ -45,6 +45,8 @@ Each can also point at another Claude model.
 
 The Models page writes providers and models to `claude-desktop-extra.json` in the profile directory (`~/.config/Claude`, or `~/.config/Claude-<name>` for a [profile](profiles.md)), and the keys to `custom-models/secrets.json` (mode 0600, in a 0700 directory). A key is never shown again once saved.
 
+The Models page can be used in [3P mode](third-party-inference.md) (a managed or gateway deployment) too, and the routing files land in the 3P profile, but custom models reach the Code tab's picker only with a claude.ai login: in 3P the picker is the gateway's own model list (`inferenceModels`), and the app's non-Anthropic model-id filter applies there (see [Allow non-Anthropic models](cookbook/opper-gateway.md)). To use another provider's models in 3P, list them in the gateway configuration instead.
+
 The same settings can be written by hand under `customModels` in `claude-desktop-extra.jsonc`. A provider defined there shows as locked on the page, and `enabled` set there locks the switch. Both files are read together: providers come from both, and a `.jsonc` provider wins over a `.json` one with the same id.
 
 ```jsonc
@@ -128,7 +130,7 @@ WebFetch reads the page itself, then has the **small/fast model** summarise it a
 
 The picker's effort menu shows the levels the provider accepts. A preset knows them (DeepSeek accepts `low`, `high` and `max`), and **detect** in the provider form asks the API with one small request per level. A level the provider lacks is sent as the next one up. With the default five levels, `medium` and `xhigh` go out as `high` and `max`, which is DeepSeek's convention.
 
-Thinking follows the CLI: it is on for a session's turns and off for its light work. The budget is capped at 16,000 tokens. Effort is never sent without thinking.
+Thinking follows the CLI: it is on for a session's turns and off for its light work (which always omits both thinking and effort). The budget is capped at 16,000 tokens, and effort is only sent with thinking - except on adaptive Claude models (Opus/Sonnet 4.6+, Haiku 5+, Fable 5+, Mythos) behind a compatible endpoint, which receive `thinking: { type: "adaptive" }` and unmapped effort (`low..max`, capping `xhigh -> max` on 4.6 / Mythos preview) rather than `budget_tokens`. Always-thinking models that reject `{ type: "disabled" }` (Fable 5+, Mythos 5+, Haiku 5+, Opus/Sonnet 5.5+) omit `thinking` when turned off so low effort still works without a 400, while 4.6..5.0 keep `{ type: "disabled" }`; **detect** probes all adaptive Claude models with `{ type: "adaptive" }`.
 
 ### What reaches the provider
 
@@ -186,7 +188,7 @@ SSH and WSL sessions start without any of this, since their CLI runs on another 
 
 ### Limits
 
-- Local Code sessions only. Cowork, Dispatch and SSH sessions keep Anthropic's models.
+- Local Code sessions only, with a claude.ai login (1P). Cowork, Dispatch and SSH sessions keep Anthropic's models, and in 3P mode the picker lists the gateway's models.
 - What a provider's endpoint supports (images, tools, web search) is up to the provider. Its errors are passed back to the session and logged.
 - The Code tab shows no model name on a custom sub-agent's card. That part of the app is claude.ai's own code and only names Anthropic's models.
 
