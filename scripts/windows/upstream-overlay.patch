@@ -303,7 +303,7 @@ index 7f8b2ec..e944ca0 100644
    globalThis.__cdbTranscriptLimitsMain = true;
  
 diff --git a/patches/Makefile b/patches/Makefile
-index f0e3836..c5ef08c 100644
+index f0e3836..af3ee9f 100644
 --- a/patches/Makefile
 +++ b/patches/Makefile
 @@ -1,9 +1,10 @@
@@ -327,12 +327,15 @@ index f0e3836..c5ef08c 100644
  BINS := $(SRCS:.nim=)
  
  ifeq ($(strip $(SRCS)),)
-@@ -199,5 +200,8 @@ community/add_feature_jira_tracker: \
+@@ -199,5 +200,11 @@ community/add_feature_jira_tracker: \
    ../js/jira_tracker_web_page.js
  
  
 +# Windows build only: profile selection and sign-in callback routing.
 +windows/add_windows_profiles: ../js/windows_profiles_main.js
++
++# Windows build only: the notice that a newer windows-v release is out.
++windows/add_windows_update_notice: ../js/windows_update_notice_main.js
 +
  clean:
  	@rm -rf $(BINS) .nimcache
@@ -409,7 +412,7 @@ index f03ea70..0c45304 100644
        # Groups: 0 the cache assigned, 1 the cache the IIFE returns, 2 the memo,
        # 3 the getter, 4 the cache the getter returns. 0, 1 and 4 must agree.
 diff --git a/scripts/apply_patches.py b/scripts/apply_patches.py
-index 875b0ef..4530590 100644
+index 875b0ef..986eebb 100644
 --- a/scripts/apply_patches.py
 +++ b/scripts/apply_patches.py
 @@ -11,7 +11,11 @@ target location.
@@ -434,7 +437,7 @@ index 875b0ef..4530590 100644
 +# prefix injections then land ahead of the others). Pinned like
 +# EXPECTED_PATCH_COUNT.
 +WINDOWS_SUBDIR = "windows"
-+EXPECTED_WINDOWS_PATCH_COUNT = 1
++EXPECTED_WINDOWS_PATCH_COUNT = 2
 +# Shared patches the Windows build carries: every core and community feature
 +# except Linux window handling (window controls, native titlebar, window
 +# transparency), the Quick Entry socket and the Linux profile launcher's URL
@@ -537,7 +540,7 @@ index 875b0ef..4530590 100644
      nim_jobs_by_target = {}  # real_target -> list[(patch_file, nim_binary)]
  
 diff --git a/scripts/run-feature-tests.sh b/scripts/run-feature-tests.sh
-index a110518..113c1d4 100755
+index a110518..6ba32d7 100755
 --- a/scripts/run-feature-tests.sh
 +++ b/scripts/run-feature-tests.sh
 @@ -1,5 +1,5 @@
@@ -577,7 +580,7 @@ index a110518..113c1d4 100755
 +# lines so that upstream adding a harness does not break this overlay.
 +if [ "$ENFORCE_COUNT" = true ]; then
 +    CATEGORIES+=(windows)
-+    EXPECTED_TEST_HARNESSES=$((EXPECTED_TEST_HARNESSES + 2))
++    EXPECTED_TEST_HARNESSES=$((EXPECTED_TEST_HARNESSES + 3))
 +fi
 +
  if ! command -v node >/dev/null 2>&1; then
