@@ -62,7 +62,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  NODE_VERSION: 24.11.1
+  NODE_VERSION: 24.22.2
   NIM_VERSION: 2.2.4
   ASAR_VERSION: 3.4.1
 
