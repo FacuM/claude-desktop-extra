@@ -1,6 +1,6 @@
 (function(){
 // ── Computer Use: ask before controlling an app (regular-mode Linux) ─────────
-// Settings -> Extra -> Computer Use -> "Ask before Computer Use controls an
+// Settings -> Extra -> Cowork (Linux) -> "Ask before Computer Use controls an
 // app", read through globalThis.__cdbCuAskBeforeControl() (js/
 // extra_settings_main.js; on by default, only an explicit false is off).
 //
@@ -41,7 +41,7 @@
 // shared by every session, which is why active() does not depend on the
 // session: the descriptions hold for every Code session.
 if(process.platform!=="linux"||globalThis.__cdbCuConsent)return;
-var SCREEN="com.anthropic.cu.screen";
+var SCREEN="com.anthropic.cu.screen",DIALOG=" (dialog)",WINDOW=" (window)";
 function ex(){return globalThis.__linuxExecutor||null}
 function switchOn(){try{var f=globalThis.__cdbCuAskBeforeControl;return typeof f==="function"?f()!==!1:!0}catch(e){return!0}}
 function on(){return!globalThis.__cuKwinMode&&switchOn()}
@@ -59,7 +59,17 @@ function key(){var m=mode();return m.consent?"cu-ask:"+m.filtering+":"+m.hitTest
 // What the mask does not cover (wlroots-bridge doctor screenshot_mask_gaps).
 var GAP_NAMES={popups:"popup menus",layer_shell_top_overlay:"panels and overlays",xwayland_unmanaged:"XWayland menus and tooltips"};
 function gapText(g){return g.map(function(x){return GAP_NAMES[x]||x.replace(/_/g," ")}).join(", ")}
-function gapSentence(m){return m.gaps.length?"The covering is approximate here: "+gapText(m.gaps)+" can still show over or next to the approved windows. ":""}
+// Gaps that leave something OUT of the image (wlroots-bridge per-window
+// capture: an approved app's own menus past its window edge; XWayland menus
+// that cannot be matched to an approved window) are not leaks: they are said
+// apart. xwayland_unmanaged is such a gap where popups_outside_window is
+// reported too (per-window capture), a leak otherwise (sway's output capture).
+function gapCut(g,all){return g==="popups_outside_window"||g==="xwayland_unmanaged"&&all.indexOf("popups_outside_window")>=0}
+var CUT_NAMES={popups_outside_window:"an approved app's own menus and popups are cut off where they reach past its window",xwayland_unmanaged:"XWayland menus and tooltips that cannot be matched to an approved window are left out"};
+function gapSentence(m){
+  var leak=m.gaps.filter(function(g){return !gapCut(g,m.gaps)}),cut=m.gaps.filter(function(g){return gapCut(g,m.gaps)});
+  return(leak.length?"The covering is approximate here: "+gapText(leak)+" can still show over or next to the approved windows. ":"")+(cut.length?"In screenshots here, "+cut.map(function(g){return CUT_NAMES[g]}).join("; ")+". ":"");
+}
 function shotSentence(m){
   return m.filtering==="mask"
     ?"Screenshots show only the approved apps' windows: everything else is covered by solid rectangles. "+gapSentence(m)
@@ -195,6 +205,8 @@ function refuseFront(o,kind,c,list){
 // The app under a point. With a hit test, a click on Claude's own window is
 // refused too (nothing of Claude's is ever a target).
 function refusePoint(a,c,list){
+  // A window no app answers for (executor: upstream's unattributed shape).
+  if(a&&a.bundleId===null)return err("The window at this point belongs to \""+(a.unattributedWindowOwner||a.displayName||"an unknown process")+"\", a process with no app that no running app answers for, so no grant can cover it and actions on it are refused. Act on a window that belongs to an application instead, or ask the user to close or move this one.");
   if(a===null)return err("The click would land on the desktop (panels, docks, desktop icons or the background), which is not an approved app and can launch other applications. Bring an approved app forward with open_application, or ask the user.");
   if(grantFor(a.bundleId,list))return null;
   if(isHost(a,c))return err("Could not verify the click target - the Claude window is at these coordinates. Bring an approved app forward and retry.");
@@ -216,7 +228,20 @@ async function gate(s,kind,points,opts){
   if(typeof e.getFrontmostApp==="function"){
     try{front=await e.getFrontmostApp()}
     catch(er){return err("Could not tell which app is in front ("+String(er&&er.message||er).trim().slice(0,200)+"), so nothing was sent. Take a screenshot and retry.")}
+    // Read again: the front-window source may have just answered (GNOME Introspect).
+    c=caps();
   }
+  // The executor's answers for a backend that cannot name the window in front
+  // (issue #326; upstream's own rules use them): the shared screen = nothing
+  // known (null, as before); Claude (Electron's own focused window, a known
+  // positive) = Claude's window, so keystrokes are refused as upstream does;
+  // "<host> (window)" (Claude's window where upstream's input guard is
+  // missing) = Claude's window too; a Claude dialog = every input refused, as
+  // upstream's gate and its delivery do (its input guard does not cover
+  // native dialogs).
+  if(front&&c.host&&front.bundleId===c.host+DIALOG)return err("One of Claude's own dialogs is open on the shared screen. Wait for the user to answer it before clicking, scrolling or typing.");
+  if(front&&c.host&&front.bundleId===c.host+WINDOW)front={bundleId:c.host,displayName:front.displayName};
+  if(front&&front.bundleId===SCREEN)front=null;
   // No hit test: the host in front stands for the shared screen, which any grant covers.
   if(kind==="pointer"&&c.hitTest!=="native"&&isHost(front,c))front=null;
   var r=refuseFront(front,kind,c,list);
@@ -267,9 +292,126 @@ function shotNote(s,res){
 function lockReleased(){_noted.clear()}
 // The accessibility tools' grant check (js/cu_ax_tools.js opts.allowedApps /
 // opts.tier). Not opts.ctx: that is upstream's dispatch context (kwin mode).
+// The check and grantsNow read the session's grants when called, so a grant
+// revoked during a wait_for ends the wait.
 function axOpts(s){
   var list=grants(s);
-  return{allowedApps:list,tier:function(id){return grantFor(id,list)?null:{error:err("\""+id+"\" is not in the allowed applications. Call request_access with it in the apps array first.")}}};
+  return{allowedApps:list,grantsNow:function(){return grants(s)},tier:function(id){return grantFor(id,grants(s))?null:{error:err("\""+id+"\" is not in the allowed applications. Call request_access with it in the apps array first.")}}};
 }
-globalThis.__cdbCuConsent={active:active,mode:mode,key:key,text:text,grants:grants,ids:ids,grantFor:grantFor,gate:gate,clipboard:clipboard,openApp:openApp,needsGrant:needsGrant,shotIds:shotIds,shotNote:shotNote,lockReleased:lockReleased,axOpts:axOpts,systemCombo:systemCombo,_notedSize:function(){return _noted.size}};
+function diag(m){try{var d=globalThis.__cdbDiag;if(typeof d==="function")d(m)}catch(e){}}
+// ── What upstream tells the model and the UI about per-app access ──
+// Upstream describes its own Wayland portal executor: one shared screen, the
+// most permissive tier for all of it, screenshots of everything, and refusals
+// while one of its dialogs is open. Our bridges differ per backend, so two of
+// its answers come from here (fix_computer_use_linux.nim 16a / 16b / 16d):
+//   spSuffix()   the system-prompt suffix after the tier rules (local Cowork
+//                computer_use / cu_only sections, the session server's
+//                request_access result, the canUseTool deny message), on every
+//                Linux session in regular mode: "" in kwin mode (per-app,
+//                upstream's own rules hold), else what the live backend does.
+//   __cdbCuSharedScreen()  true = upstream's "shares the whole screen" answer
+//                (computerUsePerAppAccess unsupported). False in kwin mode;
+//                else true unless "Ask before Computer Use controls an app"
+//                is on AND the capture bridge masks (mask with gaps counts).
+//                The "Entire screen" pseudo-grant follows __cdbCuScreenOnly()
+//                (below) instead. Exec-free: it runs on
+//                every supported-features build (#184), so it reads the
+//                executor's capabilities getter (cached doctor), never
+//                capabilitiesNow() (which may run pgrep).
+var SP_OFF="\n\nOn this system (Linux) the apps you name are not checked before you act: screenshots show the whole screen, including apps the user did not ask for, and clicks and keystrokes go to whatever is under them. Act only in the apps the user asked for and leave everything else alone.";
+function spSuffix(){
+  var kw=!!globalThis.__cuKwinMode,m=kw?null:mode(),s;
+  if(kw)s="";
+  else if(!m.consent)s=SP_OFF;
+  else s=("\n\nOn this system (Linux) every app the user approves is granted at tier \"full\", whatever its category. "+shotSentence(m)+inputSentence(m)).replace(/\s+$/,"");
+  diag("[claude-cu] prompt suffix: "+(kw?"kwin mode (upstream's per-app rules, no suffix)":!m.consent?"ask-before-control off (apps not checked)":"screenshots "+(m.filtering==="mask"?"masked"+(m.gaps.length?" (gaps: "+m.gaps.join(",")+")":""):"unfiltered")+", hit test "+m.hitTest+", frontmost "+m.frontmost+(m.backend?" ("+m.backend+")":"")));
+  return s;
+}
+function waylandEnv(){var st=String(process.env.XDG_SESSION_TYPE||"");return st?st==="wayland":!!process.env.WAYLAND_DISPLAY}
+function sharedScreen(){
+  try{
+    if(globalThis.__cuKwinMode)return!1;
+    var e=ex(),f=e&&e.capabilities?e.capabilities.screenshotFiltering:"none";
+    return!(switchOn()&&f==="mask");
+  }catch(err){return waylandEnv()}
+}
+// The answer last handed to upstream (undefined before the first features
+// build) and the last one logged. A change after that first build re-signals
+// the renderer through upstream's own supported-features broadcast (16c,
+// globalThis.__cdbCuFeaturesChanged), so the UI does not keep the answer from
+// before the doctor replied or the background display / switch changed.
+var _ssLast,_ssLogged;
+globalThis.__cdbCuSharedScreen=function(){
+  var v=sharedScreen();
+  _ssLast=v;
+  if(v!==_ssLogged){_ssLogged=v;diag("[claude-cu] per-app access: "+(v?"whole shared screen (unsupported)":"per app (supported)"))}
+  return v;
+};
+// The backend shares the whole screen and cannot check per app: regular
+// executor mode on a backend without a hit test (the executor's exec-free
+// capabilities.hitTest "none": GNOME, niri / river, XWayland, ydotool). There
+// upstream's own whole-screen rules run its gate (issue #326), and they need
+// the "Entire screen" pseudo-grant: the shared screen is the app in front
+// whenever Claude's own window is. The one predicate behind both pseudo-grant
+// sites, local sessions (16d) and cloud sessions (16f).
+var _soLogged;
+function screenOnly(){
+  try{
+    if(globalThis.__cuKwinMode)return!1;
+    var e=ex(),c=e&&e.capabilities;
+    return!!c&&c.hitTest==="none";
+  }catch(err){return!1}
+}
+globalThis.__cdbCuScreenOnly=function(){
+  var v=screenOnly();
+  if(v!==_soLogged){_soLogged=v;diag("[claude-cu] whole shared screen: "+(v?"yes (no hit test: upstream's whole-screen rules, \"Entire screen\" grant)":"no (per-app checks)"))}
+  return v;
+};
+// "Entire screen" pseudo-grant, local sessions (16d): upstream adds it on
+// Wayland (its local dispatch context's getAllowedApps), at the most permissive
+// tier of the grants, as if the whole screen were one app. Left out (true
+// here) unless __cdbCuScreenOnly() and upstream's own gate is the one checking
+// a local session: kwin mode and backends with a hit test check per app, and
+// with "Ask before Computer Use controls an app" on our Code-tab gate checks
+// instead (it never counts the pseudo-grant), so its list_granted_applications
+// stays as it was. This only removes the pseudo-grant; where it stays,
+// upstream's own rule decides.
+var _ngLogged;
+globalThis.__cdbCuNoScreenGrant=function(){
+  var v;
+  try{v=!globalThis.__cdbCuScreenOnly()||switchOn()}catch(e){v=!0}
+  if(v!==_ngLogged){_ngLogged=v;diag("[claude-cu] \"Entire screen\" grant: "+(v?"left out (per-app rules apply)":"upstream's rule"))}
+  return v;
+};
+// "Entire screen" pseudo-grant, cloud sessions (16f: upstream's cloud dispatch
+// context's getAllowedApps; upstream never adds it there, its cloud Computer
+// Use does not run on Wayland). Upstream's local rule, with its own grant
+// class and tier order handed in by the patch: apps unchanged unless
+// __cdbCuScreenOnly(), the list has explicit grants (user-denied and policy
+// apps dropped by Grants) and no pseudo-grant yet; then the pseudo-grant at
+// the most permissive explicit tier. 16f also drops it again before upstream
+// stores the session's grants, as upstream's local sessions do.
+globalThis.__cdbCuWithScreenGrant=function(apps,denied,Grants,rank,id){
+  try{
+    if(!Array.isArray(apps)||!globalThis.__cdbCuScreenOnly()||typeof Grants!=="function"||!rank||typeof id!=="string")return apps;
+    if(apps.some(function(a){return a&&a.bundleId===id}))return apps;
+    var g=new Grants(apps,denied).explicitGrants;
+    if(!Array.isArray(g)||g.length===0)return apps;
+    var tier=g.map(function(a){return a.tier!=null?a.tier:"full"}).reduce(function(a,b){return rank[a]>=rank[b]?a:b});
+    return apps.concat([{bundleId:id,displayName:"Entire screen",grantedAt:g[0].grantedAt,tier:tier}]);
+  }catch(err){diag("[claude-cu] \"Entire screen\" grant (cloud): "+(err&&err.message||err));return apps}
+};
+function capChanged(why){
+  diag("[claude-cu] per-app access check ("+why+")");
+  if(_ssLast===void 0)return!1;
+  var v=sharedScreen();
+  if(v===_ssLast)return!1;
+  var f=globalThis.__cdbCuFeaturesChanged;
+  if(typeof f!=="function"){diag("[claude-cu] per-app access changed to "+(v?"unsupported":"supported")+" ("+why+"), but upstream's features broadcast is not captured");return!1}
+  _ssLast=v;
+  diag("[claude-cu] per-app access changed to "+(v?"unsupported":"supported")+" ("+why+") - re-signalling the renderer");
+  try{f()}catch(err){diag("[claude-cu] features re-signal failed: "+(err&&err.message||err));return!1}
+  return!0;
+}
+globalThis.__cdbCuConsent={active:active,mode:mode,key:key,text:text,grants:grants,ids:ids,grantFor:grantFor,gate:gate,clipboard:clipboard,openApp:openApp,needsGrant:needsGrant,shotIds:shotIds,shotNote:shotNote,lockReleased:lockReleased,axOpts:axOpts,systemCombo:systemCombo,spSuffix:spSuffix,capChanged:capChanged,_notedSize:function(){return _noted.size}};
 })();

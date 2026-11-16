@@ -7,13 +7,13 @@
 # read once per sweep through globalThis.__cdbAutoArchiveMergeDelayMinutes(),
 # defined by js/extra_settings_main.js). The inactivity rule is unchanged.
 #
-# Wraps AutoArchiveEngine (index chunk on 4.16336.0). Seven sub-patches, each
+# Wraps AutoArchiveEngine (index chunk on 4.23118.0). Seven sub-patches, each
 # anchor must match exactly once:
 #   A  async checkAndArchive(r,a,s,c){ -> a lazy __cdbGrace() factory before it
 #      (js/auto_archive_grace.js), bound to the native ccAutoArchiveOnPrClose pref.
 #   B  async sweep(t=!1){ -> wrapper: snapshot the delay at sweep start, run the
 #      original, then reconcile the grace ledger in `finally`.
-#   C  !n.s(d))return;  (the non-terminal return) -> report the answer to the
+#   C  !n.c(d))return;  (the non-terminal return) -> report the answer to the
 #      helper, so a positive OPEN answer clears a pending grace.
 #   D  the reopenSeen short return, right before `if(s){if(!this.takesShare(` ->
 #      the terminal gate for a confirmed MERGED/CLOSED verdict (`!_`, where `_`
@@ -66,13 +66,15 @@ proc apply*(input: string): string =
   # Resolve the settings module from a stable native archive preference anchor.
   let prefs = one(
     input,
-    re2"""sessionAutoArchiveOnPrClose\([\w$]+\.sessionId\)\?\?([\w$]+)\.drt\("ccAutoArchiveOnPrClose"\)""",
+    re2"""sessionAutoArchiveOnPrClose\([\w$]+\.sessionId\)\?\?([\w$]+)\.([\w$]+)\("ccAutoArchiveOnPrClose"\)""",
     "preference",
   )
+  # Module and getter both re-minify (drt on 4.16336.0, Tit on 4.23118.0).
   let module = input[prefs.group(0)]
+  let getter = input[prefs.group(1)]
   let methodText =
     "__cdbGrace(){return this.__cdbArchiveGrace??=" & helper & "(this,()=>" & module &
-    ".drt(\"ccAutoArchiveOnPrClose\")===!0)}"
+    "." & getter & "(\"ccAutoArchiveOnPrClose\")===!0)}"
   const head = re2"async checkAndArchive\(([\w$]+),([\w$]+),([\w$]+),([\w$]+)\)\{"
   let heads = one(input, head, "archive entry")
   let session = input[heads.group(0)]
@@ -163,7 +165,9 @@ proc apply*(input: string): string =
   # C: non-terminal answers reach the helper
   result = once(
     result,
-    re2"![\w$]+\.s\([\w$]+\)\)return;let [\w$]+=this\.holdReason\(",
+    # The terminal-state predicate's member re-minifies (`.s` on 5.1231.2,
+    # `.c` on 5.11492.0).
+    re2"![\w$]+\.[\w$]+\([\w$]+\)\)return;let [\w$]+=this\.holdReason\(",
     proc(m: RegexMatch2, s: string): string =
       s[m.boundaries].replace("return;", "{" & observe & "}"),
   )

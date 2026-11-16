@@ -85,7 +85,7 @@ function writeExe(path, body) {
 // so a case controls exactly which host tools exist.
 const coreBin = join(scratch, "core");
 mkdirSync(coreBin, { recursive: true });
-for (const t of ["timeout", "head", "sed", "uname", "tr", "od", "cat", "sleep", "printf"]) {
+for (const t of ["timeout", "head", "sed", "uname", "tr", "od", "cat", "sleep", "printf", "stat", "readlink"]) {
   const p = (spawnSync("sh", ["-c", `command -v ${t}`], { encoding: "utf8" }).stdout || "").trim();
   if (p.startsWith("/")) writeExe(join(coreBin, t), `#!/bin/sh\nexec ${p} "$@"\n`);
 }
@@ -105,15 +105,52 @@ safe("D1", () => {
   writeExe(join(abs, "busctl"), "#!/bin/sh\n");
   writeExe(join(onPath, "busctl"), "#!/bin/sh\n");
   writeExe(join(onPath, "gjs"), "#!/bin/sh\n");
-  const env = { PATH: `${onPath}:${coreBin}` };
-  const cap = (args) => runFns(["_diag_cap"],
-    `_diag_problems=(); _diag_cap ${args}; printf 'P=%s\\n' "\${_diag_problems[@]:-}"`, env).out;
+  // _DIAG_NARROWED stands in for upstream's narrowed PATH (scratch dirs
+  // cannot be root-owned): onPath plays a system folder the app searches.
+  const env = { PATH: `${onPath}:${coreBin}`, _DIAG_NARROWED: onPath };
+  const TP_FNS = ["_diag_trust_rule", "_diag_chain_real", "_diag_narrowed_path", "_diag_tool_path", "_diag_which_in", "_diag_cap"];
+  const cap = (args, e = env) => runFns(TP_FNS,
+    `_diag_problems=(); _diag_cap ${args}; printf 'P=%s\\n' "\${_diag_problems[@]:-}"`, e).out;
   const up = cap(`fallback busctl ${abs}/busctl 1 'portal probe' 'hotkeys off'`);
   check("upstream path wins", /^\[ok\] +busctl = .*usr\/bin\/busctl \(upstream path\)/.test(up), true);
   const fb = cap(`fallback busctl ${root}/none/busctl 1 'portal probe' 'hotkeys off'`);
-  check("PATH only is reported as our fallback",
-    fb.includes(`busctl = ${onPath}/busctl (not at ${root}/none/busctl; works through our PATH fallback)`), true);
-  check("PATH only is not a problem", fb.endsWith("P="), true);
+  check("found in a folder the app searches is reported as our fallback",
+    fb.includes(`busctl = ${onPath}/busctl (not at ${root}/none/busctl; found by our fallback in a system or root-owned read-only folder)`), true);
+  check("found by the fallback is not a problem", fb.endsWith("P="), true);
+  // Since 4.23118 the app ignores a copy in a folder the user can write
+  // (upstream narrows PATH; our resolver adds only root-owned read-only dirs).
+  const userEnv = { PATH: `${onPath}:${coreBin}`, _DIAG_NARROWED: `${root}/nothing-here` };
+  const ign = cap(`fallback busctl ${root}/none/busctl 1 'portal probe' 'hotkeys off'`, userEnv);
+  check("a copy only in a user-writable folder is MISSING, and named",
+    ign.includes(`[MISS] busctl = MISSING - hotkeys off (found ${onPath}/busctl, a user-writable folder the app does not run its own tools from - install busctl system-wide)`), true);
+  // A real root-owned, read-only folder outside the narrowed list, when the
+  // host has one: the trust walk takes it.
+  const trustedDir = ["/usr/lib/systemd", "/usr/libexec", "/usr/lib/git-core"].find((d) => {
+    try { return lstatSync(d).isDirectory() && lstatSync(d).uid === 0 && readdirSync(d).some((f) => { try { const st = lstatSync(join(d, f)); return st.isFile() && (st.mode & 0o111) && /^[a-z][a-z0-9_-]+$/.test(f); } catch { return false; } }); } catch { return false; }
+  });
+  if (trustedDir && process.getuid() !== 0) {
+    const exe = readdirSync(trustedDir).sort().find((f) => { try { const st = lstatSync(join(trustedDir, f)); return st.isFile() && (st.mode & 0o111) && /^[a-z][a-z0-9_-]+$/.test(f); } catch { return false; } });
+    const tr = cap(`fallback ${exe} ${root}/none/${exe} 1 'x' 'y'`, { PATH: `${trustedDir}:${coreBin}`, _DIAG_NARROWED: `${root}/nothing-here` });
+    check(`a root-owned read-only started-PATH folder (${trustedDir}) is searched`,
+      tr.includes(`${exe} = ${trustedDir}/${exe} (not at`), true);
+    const ln = join(root, "user-link");
+    spawnSync("ln", ["-s", trustedDir, ln]);
+    const tl = cap(`fallback ${exe} ${root}/none/${exe} 1 'x' 'y'`, { PATH: `${ln}:${coreBin}`, _DIAG_NARROWED: `${root}/nothing-here` });
+    check("the same folder through a user-owned symlink is not", tl.startsWith(`[MISS] ${exe} = MISSING`), true);
+  } else {
+    console.log("  (no root-owned read-only folder with a tool on this host: trusted-folder case skipped)");
+  }
+  // A PATH entry with glob characters is one literal entry (the app never
+  // globs): /tmp/x/g* must not expand to /tmp/x/ga.
+  writeExe(join(root, "ga", "globtool"), "#!/bin/sh\n");
+  const g = runFns(TP_FNS, `_diag_which_in globtool '${root}/g*' || echo none; _diag_tool_path '${root}/g*:/nonexistent' '${onPath}'`, env).out;
+  check("glob entry: not expanded by _diag_which_in or _diag_tool_path", g, `none\n${onPath}`);
+  // tool mode (xdg-open: our openExternal hook widens the call to the TOOL PATH).
+  const toolOk = cap(`tool busctl '' 1 'links' 'links do nothing'`);
+  check("tool mode: found in a folder the app searches", toolOk.startsWith(`[ok]   busctl = ${onPath}/busctl - links`), true);
+  const toolMiss = cap(`tool busctl '' 1 'links' 'links do nothing'`, userEnv);
+  check("tool mode: a user-writable copy is MISSING, and named",
+    toolMiss.startsWith("[MISS] busctl = MISSING - links do nothing (found ") && toolMiss.includes("a user-writable folder the app does not run its own tools from"), true);
   const miss = cap(`fallback secret-tool ${abs}/secret-tool 1 'cookie import' 'cookies skipped'`);
   check("missing + needed is MISSING", /^\[MISS\] secret-tool = MISSING - cookies skipped/.test(miss), true);
   check("missing + needed is a problem", miss.includes("P=secret-tool missing: cookies skipped"), true);
@@ -312,6 +349,134 @@ safe("D5b", () => {
   check("helper: relative file name is left alone", fns.includes("C=usable"), true);
   check("helper: path list with one existing dir is usable", fns.includes("D=usable"), existsSync("/etc/fonts"));
   check("helper: unset variable is usable", fns.includes("E=usable"), true);
+
+  // Colon lists are split without globbing: an entry with `*` is one literal path.
+  const gl = join(scratch, "d5glob");
+  mkdirSync(join(gl, "real"), { recursive: true });
+  const globRun = (list) => runFns(["_fontconfig_var_usable"],
+    `FONTCONFIG_PATH=${JSON.stringify(list)}; _fontconfig_var_usable FONTCONFIG_PATH && echo usable || echo unusable`,
+    { PATH: "/usr/bin:/bin" }).out;
+  check("helper: `*` entry is NOT glob-expanded onto a sibling dir", globRun(join(gl, "*")), "unusable");
+  check("helper: `*` entry is unusable even after a missing entry", globRun(`/nonexistent/claude-test:${join(gl, "*")}`), "unusable");
+  mkdirSync(join(gl, "*"), { recursive: true });
+  check("helper: a directory literally named `*` is found", globRun(join(gl, "*")), "usable");
+  check("helper: empty entries are skipped, real dir still found", globRun(`::${join(gl, "real")}:`), "usable");
+});
+
+// ---------------------------------------------------------------- D5d
+// --diagnose shows how each bridge filters screenshots, from its doctor JSON
+// alone (nothing is captured): `  screenshot filter: ...`.
+console.log("D5d: screenshot filter line per bridge, from doctor");
+safe("D5d", () => {
+  const root = join(scratch, "d5d");
+  const home = join(root, "home");
+  mkdirSync(home, { recursive: true });
+  const stub = (name, doc) => doc === null
+    ? `#!/bin/sh\ncase "$1" in --version) echo '${name} 1';; doctor) exit 1;; *) exit 2;; esac\n`
+    : `#!/bin/sh\ncase "$1" in --version) echo '${name} 1';; doctor) cat <<'JSON'\n${JSON.stringify(doc, null, 2)}\nJSON\n;; *) exit 2;; esac\n`;
+  const base = (backend) => ({ contract: 1, backend, session_match: false, backend_reachable: true, backend_error: null,
+    session_supported: false, restore_token_present: false, restore_token_path: null, daemon_running: false, session_socket: null });
+  const trees = {
+    toplevel: { "wlroots-bridge": { ...base("wlroots"), screenshot_mask: true, screenshot_mask_mode: "toplevel",
+      screenshot_mask_protocol: "ext-image-copy-capture-v1", screenshot_mask_gaps: ["popups_outside_window"] } },
+    output: { "wlroots-bridge": { ...base("wlroots"), screenshot_mask: true, screenshot_mask_mode: "output",
+      screenshot_mask_protocol: null, screenshot_mask_gaps: ["popups", "layer_shell_top_overlay"] } },
+    old: { "wlroots-bridge": { ...base("wlroots"), screenshot_mask: true, screenshot_mask_gaps: ["popups"] } },
+    x11: { "x11-bridge": { ...base("x11"), capabilities: { screenshot_mask: true, screenshot_mask_ignore: true } } },
+    none: { "kwin-portal-bridge": base("kwin-portal") },
+    niri: { "wlroots-bridge": { ...base("wlroots"), screenshot_mask: false, screenshot_mask_mode: null, screenshot_mask_protocol: null, screenshot_mask_gaps: [] } },
+    failed: { "wlroots-bridge": null },
+  };
+  const lineOf = (key) => {
+    const bridges = {};
+    for (const [n, d] of Object.entries(trees[key])) bridges[n] = stub(n, d);
+    const electron = fakeTree(join(root, key), bridges);
+    const r = spawnSync(BASH, [launcherPath, "--diagnose"], {
+      env: { PATH: "/usr/bin:/bin", HOME: home, CLAUDE_ELECTRON: electron, XDG_RUNTIME_DIR: join(root, "run"),
+             XDG_SESSION_TYPE: "wayland", WAYLAND_DISPLAY: "wayland-9", XDG_CURRENT_DESKTOP: "sway" },
+      encoding: "utf8", timeout: 90000 });
+    return (r.stdout || "").split("\n").filter((l) => l.startsWith("  screenshot filter:"));
+  };
+  const one = (l) => JSON.stringify(l);
+  check("wlroots toplevel: per window, protocol, gaps", one(lineOf("toplevel")),
+    one(["  screenshot filter: per window (ext-image-copy-capture-v1); cannot cover: popups_outside_window"]));
+  check("wlroots output: whole screen, gaps", one(lineOf("output")),
+    one(["  screenshot filter: whole screen, only approved windows kept; cannot cover: popups, layer_shell_top_overlay"]));
+  check("old wlroots without a mode: whole screen", one(lineOf("old")),
+    one(["  screenshot filter: whole screen, only approved windows kept; cannot cover: popups"]));
+  check("x11 with mask and ignore", one(lineOf("x11")),
+    one(["  screenshot filter: whole screen, only approved windows kept; can ignore Claude's own overlay windows"]));
+  check("bridge without mask keys (kwin-portal-bridge: KDE filters through upstream's own handling): no filter line", one(lineOf("none")), "[]");
+  check("wlroots-bridge that cannot mask here (niri): does not filter", one(lineOf("niri")),
+    one(["  screenshot filter: none (this bridge does not filter)"]));
+  check("failed doctor: no filter line", one(lineOf("failed")), "[]");
+});
+
+// ---------------------------------------------------------------- D5c
+// --diagnose must not start an activatable kwalletd on a desktop that does not
+// use KWallet (#330): the `wallets` method call is only made on KDE, when
+// kwalletd already has an owner, or when a kwallet store was asked for. The
+// stubs log their full argv; NameHasOwner goes to org.freedesktop.DBus and is
+// always allowed, anything else addressed to org.kde.kwalletd* is a real call.
+console.log("D5c: --diagnose does not wake kwalletd on a non-KDE desktop");
+safe("D5c", () => {
+  const root = join(scratch, "d5c");
+  const home = join(root, "home");
+  mkdirSync(home, { recursive: true });
+  const electron = fakeTree(join(root, "tree"), {});
+  const bin = join(root, "bin");
+  const sh = (body) => `#!/bin/sh\nprintf '%s\\n' "$*" >> "$STUB_LOG"\n${body}\n`;
+  const owned = `[ "$last" = "$STUB_OWNED" ]`;
+  const stubs = {
+    busctl: sh(`for last; do :; done\ncase "$*" in\n  *NameHasOwner*) if ${owned}; then echo 'b true'; else echo 'b false'; fi; exit 0;;\n  *ListActivatableNames*) echo 'as 0'; exit 0;;\nesac\nexit 1`),
+    "dbus-send": sh(`for last; do :; done\ncase "$*" in\n  *NameHasOwner*) if [ "\${last#string:}" = "$STUB_OWNED" ]; then echo '   boolean true'; else echo '   boolean false'; fi; exit 0;;\nesac\nexit 1`),
+    gdbus: sh(`for last; do :; done\ncase "$*" in\n  *NameHasOwner*) if ${owned}; then echo '(true,)'; else echo '(false,)'; fi; exit 0;;\nesac\nexit 1`),
+  };
+  const NOT_ASKED = "kwalletd answers on session bus = not asked (not a KDE session and kwalletd is not running)";
+  // Tools in `only` answer; the others are shadowed by a stub that cannot.
+  const run = (name, { de, owned = "", args = [], only, store }) => {
+    const dir = join(bin, name);
+    const log = join(root, `${name}.log`);
+    for (const t of Object.keys(stubs))
+      writeExe(join(dir, t), !only || only === t ? stubs[t] : "#!/bin/sh\nexit 1\n");
+    writeFileSync(log, "");
+    const env = { PATH: `${dir}:/usr/bin:/bin`, HOME: home, CLAUDE_ELECTRON: electron,
+                  XDG_RUNTIME_DIR: join(root, "run"), XDG_SESSION_TYPE: "wayland",
+                  WAYLAND_DISPLAY: "wayland-9", XDG_CURRENT_DESKTOP: de,
+                  STUB_LOG: log, STUB_OWNED: owned };
+    if (store) env.CLAUDE_PASSWORD_STORE = store;
+    const r = spawnSync(BASH, [launcherPath, "--diagnose", ...args], { env, encoding: "utf8", timeout: 90000 });
+    const calls = readFileSync(log, "utf8").split("\n").filter(Boolean);
+    return {
+      line: ((r.stdout || "").match(/^kwalletd answers on session bus = .*$/m) || [""])[0],
+      wallets: calls.some((c) => /\bwallets\b/.test(c)),
+      kwalletCalls: calls.filter((c) => c.includes("org.kde.kwalletd") && !c.includes("NameHasOwner")),
+    };
+  };
+  const none = (a) => JSON.stringify(a);
+  const c1 = run("c1", { de: "Hyprland" });
+  check("non-KDE, not owned: the line says not asked", c1.line, NOT_ASKED);
+  check("non-KDE, not owned: no call addressed to kwalletd", none(c1.kwalletCalls), "[]");
+  check("non-KDE, not owned: no wallets call", c1.wallets, false);
+  for (const t of ["busctl", "dbus-send", "gdbus"]) {
+    const c = run(`c1-${t}`, { de: "Hyprland", only: t });
+    check(`non-KDE, only ${t} answers: not asked`, c.line, NOT_ASKED);
+    check(`non-KDE, only ${t} answers: no call addressed to kwalletd`, none(c.kwalletCalls), "[]");
+  }
+  const c2 = run("c2", { de: "KDE" });
+  check("KDE: the real probe answers yes or no", /= (yes|no)$/.test(c2.line), true);
+  check("KDE: wallets call made", c2.wallets, true);
+  const c2b = run("c2b", { de: "ubuntu:KDE" });
+  check("KDE as one component of the list: wallets call made", c2b.wallets, true);
+  const c3 = run("c3", { de: "Hyprland", owned: "org.kde.kwalletd6" });
+  check("non-KDE, kwalletd6 owned: wallets call made", c3.wallets, true);
+  check("non-KDE, kwalletd6 owned: the real probe answers", /= (yes|no)$/.test(c3.line), true);
+  const c4 = run("c4", { de: "Hyprland", args: ["--password-store=kwallet6"] });
+  check("non-KDE, --password-store=kwallet6: wallets call made", c4.wallets, true);
+  const c4b = run("c4b", { de: "Hyprland", store: "kwallet5" });
+  check("non-KDE, CLAUDE_PASSWORD_STORE=kwallet5: wallets call made", c4b.wallets, true);
+  const c4c = run("c4c", { de: "Hyprland", args: ["--password-store=gnome-libsecret"] });
+  check("non-KDE, another forced store: not asked", c4c.line, NOT_ASKED);
 });
 
 // ---------------------------------------------------------------- D6
@@ -493,7 +658,7 @@ esac
   });
   const out = r.stdout || "";
   check("exit status", r.status, 0);
-  const sec = out.slice(out.indexOf("--- Computer Use bridges (CLI contract) ---"), out.indexOf("--- Cowork VM"));
+  const sec = out.slice(out.indexOf("--- Computer Use bridges (CLI contract) ---"), out.indexOf("--- Local Cowork VM"));
   check("section present", sec.length > 0, true);
   const g = sec.slice(sec.indexOf("[gnome-portal-bridge]"), sec.indexOf("[kwin-portal-bridge]"));
   const k = sec.slice(sec.indexOf("[kwin-portal-bridge]"));
@@ -624,13 +789,18 @@ safe("D10", () => {
   const PY = (spawnSync("sh", ["-c", "command -v python3"], { encoding: "utf8" }).stdout || "").trim();
   if (!PY) { console.log("  SKIP python3 not found"); return; }
   const checker = join(repo, "scripts", "check-bridge-contract.sh");
-  const stub = (name, supported, forgetRm = "rm -f \"$f\"") => `#!/bin/sh
+  // x11-bridge's doctor must also carry the #327 capabilities.
+  const X11_CAPS = '{"screenshot_mask": true, "screenshot_mask_ignore": true, "compositing": null, "compositing_error": "no display"}';
+  // Every bridge must answer ax-features with the set the bundled JS relies on.
+  const AX = '{"ax_features":["find.v1","action.click","action.focus","action.set_text","find.identity","action.expect","find.window_ref","find.deadline","find.root","find.skeleton","action.ensure","action.scroll_to","action.set_value"]}';
+  const stub = (name, supported, forgetRm = "rm -f \"$f\"", caps = X11_CAPS, ax = AX) => `#!/bin/sh
 NAME=${name}
 case "$1" in
-  --version) echo "$NAME 1.0.0" ;;
+  --version) echo "$NAME 1.0.0" ;;${ax === null ? "" : `
+  ax-features) echo '${ax}' ;;`}
   doctor)
     if [ ${supported} = true ]; then tp="\\"$XDG_STATE_HOME/$NAME/restore-token.json\\""; sk="\\"$XDG_RUNTIME_DIR/$NAME/session.sock\\""; else tp=null; sk=null; fi
-    printf '{\\n  "contract": 1,\\n  "bridge": "%s",\\n  "version": "1.0.0",\\n  "backend": "x",\\n  "session_match": false,\\n  "backend_reachable": false,\\n  "backend_error": "no display",\\n  "session_supported": ${supported},\\n  "restore_token_present": false,\\n  "restore_token_path": %s,\\n  "daemon_running": false,\\n  "session_socket": %s\\n}\\n' "$NAME" "$tp" "$sk" ;;
+    printf '{\\n  "contract": 1,\\n  "bridge": "%s",\\n  "version": "1.0.0",\\n  "backend": "x",\\n  "session_match": false,\\n  "backend_reachable": false,\\n  "backend_error": "no display",\\n  "session_supported": ${supported},\\n  "restore_token_present": false,\\n  "restore_token_path": %s,\\n  "daemon_running": false,\\n  "session_socket": %s,\\n  "capabilities": ${caps}\\n}\\n' "$NAME" "$tp" "$sk" ;;
   session-end) echo '{"ok":true,"ended":false,"daemon":"none"}' ;;
   forget-session)
     if [ ${supported} != true ]; then echo '{"ok":true,"ended":false,"daemon":"none","token_removed":false,"token_path":null}'; exit 0; fi
@@ -647,7 +817,31 @@ esac
   let r = spawnSync(BASH, [checker, good], { encoding: "utf8", timeout: 120000 });
   check("compliant bridges: exit 0", r.status, 0);
   check("compliant bridges: 2 checked, no FAIL",
-    (r.stdout || "").includes("2 bridge(s): 20 passed, 0 failed") && !/^FAIL/m.test(r.stdout || ""), true);
+    (r.stdout || "").includes("2 bridge(s): 23 passed, 0 failed") && !/^FAIL/m.test(r.stdout || ""), true);
+  // A bridge older than ax-features (exit 2) or one listing too little fails.
+  const noax = join(scratch, "d10", "noax");
+  writeExe(join(noax, "gnome-portal-bridge"), stub("gnome-portal-bridge", "true", undefined, X11_CAPS, null));
+  r = spawnSync(BASH, [checker, noax], { encoding: "utf8", timeout: 120000 });
+  check("a bridge without ax-features: exit 1", r.status, 1);
+  check("...named in a FAIL line", /^FAIL gnome-portal-bridge: ax-features - exit 2 /m.test(r.stdout || ""), true);
+  const fewax = join(scratch, "d10", "fewax");
+  writeExe(join(fewax, "gnome-portal-bridge"), stub("gnome-portal-bridge", "true", undefined, X11_CAPS,
+    '{"ax_features":["find.v1","action.click","action.focus","action.set_text","action.ensure"]}'));
+  r = spawnSync(BASH, [checker, fewax], { encoding: "utf8", timeout: 120000 });
+  check("a bridge listing too few ax features, action.ensure without action.expect: exit 1", r.status, 1);
+  check("...missing features and the coupling rule named",
+    /^FAIL gnome-portal-bridge: ax-features - .*missing feature 'find\.identity'.*action\.ensure is listed without action\.expect/m.test(r.stdout || ""), true);
+  // An x11-bridge older than the #327 capabilities passes the contract but
+  // fails here (the app would keep the glow off on every X11 session).
+  const old = join(scratch, "d10", "old");
+  writeExe(join(old, "x11-bridge"), stub("x11-bridge", "false", undefined, '{"screenshot_mask": true}'));
+  r = spawnSync(BASH, [checker, old], { encoding: "utf8", timeout: 120000 });
+  check("older x11-bridge without screenshot_mask_ignore / compositing: exit 1", r.status, 1);
+  check("...named in a FAIL line", /^FAIL x11-bridge: doctor capabilities - capabilities\.screenshot_mask_ignore must be true.*capabilities\.compositing is missing/m.test(r.stdout || ""), true);
+  r = spawnSync(BASH, [checker, "--x11-caps", join(old, "x11-bridge")], { encoding: "utf8", timeout: 60000 });
+  check("--x11-caps on the older x11-bridge: exit 1", r.status, 1);
+  r = spawnSync(BASH, [checker, "--x11-caps", join(good, "x11-bridge")], { encoding: "utf8", timeout: 60000 });
+  check("--x11-caps on a current x11-bridge: exit 0", r.status, 0);
   const bad = join(scratch, "d10", "bad");
   writeExe(join(bad, "kwin-portal-bridge"), stub("kwin-portal-bridge", "true", 'rm -rf "$(dirname "$f")"'));
   r = spawnSync(BASH, [checker, bad], { encoding: "utf8", timeout: 120000 });
@@ -747,7 +941,7 @@ safe("D12", () => {
     const owner = spawnSync("stat", ["-c", "%U:%G", devDenied], { encoding: "utf8" }).stdout.trim();
     check("denied line names owner, group and octal mode", lines(o)[0], `device key (TPM) = NOT ACCESSIBLE (${owner} 0000)`);
     check("denied: the fix problem", problems(o)[0],
-      `cloud Cowork and Dispatch get no Computer Use: the device key needs ${devDenied} - Settings -> Extra -> Computer Use, or sudo ${udev}/cdb-tpm-access enable; without logind: sudo usermod -aG tss $USER and log in again`);
+      `cloud Cowork and Dispatch get no Computer Use: the device key needs ${devDenied} - Settings -> Extra -> Cowork (Linux) -> Enable TPM access, or sudo ${udev}/cdb-tpm-access enable; without logind: sudo usermod -aG tss $USER and log in again`);
     o = dk(devDenied, link, fixture, "CLAUDE_APPIMAGE_PATH=/x/Claude.AppImage;");
     check("denied on AppImage: the copy command instead of the image's helper",
       problems(o)[0].includes(`or sudo install -m 0644 ${rule} ${link} && sudo udevadm control --reload && sudo udevadm trigger --action=change --subsystem-match=tpmrm;`), true);
@@ -758,8 +952,16 @@ safe("D12", () => {
   writeFileSync(log2, readFileSync(fixture, "utf8").split("\n").filter((l) => !l.includes("12:21:03") || !l.includes("device_id keyed")).join("\n"));
   o = dk(devOk, link, log2);
   check("keyless line with reason", lines(o)[2], "last remote-device connect = keyless (row_pk_no_row) (2026-11-03 12:20:58)");
-  check("ok + keyless: the Q6 problem", problems(o)[0],
-    `device registered keyless (row_pk_no_row) although ${devOk} is accessible: restart Claude; if it stays keyless, attach this report to an issue`);
+  check("ok + keyless (row_pk_no_row): open Cowork tab problem", problems(o)[0],
+    `device registered keyless (row_pk_no_row) although ${devOk} is accessible: open the Cowork tab in Claude so claude.ai registers this computer's TPM key; if it stays keyless after a restart, attach this report to an issue`);
+  const log2dir = join(root, "main-keyless-dir.log");
+  writeFileSync(log2dir, "2026-11-03 12:30:00 [info] [remote-tools-device] connect frame sent: device_id keyless (row_pk_directory)\n");
+  check("ok + keyless (row_pk_directory): lookup failure problem", problems(dk(devOk, link, log2dir))[0],
+    `device registered keyless (row_pk_directory) although ${devOk} is accessible: the device-directory lookup failed (network or TLS error in main.log); check the connection and restart Claude`);
+  const log2enc = join(root, "main-keyless-enclave.log");
+  writeFileSync(log2enc, "2026-11-03 12:31:00 [info] [remote-tools-device] connect frame sent: device_id keyless (row_pk_enclave)\n");
+  check("ok + keyless (other reason): generic restart problem", problems(dk(devOk, link, log2enc))[0],
+    `device registered keyless (row_pk_enclave) although ${devOk} is accessible: restart Claude; if it stays keyless, attach this report to an issue`);
   const log3 = join(root, "main-none.log");
   writeFileSync(log3, "2026-11-03 13:00:00 [info] [remote-tools-device] connect frame sent: device_id none\n");
   check("none line", lines(dk(devOk, link, log3))[2], "last remote-device connect = none (2026-11-03 13:00:00)");
@@ -794,7 +996,7 @@ safe("D12", () => {
   check("regular file: not managed", l, "TPM access rule = enabled (file, not managed by claude-desktop-extra)");
   rmSync(link, { force: true });
 
-  // The real --diagnose prints the three lines inside --- Computer Use ---.
+  // The real --diagnose prints the three lines inside --- Cloud Cowork device key ---.
   const home = join(root, "home");
   mkdirSync(join(home, ".config", "Claude", "logs"), { recursive: true });
   writeFileSync(join(home, ".config", "Claude", "logs", "main.log"), readFileSync(fixture));
@@ -804,8 +1006,8 @@ safe("D12", () => {
            DISPLAY: ":0", XDG_SESSION_TYPE: "x11" }, encoding: "utf8", timeout: 90000 });
   const d = r.stdout || "";
   check("diagnose: exit 0", r.status, 0);
-  const cu = d.slice(d.indexOf("--- Computer Use ---"), d.indexOf("--- Computer Use bridges"));
-  check("diagnose: device key line in the Computer Use section", /^device key \(TPM\) = (ok \(\/dev\/tpmrm0 rw\)|NOT ACCESSIBLE \(.+ [0-7]{4}\)|absent \(no TPM 2\.0 resource manager\))$/m.test(cu), true);
+  const cu = d.slice(d.indexOf("--- Cloud Cowork device key ---"), d.indexOf("--- Computer Use bridges"));
+  check("diagnose: device key line in the Cloud Cowork device key section", /^device key \(TPM\) = (ok \(\/dev\/tpmrm0 rw\)|NOT ACCESSIBLE \(.+ [0-7]{4}\)|absent \(no TPM 2\.0 resource manager\))$/m.test(cu), true);
   check("diagnose: rule line follows", /^device key \(TPM\) = .*\nTPM access rule = .*\nlast remote-device connect = /m.test(cu), true);
   check("diagnose: last connect read from the profile's main.log", cu.includes("last remote-device connect = keyed (2026-11-03 12:21:03)"), true);
 });
@@ -835,10 +1037,14 @@ safe("D13", () => {
     ['[ "$("$ID" -u)" = 0 ]', `[ "$("$ID" -u)" = ${uid} ]`],
     ['[ "$_uid" = 0 ] || return 1', `{ [ "$_uid" = 0 ] || [ "$_uid" = ${uid} ]; } || return 1`],
     ["CONTAINER_MARKERS='/run/systemd/container\n/.dockerenv\n/run/.containerenv\n/.flatpak-info'", `CONTAINER_MARKERS='${root}/nothing-here\n${root}/containerenv'`],
-    ['[ -S /run/udev/control ]', `[ -e ${root}/udev-control ]`],
+    ['UDEV_CONTROL=/run/udev/control', `UDEV_CONTROL=${root}/udev-control`],
+    ['[ -S "$UDEV_CONTROL" ]', '[ -e "$UDEV_CONTROL" ]'],
+    // No tpmrm node in the scratch /dev: disable has no ACL step here
+    // (scripts/tests/linux/test-tpm-access-helper.mjs covers it).
+    ['DEV_DIR=/dev', `DEV_DIR=${root}/dev`],
     ['UDEVADM=$(tool udevadm)', `UDEVADM=${fakeUdevadm}`],
-    ['[ -e /etc/NIXOS ]', `[ -e ${etc}/NIXOS ]`],
-    ['[ -L /etc/udev ]', `[ -L ${etc}/udev ]`],
+    ['NIXOS_MARKER=/etc/NIXOS', `NIXOS_MARKER=${etc}/NIXOS`],
+    ['ETC_UDEV=/etc/udev', `ETC_UDEV=${etc}/udev`],
   ];
   const known = ['"$PKG_SRC") return 0 ;;', `"$PKG_SRC"|'${inst}/'"$RULE") return 0 ;;`];
   const stickyOk = ['[ "$1" = /nix/store ]', `{ ${["/nix/store", ...sticky].map((d) => `[ "$1" = '${d}' ]`).join(" || ")}; }`];
@@ -899,7 +1105,7 @@ safe("D13", () => {
   check("disable: reload + trigger", udevCalls().split("\n").slice(0, 2).join("|"), "control --reload|trigger --action=change --subsystem-match=tpmrm");
   rmSync(calls, { force: true });
   r = run("disable");
-  check("disable again: already disabled, udev untouched", `${r.rc}|${r.out.trim()}|${udevCalls()}`, "0|cdb-tpm-access: already disabled|");
+  check("disable again: already disabled, udev re-applied (clears a left-behind ACL)", `${r.rc}|${r.out.trim()}|${udevCalls().split("\n").length}`, "0|cdb-tpm-access: already disabled|3");
 
   // Dangling link to the deb/rpm/pacman path (uninstalled package) is ours.
   spawnSync("ln", ["-s", "/usr/lib/claude-desktop/resources/linux-udev/70-claude-desktop-extra-tpm.rules", link]);
@@ -1003,6 +1209,181 @@ safe("D13", () => {
   // Unmodified helper from the source tree: not a known rule path, exit 5 before anything.
   const real = spawnSync(join(repo, "packaging", "udev", "cdb-tpm-access"), ["enable"], { encoding: "utf8" });
   check("real helper from the source tree: exit 5, nothing on stdout", `${real.status}|${real.stdout}`, "5|");
+});
+
+console.log("D14: --diagnose names the window identity this launch would use");
+safe("D14", () => {
+  const root = join(scratch, "d14");
+  const home = join(root, "home");
+  const electron = fakeTree(join(root, "tree"), {});
+  const apps = join(home, ".local", "share", "applications");
+  const diag = (args, extra = {}) => spawnSync(BASH, [launcherPath, ...args, "--diagnose"], {
+    env: { PATH: "/usr/bin:/bin", HOME: home, CLAUDE_ELECTRON: electron,
+           XDG_RUNTIME_DIR: join(root, "run"), XDG_DATA_DIRS: join(root, "nodata"), ...extra },
+    encoding: "utf8", timeout: 90000,
+  });
+  const idLine = (r) => ((r.stdout || "").split("\n").find((l) => l.startsWith("window identity = ")) || "");
+  const def = diag([]);
+  check("default profile: base id only", idLine(def), "window identity = com.anthropic.Claude");
+  const shared = diag(["--profile=work"]);
+  check("named profile without the file: shared, with the reason",
+    idLine(shared), "window identity = com.anthropic.Claude (shared: no com.anthropic.Claude-work.desktop in the XDG applications dirs)");
+  mkdirSync(apps, { recursive: true });
+  const f = join(apps, "com.anthropic.Claude-work.desktop");
+  writeFileSync(f, "[Desktop Entry]\nName=Claude (work)\n");
+  const own = diag(["--profile=work"]);
+  check("named profile with the file: per-profile id and the file path", idLine(own), `window identity = com.anthropic.Claude-work (${f})`);
+  writeFileSync(f, "[Desktop Entry]\nHidden=true\n");
+  check("Hidden=true counts as absent", idLine(diag(["--profile=work"])).includes("(shared:"), true);
+  rmSync(f);
+  const dd = join(root, "datadir");
+  mkdirSync(join(dd, "applications"), { recursive: true });
+  writeFileSync(join(dd, "applications", "com.anthropic.Claude-work.desktop"), "[Desktop Entry]\nName=x\n");
+  check("found through XDG_DATA_DIRS", idLine(diag(["--profile=work"], { XDG_DATA_DIRS: dd })),
+    `window identity = com.anthropic.Claude-work (${join(dd, "applications", "com.anthropic.Claude-work.desktop")})`);
+  // A `*` in XDG_DATA_DIRS is one literal path, never expanded onto siblings.
+  const gd = join(root, "globdirs");
+  mkdirSync(join(gd, "sib", "applications"), { recursive: true });
+  writeFileSync(join(gd, "sib", "applications", "com.anthropic.Claude-work.desktop"), "[Desktop Entry]\nName=x\n");
+  check("XDG_DATA_DIRS entry with `*` is not glob-expanded",
+    idLine(diag(["--profile=work"], { XDG_DATA_DIRS: join(gd, "*") })).includes("(shared:"), true);
+  mkdirSync(join(gd, "*", "applications"), { recursive: true });
+  writeFileSync(join(gd, "*", "applications", "com.anthropic.Claude-work.desktop"), "[Desktop Entry]\nName=x\n");
+  check("XDG_DATA_DIRS entry that is literally `*` is found as itself",
+    idLine(diag(["--profile=work"], { XDG_DATA_DIRS: join(gd, "*") })),
+    `window identity = com.anthropic.Claude-work (${join(gd, "*", "applications", "com.anthropic.Claude-work.desktop")})`);
+  check("XDG_DATA_DIRS with empty entries still finds the real dir",
+    idLine(diag(["--profile=work"], { XDG_DATA_DIRS: `::${dd}:` })).startsWith("window identity = com.anthropic.Claude-work ("), true);
+  check("a relative XDG_DATA_HOME is ignored (falls back to ~/.local/share)",
+    idLine(diag(["--profile=work"], { XDG_DATA_HOME: "rel" })).includes("(shared:"), true);
+  check("default profile output keeps its single added line",
+    (def.stdout || "").split("\n").filter((l) => l.startsWith("window identity")).length, 1);
+});
+
+// ---------------------------------------------------------------- D15
+console.log("D15: _appimage_release_scheme splits XDG_DATA_DIRS without globbing");
+safe("D15", () => {
+  const root = join(scratch, "d15");
+  const bin = join(root, "bin");
+  const marker = join(root, "handed-back");
+  mkdirSync(join(root, "home"), { recursive: true });
+  // Fake xdg-mime: the default is this profile's entry until `default` is called.
+  writeExe(join(bin, "xdg-mime"), `#!/bin/sh
+if [ "$1" = query ]; then
+  if [ -e ${marker} ]; then echo com.anthropic.Claude.desktop; else echo work.desktop; fi
+else touch ${marker}; fi
+`);
+  const run = (dirs) => {
+    rmSync(marker, { force: true });
+    runFns(["_appimage_release_scheme"],
+      `DESKTOP_ID=work; _appimage_release_scheme || true`,
+      { PATH: `${bin}:/usr/bin:/bin`, HOME: join(root, "home"), XDG_DATA_HOME: join(root, "nohome"), XDG_DATA_DIRS: dirs });
+    return existsSync(marker);
+  };
+  const dd = join(root, "dd");
+  mkdirSync(join(dd, "sib", "applications"), { recursive: true });
+  writeFileSync(join(dd, "sib", "applications", "com.anthropic.Claude.desktop"), "x");
+  check("plain list entry holding the default entry: scheme handed back", run(join(dd, "sib")), true);
+  check("`*` entry is not glob-expanded onto a sibling: nothing handed back", run(join(dd, "*")), false);
+  mkdirSync(join(dd, "*", "applications"), { recursive: true });
+  writeFileSync(join(dd, "*", "applications", "com.anthropic.Claude.desktop"), "x");
+  check("a directory literally named `*` is found", run(join(dd, "*")), true);
+  check("empty entries are skipped", run(`::${join(dd, "sib")}:`), true);
+});
+
+// ---------------------------------------------------------------- D16
+console.log("D16: --diagnose reports Escape stops Computer Use: the switch, the session's watcher, doctor facts");
+safe("D16", () => {
+  const root = join(scratch, "d16");
+  const py = (spawnSync("sh", ["-c", "command -v python3"], { encoding: "utf8" }).stdout || "").trim();
+  const pyBin = join(root, "pybin");
+  if (py) writeExe(join(pyBin, "python3"), `#!/bin/sh\nexec ${py} "$@"\n`);
+  // A fake bridge: --version answers, `doctor` prints a contract doctor whose
+  // abortWatch object is `aw` (null: an older bridge without the key).
+  const bridge = (name, aw) => {
+    const doctor = { contract: 2, backend: name.replace(/-bridge$/, ""), ...(aw ? { abortWatch: aw } : {}) };
+    const p = join(root, "b", name + "-" + Math.random().toString(36).slice(2, 8));
+    writeExe(p, `#!/bin/sh\ncase "$1" in --version) echo "${name} 1";; doctor) cat <<'JSON'\n${JSON.stringify(doctor, null, 2)}\nJSON\n;; *) exit 2;; esac\n`);
+    return p;
+  };
+  const ud = (cfg) => {
+    const d = join(root, "ud-" + Math.random().toString(36).slice(2, 8));
+    mkdirSync(d, { recursive: true });
+    if (cfg.json !== undefined) writeFileSync(join(d, "claude-desktop-extra.json"), cfg.json);
+    if (cfg.jsonc !== undefined) writeFileSync(join(d, "claude-desktop-extra.jsonc"), cfg.jsonc);
+    return d;
+  };
+  const FNS = ["_bridge_json_field", "_cu_bridge_env", "_cu_bridge_path", "_diag_elf_foreign", "_diag_bridge_runs", "_cu_bridge_doctor",
+    "_diag_escape_switch", "_diag_escape_doctor", "_diag_escape"];
+  const diag = (dir, env) => runFns(FNS, `_diag_problems=(); _diag_escape '${dir}'; printf 'P=%s\\n' "\${_diag_problems[@]:-}"`,
+    { PATH: `${py ? pyBin + ":" : ""}${coreBin}`, ...env }).out;
+  const ON = ud({ json: '{ "computerUseEscapeAbort": true }' });
+  const OFF = ud({});
+  const LOCKED = ud({ jsonc: '{\n  // hand-edited\n  "computerUseEscapeAbort": false,\n}\n', json: '{ "computerUseEscapeAbort": true }' });
+  const X11 = { XDG_SESSION_TYPE: "x11", DISPLAY: ":0" };
+  const WL = { XDG_SESSION_TYPE: "wayland", WAYLAND_DISPLAY: "wayland-1" };
+  const ok = { available: true, mechanism: "xi2", reason: null, consumes: false, stale: false, skippedKeyboards: [] };
+
+  if (!py) {
+    console.log("  (python3 not found: only the no-python3 path is checked)");
+    check("no python3: the switch is unknown with the reason", /= unknown \(python3 is needed/.test(diag(ON, { ...X11, X11_BRIDGE_BIN: bridge("x11-bridge", ok) })), true);
+    return;
+  }
+  // The switch.
+  let out = diag(ON, { ...X11, X11_BRIDGE_BIN: bridge("x11-bridge", ok) });
+  check("switch on (claude-desktop-extra.json)", /Escape stops Computer Use \(community switch\) = on  \[/.test(out), true);
+  check("X11: x11-bridge is the watcher", /stop-key watcher = x11-bridge abort-watch \(X11 session\)/.test(out), true);
+  check("available, with its mechanism", /\n  available \(mechanism xi2\)/.test(out), true);
+  check("consumes false: Escape still reaches applications", /Escape and applications: Escape still reaches applications/.test(out), true);
+  check("all fine: no problem", out.endsWith("P="), true);
+  out = diag(OFF, { ...X11, X11_BRIDGE_BIN: bridge("x11-bridge", ok) });
+  check("no settings file: off (the default)", /= off \(the default\)  \[/.test(out), true);
+  out = diag(LOCKED, { ...X11, X11_BRIDGE_BIN: bridge("x11-bridge", ok) });
+  check(".jsonc false wins over .json true and is reported as the lock", /= off \(set in claude-desktop-extra\.jsonc, the switch is locked\)/.test(out), true);
+  const UNREAD = ud({ json: '{ "computerUseEscapeAbort": true }' });
+  chmodSync(join(UNREAD, "claude-desktop-extra.json"), 0o000);
+  if (process.getuid() !== 0) {
+    out = diag(UNREAD, { ...X11, X11_BRIDGE_BIN: bridge("x11-bridge", ok) });
+    check("unreadable settings: unknown with the reason, not a guess", /= unknown \(claude-desktop-extra\.json cannot be read: Permission denied\)/.test(out), true);
+  }
+  chmodSync(join(UNREAD, "claude-desktop-extra.json"), 0o644);
+
+  // Sessions.
+  out = diag(ON, { ...WL, SWAYSOCK: "/run/user/1000/sway.sock", XDG_CURRENT_DESKTOP: "sway",
+    WLROOTS_BRIDGE_BIN: bridge("wlroots-bridge", { ...ok, mechanism: "sway", consumes: true, skippedKeyboards: ["Yubico YubiKey", "ydotoold virtual device"] }) });
+  check("sway: wlroots-bridge", /stop-key watcher = wlroots-bridge abort-watch \(sway\)/.test(out), true);
+  check("consumes true: taken from applications", /Escape is taken from applications while Claude is working/.test(out), true);
+  check("skipped keyboards listed", /keyboards not watched: Yubico YubiKey, ydotoold virtual device/.test(out), true);
+  out = diag(ON, { ...WL, HYPRLAND_INSTANCE_SIGNATURE: "abc", XDG_CURRENT_DESKTOP: "Hyprland",
+    WLROOTS_BRIDGE_BIN: bridge("wlroots-bridge", { ...ok, mechanism: "hyprland", consumes: false }) });
+  check("Hyprland: wlroots-bridge, Escape still reaches applications", /wlroots-bridge abort-watch \(Hyprland\)[\s\S]*Escape still reaches applications/.test(out), true);
+  out = diag(ON, { ...WL, XDG_CURRENT_DESKTOP: "KDE",
+    KWIN_PORTAL_BRIDGE_BIN: bridge("kwin-portal-bridge", { ...ok, mechanism: "kglobalaccel", consumes: true }) });
+  check("KDE Wayland: kwin-portal-bridge", /stop-key watcher = kwin-portal-bridge abort-watch \(KDE Plasma Wayland\)/.test(out), true);
+  out = diag(ON, { ...WL, XDG_CURRENT_DESKTOP: "ubuntu:GNOME" });
+  check("GNOME Wayland: no watcher, what remains", /stop-key watcher = none on this session \(GNOME Wayland has no global stop key for Claude\): Escape in Claude's own window, Stop sharing and Stop remain/.test(out), true);
+  check("GNOME + switch on: a Problems entry", /P=Escape stops Computer Use is on, but this session has no stop-key watcher/.test(out), true);
+  out = diag(OFF, { ...WL, XDG_CURRENT_DESKTOP: "ubuntu:GNOME" });
+  check("GNOME + switch off: no Problems entry", out.endsWith("P="), true);
+
+  // Doctor facts.
+  const un = bridge("wlroots-bridge", { available: false, mechanism: null, reason: "Escape is already bound in sway's default mode ({config}:12)", consumes: null, stale: false, skippedKeyboards: [] });
+  out = diag(ON, { ...WL, SWAYSOCK: "/s", WLROOTS_BRIDGE_BIN: un });
+  check("unavailable: the reason verbatim (braces included)", /unavailable: Escape is already bound in sway's default mode \(\{config\}:12\)/.test(out), true);
+  check("consumes null: unknown", /Escape and applications: unknown/.test(out), true);
+  check("switch on + unavailable: a Problems entry", /P=Escape stops Computer Use is on, but wlroots-bridge cannot watch Escape here: Escape is already bound/.test(out), true);
+  out = diag(OFF, { ...WL, SWAYSOCK: "/s", WLROOTS_BRIDGE_BIN: un });
+  check("switch off + unavailable: no Problems entry", out.endsWith("P="), true);
+  const st = bridge("kwin-portal-bridge", { ...ok, mechanism: "kglobalaccel", consumes: true, stale: true });
+  out = diag(OFF, { ...WL, XDG_CURRENT_DESKTOP: "KDE", KWIN_PORTAL_BRIDGE_BIN: st });
+  check("stale: the leftover binding and how to clear it", out.includes(`leftover binding: a stop-key binding from an earlier run is still active - clear it with: ${st} abort-watch </dev/null`), true);
+  check("stale goes into Problems even with the switch off", out.includes(`P=kwin-portal-bridge left a stop-key binding from an earlier run, so Escape may be taken from applications with nothing running: clear it with ${st} abort-watch </dev/null`), true);
+  const old = bridge("x11-bridge", null);
+  out = diag(ON, { ...X11, X11_BRIDGE_BIN: old });
+  check("old bridge without abortWatch: no stop-key support", /unavailable: this x11-bridge has no stop-key support \(older bridge: no abortWatch in its doctor\)/.test(out), true);
+  check("  and with the switch on, a Problems entry", /P=Escape stops Computer Use is on, but x11-bridge at .* has no stop-key support/.test(out), true);
+  out = diag(ON, { ...X11, X11_BRIDGE_BIN: join(root, "nope", "x11-bridge") });
+  check("bridge missing: unavailable and a Problems entry (switch on)", /unavailable: x11-bridge is missing[\s\S]*P=Escape stops Computer Use is on, but x11-bridge is missing/.test(out), true);
 });
 
 rmSync(scratch, { recursive: true, force: true });

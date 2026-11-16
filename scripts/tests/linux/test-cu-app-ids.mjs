@@ -33,6 +33,9 @@
 //        our index is not consulted in kwin mode
 //   [11] capabilitiesNow per backend; static capabilities unchanged but for
 //        hostBundleId
+//   [12] named profile with its own identity (CHROME_DESKTOP=
+//        com.anthropic.Claude-work.desktop): own pid and -work windows are the
+//        host, the default profile's com.anthropic.Claude window is not
 //
 // Exit codes follow the repo convention: 0 = PASS, other = FAIL.
 import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, chmodSync, symlinkSync, rmSync } from "node:fs";
@@ -296,9 +299,36 @@ console.log("\n[3] x11-bridge: getFrontmostApp / appUnderPoint in the same ids")
   const d = await rig.ex.appUnderPoint(450, 450);
   ok(d && d.bundleId === rig.ex.capabilities.hostBundleId, "over Claude -> the host id", J(d));
   ok(await rig.ex.appUnderPoint(1919, 1079) === null, "over the bare desktop -> null");
+  // A reparenting WM (xfwm4): the title bar is the frame window above the
+  // client's geometry. x11-bridge now resolves a frame point to the client's
+  // app (bundleId = the client's own id, as for its client area); it used to
+  // answer the frame's bare window id, which no grant and no host check knew.
+  {
+    const frameHit = (answer) => (x, y) => (x >= 400 && x < 1000 && y >= 376 && y < 400) ? answer : null;   // Claude's title bar
+    const now = makeRig({ br: { windows: X11WINS, hit: frameHit({ bundleId: "com.anthropic.Claude", displayName: "Claude" }) } });
+    const t = await now.ex.appUnderPoint(700, 390);
+    ok(t && t.bundleId === now.ex.capabilities.hostBundleId, "Claude's own title bar (frame point, new bridge answer) -> the host id, so the self-hit refusal still fires", J(t));
+    // A window that names no app: x11-bridge answers its client window id.
+    // Unresolved by the window list and its process -> upstream's explicit
+    // "unattributed window" shape (refused, never the desktop shell).
+    const was = makeRig({ br: { windows: X11WINS, hit: frameHit({ bundleId: "7710972", displayName: "7710972" }) } });
+    const o = await was.ex.appUnderPoint(700, 390);
+    ok(o && o.bundleId === null && o.unattributedWindowOwner === "window 7710972", "a classless window's client id that nothing resolves -> {bundleId:null, unattributedWindowOwner}", J(o));
+    const titled = makeRig({ br: { windows: X11WINS, hit: frameHit({ bundleId: "7710972", displayName: "Some Tool" }) } });
+    const o2 = await titled.ex.appUnderPoint(700, 390);
+    ok(o2 && o2.bundleId === null && o2.unattributedWindowOwner === "Some Tool", "  with a title: the title names the owner", J(o2));
+    // A classless window whose process is a known app: still resolved by pid.
+    const classless = x11Win(null, null, R(1500, 600, 300, 200), { id: "424242", title: "untitled", pid: 5002, stacking_order: 20 });
+    const byPid = makeRig({ br: { windows: [...X11WINS, classless], hit: (x, y) => (x >= 1500 && y >= 600) ? { bundleId: "424242", displayName: "untitled" } : null } });
+    const p = await byPid.ex.appUnderPoint(1600, 700);
+    ok(p && p.bundleId === "google-chrome", "a classless window whose process is a known app -> that app (process lookup kept)", J(p));
+    const mp = makeRig({ br: { windows: X11WINS, hit: (x, y) => (x >= 950 && x < 1450 && y < 24) ? { bundleId: "Mousepad", displayName: "Untitled 1 - Mousepad" } : null } });
+    const m = await mp.ex.appUnderPoint(1200, 10);
+    ok(m && m.bundleId === "org.xfce.mousepad", "an approved app's title bar -> its canonical id, the same as its client area", J(m));
+  }
   const caps = rig.ex.capabilitiesNow();
   ok(caps.hitTest === "native" && caps.frontmost === "native" && caps.backend === "x11-bridge" && caps.windowList === "full" && caps.windowPositions === true && caps.screenshotFiltering === "none", "capabilitiesNow on X11", J(caps));
-  ok(!("hitTest" in rig.ex.capabilities) && rig.ex.capabilities.screenshotFiltering === "none" && rig.ex.capabilities.platform === "linux", "static capabilities: still no hitTest key", J(rig.ex.capabilities));
+  ok(rig.ex.capabilities.hitTest === undefined && rig.ex.capabilities.screenshotFiltering === "none" && rig.ex.capabilities.platform === "linux", "capabilities on X11: hitTest undefined (a real hit test, upstream's per-app click gate)", J(rig.ex.capabilities));
 }
 
 // ── [4] grant -> window matcher, findWindowDisplays ────────────────────────
@@ -348,7 +378,11 @@ console.log("\n[6] wlroots-bridge: app_id ids, frontmost only from the activated
   ok(J((await rig.ex.listRunningApps()).map((a) => a.bundleId)) === J(["google-chrome", "org.xfce.mousepad", "org.gnome.TextEditor", "foot"]), "listRunningApps: app_ids, unknown foot kept");
   ok((await rig.ex.getFrontmostApp()).bundleId === "org.xfce.mousepad", "frontmost: the activated toplevel");
   const rig2 = makeRig({ session: "wayland", desktop: "sway", bridges: { wlroots: true }, br: { windows: wins.map((w) => ({ ...w, is_active: false })), front: { bundleId: "google-chrome", displayName: "first" } } });
-  ok(await rig2.ex.getFrontmostApp() === null && !rig2.calls.some((c) => c.includes("frontmost-app")), "no activated toplevel (ext-foreign-toplevel-list): null, never wlroots-bridge's first-toplevel guess", J(rig2.calls));
+  // Issue #326: without window geometry (no hit test) a null front app would
+  // let upstream's gate skip the tier check, so "nothing in front" is the
+  // shared screen there.
+  const f2 = await rig2.ex.getFrontmostApp();
+  ok((f2 === null || f2.bundleId === "com.anthropic.cu.screen") && (rig2.ex.capabilities.hitTest === "none" ? f2 && f2.bundleId === "com.anthropic.cu.screen" : f2 === null) && !rig2.calls.some((c) => c.includes("frontmost-app")), "no activated toplevel (ext-foreign-toplevel-list): the Screen pseudo-app without a hit test (null with one), never wlroots-bridge's first-toplevel guess", J([f2, rig2.ex.capabilities.hitTest, rig2.calls]));
   ok(await rig.ex.appUnderPoint(10, 10) === null && !rig.calls.some((c) => c.includes("app-under-point")), "appUnderPoint: null without asking the bridge");
   const caps = rig.ex.capabilitiesNow();
   ok(caps.hitTest === "none" && caps.frontmost === "native" && caps.backend === "wlroots-bridge" && caps.windowPositions === false, "capabilitiesNow on wlroots", J(caps));
@@ -364,9 +398,12 @@ console.log("\n[7] gnome-portal-bridge (Introspect): same ids, no hit test");
   ok(await rig.ex.appUnderPoint(10, 10) === null && !rig.calls.some((c) => c.includes("app-under-point")), "appUnderPoint: null (no global window origin on GNOME)");
   ok(!rig.calls.some((c) => / session-start/.test(c)), "enumeration never opens a portal session", J(rig.calls));
   const rigE = makeRig({ session: "wayland", desktop: "GNOME", bridges: { gnome: true }, br: { windows: [] } });
-  ok(await rigE.ex.getFrontmostApp() === null && J(await rigE.ex.listRunningApps()) === "[]", "Introspect restricted ([]): frontmost null, no running apps");
+  // Issue #326: where Introspect is refused the front window cannot be named;
+  // the answer is upstream's own Wayland one (the Screen pseudo-app).
+  ok((await rigE.ex.getFrontmostApp()).bundleId === "com.anthropic.cu.screen" && J(await rigE.ex.listRunningApps()) === "[]", "Introspect restricted ([]): front app = the Screen pseudo-app, no running apps");
+  ok(rigE.ex.capabilitiesNow().frontmost === "none" && rigE.ex.capabilities.hitTest === "none", "Introspect restricted: frontmost none, hitTest none", J(rigE.ex.capabilitiesNow()));
   const caps = rig.ex.capabilitiesNow();
-  ok(caps.hitTest === "none" && caps.backend === "gnome-portal-bridge" && caps.windowList === "best-effort", "capabilitiesNow on GNOME", J(caps));
+  ok(caps.hitTest === "none" && caps.frontmost === "native" && caps.backend === "gnome-portal-bridge" && caps.windowList === "best-effort", "capabilitiesNow on GNOME (a window list answered: Introspect works)", J(caps));
 }
 
 // ── [8] XWayland ───────────────────────────────────────────────────────────
@@ -374,13 +411,13 @@ console.log("\n[8] XWayland (uncovered Wayland, x11-bridge): X clients listed, f
 {
   const rig = makeRig({ session: "wayland", desktop: "COSMIC", br: { windows: [{ ...chromeW, is_active: true }], hit: () => ({ bundleId: "Google-chrome", displayName: "x" }), front: { bundleId: "Google-chrome", displayName: "x" } } });
   ok(J((await rig.ex.listRunningApps()).map((a) => a.bundleId)) === J(["google-chrome"]), "listRunningApps: the X clients");
-  ok(await rig.ex.getFrontmostApp() === null && await rig.ex.appUnderPoint(10, 10) === null, "frontmost / appUnderPoint: null (a native Wayland window may be on top)");
+  ok((await rig.ex.getFrontmostApp()).bundleId === "com.anthropic.cu.screen" && await rig.ex.appUnderPoint(10, 10) === null, "front app = the Screen pseudo-app, appUnderPoint null (a native Wayland window may be on top)");
   ok(!rig.calls.some((c) => /frontmost-app|app-under-point/.test(c)), "and the bridge is not asked", J(rig.calls));
   const caps = rig.ex.capabilitiesNow();
   ok(caps.hitTest === "none" && caps.frontmost === "none" && caps.windowList === "partial" && caps.backend === "x11-bridge (XWayland)", "capabilitiesNow on XWayland", J(caps));
   const rn = makeRig({ session: "wayland", desktop: "COSMIC", bridges: {} });
   const cn = rn.ex.capabilitiesNow();
-  ok(cn.backend === "none" && cn.hitTest === "none" && J(await rn.ex.listRunningApps()) === "[]" && await rn.ex.getFrontmostApp() === null, "no bridge, no ydotool: nothing known", J(cn));
+  ok(cn.backend === "none" && cn.hitTest === "none" && J(await rn.ex.listRunningApps()) === "[]" && (await rn.ex.getFrontmostApp()).bundleId === "com.anthropic.cu.screen", "no bridge, no ydotool: nothing known (front app = the Screen pseudo-app)", J(cn));
 }
 
 // ── [9] background X display (Xvfb) ────────────────────────────────────────
@@ -422,6 +459,135 @@ console.log("\n[10] kwin-portal-bridge (executor_linux.js): the bridge's ids pas
   ok((await kx.getFrontmostApp()).bundleId === "org.kde.konsole" && (await kx.appUnderPoint(950, 10)).bundleId === "google-chrome", "frontmost / appUnderPoint: the bridge's canonical ids");
   ok(kx.capabilities.hostBundleId === "com.anthropic.claude" && kx.capabilities.screenshotFiltering === "native", "kwin capabilities unchanged", J(kx.capabilities));
   globalThis.__cuKwinMode = false;
+}
+
+// ── [12] named profile with its own window identity (issue #319) ──────────
+// patches/core/fix_profile_app_identity switches CHROME_DESKTOP to
+// <base>-<profile>.desktop when that .desktop exists; _hostId() reads it live.
+// Host test = _isHostWin's rule via the exported pieces: our pid (resolveWindow
+// .host) or the window's canonical id equal to hostId() (owns(hostId, w)).
+console.log("\n[12] named profile: CHROME_DESKTOP=com.anthropic.Claude-work.desktop");
+{
+  const PROF = dataDir("prof", { "com.anthropic.Claude-work": "Name=Claude (work)\nExec=claude-desktop --profile=work %U\nIcon=claude-desktop\nStartupWMClass=com.anthropic.Claude-work\n" });
+  const ownW = x11Win("com.anthropic.Claude-work", "com.anthropic.Claude-work", R(400, 400, 600, 400), { pid: process.pid });
+  const ownQeW = x11Win("claude-quick-entry", "claude-quick-entry", R(500, 50, 400, 60), { pid: process.pid });
+  const defaultInstW = x11Win("com.anthropic.Claude", "com.anthropic.Claude", R(0, 0, 600, 400), { pid: 6100 });
+  const workOtherPidW = x11Win("com.anthropic.Claude-work", "com.anthropic.Claude-work", R(0, 0, 600, 400), { pid: 6101 });
+  for (const [label, data] of [["profile .desktop indexed", [SYS, PROF]], ["profile .desktop not in the index", [SYS]]]) {
+    const rig = makeRig({ data, br: { windows: [ownW, ownQeW, defaultInstW, workOtherPidW] } });
+    process.env.CHROME_DESKTOP = "com.anthropic.Claude-work.desktop";
+    const host = (w) => { const r = rig.ids.resolveWindow(w); return !!(r && (r.host || rig.ids.owns(rig.ids.hostId(), w))); };
+    ok(rig.ids.hostId() === "com.anthropic.Claude-work" && rig.ex.capabilities.hostBundleId === "com.anthropic.Claude-work", label + ": hostId / capabilities.hostBundleId follow CHROME_DESKTOP", J([rig.ids.hostId(), rig.ex.capabilities.hostBundleId]));
+    ok(host(ownW) && host(ownQeW) && rig.ids.resolveWindow(ownQeW).bundleId === "com.anthropic.Claude-work", label + ": the instance's own windows (our pid) are the host, Quick Entry included", J([rig.ids.resolveWindow(ownW), rig.ids.resolveWindow(ownQeW)]));
+    ok(!host(defaultInstW) && rig.ids.resolveWindow(defaultInstW).bundleId === "com.anthropic.Claude", label + ": a com.anthropic.Claude window of another pid (the default profile) is NOT the host", J(rig.ids.resolveWindow(defaultInstW)));
+    ok(host(workOtherPidW), label + ": a com.anthropic.Claude-work window is the host", J(rig.ids.resolveWindow(workOtherPidW)));
+    process.env.CHROME_DESKTOP = "com.anthropic.Claude.desktop";
+  }
+}
+
+// ── [13] Omarchy web apps and terminal apps (issue #329) ──────────────────
+// Entry text as Omarchy 3.x ships it (~/.local/share/applications on the
+// Omarchy VM, Hyprland 0.56.2), the web-app launcher script verbatim. Window
+// classes as Hyprland reported them: a Chromium --app window is
+// chrome-<host>_<path, "/" as "_">-<profile>; an Omarchy TUI is the terminal
+// with --app-id=TUI.float / TUI.tile (shared by every TUI of that style).
+// The rig runs as a sway session: the identity does not depend on the
+// compositor, only on the window list (app id, pid) and /proc.
+console.log("\n[13] Omarchy: web apps own their --app windows, terminal apps never own one");
+{
+  const LAUNCH_WEBAPP = `#!/bin/bash
+
+# omarchy:summary=Launch a URL as a web app in the default supported browser
+# omarchy:args=<url>
+
+browser=$(omarchy-cmd-default-browser)
+
+case $browser in
+google-chrome* | brave* | microsoft-edge* | opera* | vivaldi* | helium*) ;;
+*) browser="chromium.desktop" ;;
+esac
+
+browser_exec=$(sed -n 's/^Exec=\\([^ ]*\\).*/\\1/p' {~/.local,~/.nix-profile,/usr}/share/applications/$browser 2>/dev/null | head -1)
+
+if ! omarchy-cmd-browser-handoff "$browser_exec" --app="$1" "\${@:2}"; then
+  exec setsid uwsm-app -- $browser_exec --app="$1" "\${@:2}"
+fi
+`;
+  for (const n of ["chromium", "foot", "xdg-terminal-exec", "dua", "btop"]) exe(path.join(BIN, n));
+  writeFileSync(path.join(BIN, "omarchy-launch-webapp"), LAUNCH_WEBAPP); chmodSync(path.join(BIN, "omarchy-launch-webapp"), 0o755);
+  // A launcher that opens its URL some other way: not a web app.
+  writeFileSync(path.join(BIN, "open-in-browser"), "#!/bin/sh\nexec xdg-open \"$1\"\n"); chmodSync(path.join(BIN, "open-in-browser"), 0o755);
+  const V = "Version=1.0\n";
+  const OMA = {
+    YouTube: V + "Name=YouTube\nExec=omarchy-launch-webapp https://youtube.com/\nTerminal=false\nIcon=youtube\nStartupNotify=true\n",
+    WhatsApp: V + "Name=WhatsApp\nExec=omarchy-launch-webapp https://web.whatsapp.com/\nTerminal=false\nIcon=whatsapp\nStartupNotify=true\n",
+    "Google Messages": V + "Name=Google Messages\nExec=omarchy-launch-webapp https://messages.google.com/web/conversations\nTerminal=false\nIcon=google-messages\nStartupNotify=true\n",
+    "Disk Usage": V + "Name=Disk Usage\nExec=xdg-terminal-exec --app-id=TUI.float -e bash -c \"dua i /\"\nTerminal=false\nIcon=disk-usage\nStartupNotify=true\n",
+    Docker: V + "Name=Docker\nExec=xdg-terminal-exec --app-id=TUI.tile -e omarchy-launch-docker-tui\nTerminal=false\nIcon=docker\nStartupNotify=true\n",
+    foot: "Name=Foot\nTryExec=foot\nExec=foot\nIcon=foot\nTerminal=false\nCategories=System;TerminalEmulator;\nGenericName=Terminal\nStartupWMClass=foot\nX-TerminalArgExec=-e\nX-TerminalArgAppId=--app-id=\n",
+    chromium: "Name=Chromium\nExec=chromium %U\nStartupWMClass=chromium\nIcon=chromium\n",
+    "Opener": "Name=Opener\nExec=open-in-browser https://example.org/\n",
+  };
+  const OMA_DIR = dataDir("omarchy", OMA);
+  const FOOT = path.join(BIN, "foot"), CHR = path.join(BIN, "chromium");
+  Object.assign(PROC, {
+    5101: { exe: FOOT, cmdline: [FOOT, "--app-id=TUI.float", "-e", "bash", "-c", "dua i /"] },
+    5102: { exe: FOOT, cmdline: [FOOT] },
+    5103: { exe: FOOT, cmdline: [FOOT, "--app-id=TUI.tile", "-e", "omarchy-launch-docker-tui"] },
+    5104: { exe: CHR, cmdline: [CHR, "--ozone-platform=wayland", "--app=https://youtube.com/"] },
+    5105: { exe: FOOT, cmdline: [FOOT, "--app-id=TUI.float", "-e", "btop"] },
+    5106: { exe: FOOT, cmdline: [FOOT, "--server"] },
+    5107: { exe: FOOT, cmdline: [FOOT, "-e", "bash", "-c", "dua i /"] },
+  });
+  const hw = (appId, pid, extra = {}) => wlrWin(appId, { pid, geometry: R(0, 0, 800, 600), ...extra });
+  const ytW = hw("chrome-youtube.com__-Default", 5104), waW = hw("chrome-web.whatsapp.com__-Default", 5104), msgW = hw("chrome-messages.google.com__web_conversations-Default", 5104);
+  const braveYt = hw("brave-youtube.com__-Profile_1", 5104), xW = hw("chrome-x.com__-Default", 5104), chrW = hw("chromium", 5104), openerW = hw("chrome-example.org__-Default", 5104);
+  const duaW = hw("TUI.float", 5101), footW = hw("foot", 5102), dockW = hw("TUI.tile", 5103), btopW = hw("TUI.float", 5105);
+  const rig = makeRig({ session: "wayland", desktop: "sway", bridges: { wlroots: true }, data: [OMA_DIR], br: { windows: () => list } });
+  let list = [ytW, waW, msgW, braveYt, xW, chrW, openerW, duaW, footW, dockW, btopW];
+  const id = (w) => (rig.ids.resolveWindow(w) || {}).bundleId;
+  const running = (await rig.ex.listRunningApps()).map((a) => a.bundleId);
+  ok(id(ytW) === "YouTube" && id(waW) === "WhatsApp" && id(msgW) === "Google Messages", "web apps: chrome-<host>_<path>-<profile> -> the entry that launches that URL", J([id(ytW), id(waW), id(msgW)]));
+  ok(id(braveYt) === "YouTube", "web apps: the brave- form of the same app", id(braveYt));
+  ok(id(chrW) === "chromium" && id(xW) === "chromium" && id(openerW) === "chromium", "the browser's own window, another site's app window and a launcher without --app=\"$1\" keep today's id (the browser, by its process)", J([id(chrW), id(xW), id(openerW)]));
+  ok(rig.ids.owns("YouTube", ytW) && !rig.ids.owns("YouTube", chrW) && !rig.ids.owns("YouTube", xW) && !rig.ids.owns("YouTube", waW), "a YouTube grant owns the YouTube window only - never the browser's own or another site's", J([rig.ids.owns("YouTube", chrW), rig.ids.owns("YouTube", xW)]));
+  ok(!rig.ids.owns("chromium", ytW) && rig.ids.owns("chromium", chrW), "a Chromium grant no longer owns the YouTube app window (it was counted as Chromium's by its process)");
+  // Terminal apps never own a window (review B1 / finding 8): the class is
+  // shared, a terminal process's command line is its first window's, and
+  // `bash -c "dua i /"` execs dua, so nothing at capture time proves which
+  // terminal window is the entry's. Every case keeps the terminal's id.
+  ok(id(duaW) === "foot" && id(dockW) === "foot" && !rig.ids.owns("Disk Usage", duaW) && !rig.ids.owns("Docker", dockW), "terminal apps (TUI.float / TUI.tile, even with the matching command line): the terminal (foot), the entry owns nothing", J([id(duaW), id(dockW)]));
+  ok(id(btopW) === "foot" && id(footW) === "foot", "a TUI.float window running another command, and a plain terminal: the terminal (foot)", J([id(btopW), id(footW)]));
+  ok(running.includes("YouTube") && !running.includes("Disk Usage") && !running.includes("Docker") && running.includes("chromium") && running.includes("foot"), "listRunningApps names them the same way", J(running));
+  // One process serving two TUI.float windows: which is which is unknown.
+  list = [hw("TUI.float", 5101), hw("TUI.float", 5101, { id: "shared-2" })];
+  await rig.ex.listRunningApps();
+  ok(id(list[0]) === "foot" && id(list[1]) === "foot", "two windows of one terminal process: neither is Disk Usage", J([id(list[0]), id(list[1])]));
+  list = [hw("TUI.float", 5106)];
+  await rig.ex.listRunningApps();
+  ok(id(list[0]) === "foot", "foot --server (no class, no command on its command line): not Disk Usage", id(list[0]));
+  list = [hw("TUI.float", 5107)];
+  await rig.ex.listRunningApps();
+  ok(id(list[0]) === "foot", "the command matches but the terminal was not started for TUI.float: not Disk Usage", id(list[0]));
+  list = [hw("TUI.float", null)];
+  await rig.ex.listRunningApps();
+  ok(id(list[0]) === "TUI.float", "no pid (ext-foreign-toplevel only): not Disk Usage, the raw id", id(list[0]));
+  // Cold: no window list seen yet.
+  const cold = makeRig({ session: "wayland", desktop: "sway", bridges: { wlroots: true }, data: [OMA_DIR], br: { windows: [] } });
+  ok((cold.ids.resolveWindow(hw("TUI.float", 5101)) || {}).bundleId === "foot", "no window list seen yet: not Disk Usage");
+  // Two TUI.float entries: the command tells them apart; a duplicate does not.
+  const TWO = dataDir("omarchy2", { ...OMA, Btop: V + "Name=Btop\nExec=xdg-terminal-exec --app-id=TUI.float -e btop\nIcon=btop\n" });
+  const r2 = makeRig({ session: "wayland", desktop: "sway", bridges: { wlroots: true }, data: [TWO], br: { windows: [duaW, btopW] } });
+  await r2.ex.listRunningApps();
+  ok((r2.ids.resolveWindow(duaW) || {}).bundleId === "foot" && (r2.ids.resolveWindow(btopW) || {}).bundleId === "foot", "two TUI.float entries with different commands: still the terminal for both", J([r2.ids.resolveWindow(duaW), r2.ids.resolveWindow(btopW)]));
+  const DUP = dataDir("omarchy3", { ...OMA, "Disk Usage 2": V + "Name=Disk Usage Copy\nExec=xdg-terminal-exec --app-id=TUI.float -e bash -c \"dua i /\"\n", "YouTube 2": V + "Name=YouTube Copy\nExec=omarchy-launch-webapp https://youtube.com/\n" });
+  const r3 = makeRig({ session: "wayland", desktop: "sway", bridges: { wlroots: true }, data: [DUP], br: { windows: [duaW, ytW] } });
+  await r3.ex.listRunningApps();
+  ok((r3.ids.resolveWindow(duaW) || {}).bundleId === "foot" && (r3.ids.resolveWindow(ytW) || {}).bundleId === "chromium", "two entries for the same command / the same URL: ambiguous, nothing owned", J([r3.ids.resolveWindow(duaW), r3.ids.resolveWindow(ytW)]));
+  // request_access names still resolve through upstream's resolver.
+  ok(J(upstreamResolve(["YouTube", "Disk Usage", "Docker"], await rig.ex.listInstalledApps())) === J(["YouTube", "Disk Usage", "Docker"]), "request_access YouTube / Disk Usage / Docker -> their entries");
+  const inst = (await rig.ex.listInstalledApps()).map((a) => a.displayName);
+  ok(!inst.includes("TUI.float") && !inst.some((n) => /^chrome-/.test(n)), "the derived classes are not request_access names", J(inst));
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

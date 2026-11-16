@@ -23,7 +23,7 @@
  * belongs to patches/linux/fix_native_frame.nim, which reads the two globals.
  * The one page-side job (js/window_controls_page.js, embedded below as
  * PAGE_SRC) only fixes claude.ai's header inset for a window that was already
- * built without the controls overlay.
+ * built without the controls overlay (native, bare or transparent window).
  *
  * SECURITY: the caller is remote claude.ai code. Every handler validates the
  * sender's ORIGIN (not a substring test of the URL - see okSender below) and
@@ -40,7 +40,6 @@
   var _electron = require("electron");
   var _ipc = _electron.ipcMain;
   var _fs = require("fs");
-  var _URL = require("url").URL;
 
   // __cdbDiag (claude-patches.log) is defined inside upstream's app "ready"
   // handler, which runs after this IIFE, and console.log is discarded by the
@@ -129,51 +128,10 @@
     return { ok: true, path: p };
   }
 
-  // Exact-origin allowlist, same posture as the panel-tabs, diff-views and
-  // Extra settings sender checks: comparing parsed origins instead of testing
-  // whether the raw URL STRING contains "claude.ai"/"claude.com" anywhere. A
-  // substring test would also pass a lookalike host such as
-  // "https://evil.example/?next=claude.ai" or "https://claude.ai.evil.example"
-  // - both contain the substring, neither is our origin.
-  //
-  // app://localhost is the main window in 3P mode (upstream serves the bundled
-  // SPA from it instead of claude.ai). Its URL.origin is the opaque "null", so
-  // the origin is normalised to protocol + "//" + host first - the same
-  // normalisation upstream's own eIPC sender validator applies. host keeps a
-  // port, so app://localhost:1234 stays distinct and is rejected.
-  var ALLOWED_ORIGINS = [
-    "https://claude.ai",
-    "https://preview.claude.ai",
-    "https://claude.com",
-    "https://preview.claude.com",
-    "app://localhost"
-  ];
-  function originAllowed(rawUrl) {
-    var origin;
-    try {
-      var u = new _URL(String(rawUrl));
-      origin = u.origin;
-      if (!origin || origin === "null") origin = u.protocol + "//" + u.host;
-    } catch (e) { return false; }
-    for (var i = 0; i < ALLOWED_ORIGINS.length; i++) {
-      if (origin === ALLOWED_ORIGINS[i]) return true;
-    }
-    return false;
-  }
-  // FAILS CLOSED: wc.isDestroyed() is called unguarded, same as the panel-tabs
-  // and diff-views precedents - a sender object missing the method throws, the
-  // catch below turns that into "not ok", not "assume fine". Do not soften this
-  // to a typeof-guard that treats a missing method as "not destroyed".
-  function okSender(ev) {
-    try {
-      var wc = ev && ev.sender;
-      if (!wc || wc.isDestroyed()) return false;
-      if (!originAllowed(wc.getURL() || "")) return false;
-      var frame = ev.senderFrame;
-      if (frame && frame.parent) return false;
-      return true;
-    } catch (e) { return false; }
-  }
+  // The IPC sender validator is shared: js/sender_guard.js (issue #318). Looked up
+  // at call time; a missing guard fails closed.
+  function originAllowed(u) { var g = globalThis.__cdbSenderGuard; return !!g && g.originAllowed(u); }
+  function okSender(ev) { var g = globalThis.__cdbSenderGuard; return !!g && g.okSender(ev); }
 
   // One read/set pair per mode, both bound to a FIXED key here. The two modes
   // are independent as far as this layer is concerned: setting one never
@@ -224,7 +182,7 @@
   // env(titlebar-area-*) fallbacks; without the overlay those fallbacks leave
   // an empty strip at the right of the header. js/window_controls_page.js
   // rewrites them (see its header). Injected only while the RUNNING window was
-  // built without the overlay, so a toggle that still waits for a restart
+  // built without the overlay - native, bare or transparent - so a toggle that still waits for a restart
   // never changes the open window's layout.
   var PAGE_SRC = "__CDB_WINCTL_PAGE_SRC__";
   var pageLogged = false;

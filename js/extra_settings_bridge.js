@@ -30,6 +30,11 @@
   }
   var BAD_LEVEL = "transparency must be a number from 0 to 0.9";
 
+  function jiraRect(r) {
+    var v = r && typeof r === "object" ? r : {};
+    return { x: Number(v.x), y: Number(v.y), width: Number(v.width), height: Number(v.height) };
+  }
+
   contextBridge.exposeInMainWorld("cdbExtra", {
     // __cdb_extra_bridge
     version: 1,
@@ -39,6 +44,18 @@
     // the remote page; apply/active are the theme picker's own channels.
     themesList: function () {
       return ipcRenderer.invoke("cdb-extra:themes-list");
+    },
+    transparentChatComposerRead: function () {
+      return ipcRenderer.invoke("cdb-chat-composer:read");
+    },
+    transparentChatComposerSet: function (enabled) {
+      return ipcRenderer.invoke("cdb-chat-composer:set", enabled === true);
+    },
+    frostedReplyFieldRead: function () {
+      return ipcRenderer.invoke("cdb-reply-field:read");
+    },
+    frostedReplyFieldSet: function (enabled) {
+      return ipcRenderer.invoke("cdb-reply-field:set", enabled === true);
     },
     themesActive: function () {
       return ipcRenderer.invoke("cdb-themes:active");
@@ -58,6 +75,17 @@
     },
     themesSetOverlay: function (name) {
       return ipcRenderer.invoke("cdb-themes:set-overlay", String(name || ""));
+    },
+    // activeBackdrop: animated SVG backdrop + frosted glass ("", "off", or a
+    // scene id). Follow theme ("") uses the active palette's paired scene.
+    themesBackdrop: function () {
+      return ipcRenderer.invoke("cdb-themes:backdrop");
+    },
+    themesBackdrops: function () {
+      return ipcRenderer.invoke("cdb-themes:backdrops");
+    },
+    themesSetBackdrop: function (name) {
+      return ipcRenderer.invoke("cdb-themes:set-backdrop", String(name || ""));
     },
 
     // GrowthBook feature flags.
@@ -115,6 +143,10 @@
 
     autoArchiveGraceRead: function (sessionId) { return sessionId === undefined ? ipcRenderer.invoke("cdb-archive-grace:read") : ipcRenderer.invoke("cdb-archive-grace:read", sessionId); },
     autoArchiveGraceSet: function (minutes) { return ipcRenderer.invoke("cdb-archive-grace:set", minutes); },
+    // The 1P Code page's "Keep this session" (js/auto_archive_grace_web_page.js):
+    // the session id only; main validates it and writes upstream's own
+    // per-session "Auto-archive on merge or close" = false.
+    autoArchiveGraceKeep: function (sessionId) { return ipcRenderer.invoke("cdb-archive-grace:keep", sessionId); },
 
     // Auto-fix notices (ready to merge, comments after merge). Fixed channels,
     // boolean only; the main side re-validates the type.
@@ -125,12 +157,57 @@
       return ipcRenderer.invoke("cdb-autofix-merge-ready:set", enabled === true);
     },
 
+    // Jira tracker: every channel is owned by patches/community/add_feature_jira_tracker.nim; the token travels page to main only.
+    jiraOpen: function (rect) {
+      return ipcRenderer.invoke("cdb-jira:open", jiraRect(rect));
+    },
+    jiraClose: function () {
+      return ipcRenderer.invoke("cdb-jira:close");
+    },
+    jiraBounds: function (rect) {
+      return ipcRenderer.invoke("cdb-jira:bounds", jiraRect(rect));
+    },
+    jiraPrefRead: function () {
+      return ipcRenderer.invoke("cdb-jira-pref:read");
+    },
+    jiraPrefSet: function (fields) {
+      var f = fields && typeof fields === "object" ? fields : {};
+      var out = {};
+      if (typeof f.enabled === "boolean") out.enabled = f.enabled;
+      if (typeof f.site === "string") out.site = f.site.slice(0, 300);
+      if (typeof f.email === "string") out.email = f.email.slice(0, 254);
+      if (typeof f.token === "string") out.token = f.token.slice(0, 600);
+      else if (f.token === null) out.token = null;
+      if (typeof f.template === "string") out.template = f.template.slice(0, 10001);
+      else if (f.template === null) out.template = null;
+      return ipcRenderer.invoke("cdb-jira-pref:set", out);
+    },
+    jiraPrefTest: function () {
+      return ipcRenderer.invoke("cdb-jira-pref:test");
+    },
+
     // Computer Use: read app controls (accessibility). Fixed channels, boolean only.
     cuAxRead: function () {
       return ipcRenderer.invoke("cdb-cu-ax:read");
     },
     cuAxSet: function (enabled) {
       return ipcRenderer.invoke("cdb-cu-ax:set", enabled === true);
+    },
+
+    // Escape stops Computer Use (community). Fixed channels, boolean only.
+    cuEscRead: function () {
+      return ipcRenderer.invoke("cdb-cu-esc:read");
+    },
+    cuEscSet: function (enabled) {
+      return ipcRenderer.invoke("cdb-cu-esc:set", enabled === true);
+    },
+
+    // Computer Use: show the glow. Fixed channels, boolean only.
+    cuGlowRead: function () {
+      return ipcRenderer.invoke("cdb-cu-glow:read");
+    },
+    cuGlowSet: function (enabled) {
+      return ipcRenderer.invoke("cdb-cu-glow:set", enabled === true);
     },
 
     // Computer Use: ask before controlling an app. Fixed channels, boolean only.
@@ -380,9 +457,10 @@
       return ipcRenderer.invoke("cdb-cubg:tools");
     },
 
-    // Computer Use status (Settings -> Extra -> Computer Use). No channel
-    // takes an argument: the helper path, the launcher and the bridge are all
-    // decided on the main side, so the page can only name one of these actions.
+    // Cowork and Computer Use status (Settings -> Extra -> Cowork (Linux)). No
+    // channel takes an argument: the helper paths, the launcher and the bridge
+    // are all decided on the main side, so the page can only name one of these
+    // actions.
     cuStatusRead: function () {
       return ipcRenderer.invoke("cdb-cu-status:read");
     },
@@ -394,6 +472,21 @@
     },
     cuStatusResetScreenSharing: function () {
       return ipcRenderer.invoke("cdb-cu-status:reset-screen-sharing");
+    },
+    cuStatusKvmEnable: function () {
+      return ipcRenderer.invoke("cdb-cu-status:kvm-enable");
+    },
+    cuStatusKvmDisable: function () {
+      return ipcRenderer.invoke("cdb-cu-status:kvm-disable");
+    },
+    // The Cowork header icon's facts (device key, local VM): files only, cached.
+    cuStatusIcon: function () {
+      return ipcRenderer.invoke("cdb-cu-status:icon");
+    },
+    // Navigate this view to upstream's settings; the page then opens Extra ->
+    // Cowork (Linux). The route is fixed on the main side.
+    extraOpenSettings: function () {
+      return ipcRenderer.invoke("cdb-extra:open-settings");
     },
 
     // Open one of the files this package writes, or show it in the file manager.

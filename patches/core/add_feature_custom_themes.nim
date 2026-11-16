@@ -4,8 +4,8 @@
 # Custom CSS theme injection for Claude Desktop on Linux (dual-variant).
 #
 # Reads a JSON config file (~/.config/Claude/claude-desktop-extra.json) at startup
-# and injects CSS variable overrides into ALL windows (main chat, Quick Entry,
-# Find-in-Page, About) using Electron's stable webContents.insertCSS() API.
+# and injects CSS variable overrides into ALL windows (main chat, pop-out windows,
+# Quick Entry, Find-in-Page, About) using Electron's stable webContents.insertCSS() API.
 #
 # DUAL-VARIANT (v1.15962): each theme may be authored as {light:{...},dark:{...}}.
 # The patch emits TWO :root var blocks -- a light block on `:root,[data-mode=light]`
@@ -129,14 +129,23 @@ import std/[os, strutils, json]
 # per-theme spec and hands the whole thing to wc.executeJavaScript().
 const SPINNER_INJECTOR_JS = staticRead("../../js/spinner_injector.js")
 
+# Backdrop scene registry (20 upstream Apache-2.0 scenes + 7 bespoke Gaming scenes)
+# and renderer-side backdrop + frosted-glass injector.
+const BACKDROP_SCENES_JS = staticRead("../../js/backdrop_scenes.js")
+const BACKDROP_INJECTOR_JS = staticRead("../../js/backdrop_injector.js")
+
 # Bundled community palette collection: { "<slug>": {name, light{}, dark{}} }.
 # Parsed at COMPILE time so a malformed or wrongly shaped file fails the build
 # instead of shipping a broken bundle.
 const COMMUNITY_THEMES_JSON = staticRead("../../js/community_themes.json")
 
 # Bundled gaming palettes: { "<slug>": {name, category:"gaming", light{}, dark{},
-# spinner{}} }. Same compile-time gate as the community file, plus the category check.
+# spinner{}, backdrop{}} }. Same compile-time gate as the community file, plus the category check.
 const GAMING_THEMES_JSON = staticRead("../../js/gaming_themes.json")
+
+# Bundled upstream animated scene themes: { "<slug>": {name, category:"scenes",
+# blurb, backdrop{}, spinner{}, light{}, dark{}} }.
+const SCENE_THEMES_JSON = staticRead("../../js/scene_themes.json")
 
 # The spinner spec contract, enforced at build time for every bundled theme that
 # carries one. The runtime injector validates again (a user theme from the config
@@ -172,7 +181,24 @@ proc validateSpinner(spec: JsonNode, ctx: string) {.compileTime.} =
     doAssert spec["viewBox"].kind == JString,
       ctx & ": spinner \"viewBox\" must be a string"
 
-proc validateThemeMap(raw, file: string, wantGaming: bool): string {.compileTime.} =
+proc validateBackdrop(spec: JsonNode, ctx: string) {.compileTime.} =
+  doAssert spec.kind in {JString, JObject},
+    ctx & ": \"backdrop\" must be a scene id string or object"
+  if spec.kind == JString:
+    doAssert spec.getStr.len > 0, ctx & ": backdrop string must not be empty"
+  else:
+    let hasRef =
+      (
+        spec.hasKey("scene") and spec["scene"].kind == JString and
+        spec["scene"].getStr.len > 0
+      ) or
+      (spec.hasKey("id") and spec["id"].kind == JString and spec["id"].getStr.len > 0) or
+      (
+        spec.hasKey("svg") and spec["svg"].kind == JString and spec["svg"].getStr.len > 0
+      )
+    doAssert hasRef, ctx & ": backdrop object needs \"scene\", \"id\", or \"svg\""
+
+proc validateThemeMap(raw, file, wantCategory: string): string {.compileTime.} =
   let n = parseJson(raw)
   doAssert n.kind == JObject, file & " must be a JSON object mapping slug -> theme"
   for slug, theme in n.pairs:
@@ -180,23 +206,32 @@ proc validateThemeMap(raw, file: string, wantGaming: bool): string {.compileTime
     doAssert theme.kind == JObject, ctx & " must be an object"
     doAssert theme.hasKey("light") or theme.hasKey("dark"),
       ctx & " needs a light and/or dark variant"
-    if wantGaming:
+    if wantCategory.len > 0:
       doAssert theme.hasKey("category") and theme["category"].kind == JString and
-        theme["category"].getStr == "gaming",
-        ctx & " must carry \"category\": \"gaming\""
+        theme["category"].getStr == wantCategory,
+        ctx & " must carry \"category\": \"" & wantCategory & "\""
     if theme.hasKey("spinner") and theme["spinner"].kind != JNull:
       validateSpinner(theme["spinner"], ctx)
+    if theme.hasKey("backdrop") and theme["backdrop"].kind != JNull:
+      validateBackdrop(theme["backdrop"], ctx)
   result = $n
 
 const COMMUNITY_JSON =
-  validateThemeMap(COMMUNITY_THEMES_JSON, "js/community_themes.json", false)
-const GAMING_JSON = validateThemeMap(GAMING_THEMES_JSON, "js/gaming_themes.json", true)
+  validateThemeMap(COMMUNITY_THEMES_JSON, "js/community_themes.json", "")
+const GAMING_JSON =
+  validateThemeMap(GAMING_THEMES_JSON, "js/gaming_themes.json", "gaming")
+const SCENES_JSON =
+  validateThemeMap(SCENE_THEMES_JSON, "js/scene_themes.json", "scenes")
 
 proc jsonLen(raw: string): int {.compileTime.} =
   parseJson(raw).len
 
 const COMMUNITY_COUNT = jsonLen(COMMUNITY_THEMES_JSON)
 const GAMING_COUNT = jsonLen(GAMING_THEMES_JSON)
+const SCENES_COUNT = jsonLen(SCENE_THEMES_JSON)
+static:
+  doAssert SCENES_COUNT == 20,
+    "js/scene_themes.json must contain all 20 upstream scenes"
 
 # Head of the injected IIFE: helpers + the curated built-in themes.
 const THEME_INJECTION_JS_HEAD =
@@ -217,9 +252,13 @@ function __cdb_paintWindow(wc){
 try{
 if(!_BW||!_BW.fromWebContents||wc.isDestroyed())return false;
 var url=wc.getURL()||"";
-if(!/\/main_window\//.test(url))return false;
+var shell=/\/main_window\//.test(url);
+if(!shell&&!__cdb_popoutChild(wc,url))return false;
 var w=_BW.fromWebContents(wc);
 if(!w||(w.isDestroyed&&w.isDestroyed()))return false;
+// A pop-out window is touched only once a theme is (or was) on it, so with no theme ever applied a
+// light/dark flip leaves its background and caption overlay alone. The main window keeps repainting stock.
+if(!shell){if(__cdb_state.chrome)w.__cdbPainted=true;else if(!w.__cdbPainted)return false}
 var dark=__cdb_isDark(),c=__cdb_state.chrome,hex=(c&&(dark?c.dark:c.light))||(dark?__cdb_STOCK_CHROME.dark:__cdb_STOCK_CHROME.light);
 w.setBackgroundColor(hex);
 __cdb_paintOverlay(w,dark);
@@ -238,7 +277,7 @@ var s=w.__cdbOverlay;
 if(!s){var orig=w.setTitleBarOverlay;if(typeof orig!=="function")return;s=w.__cdbOverlay={last:null,themed:false};
 w.setTitleBarOverlay=function(o){if(o&&typeof o==="object"){s.last=o;o=__cdb_tbOverlay(o,__cdb_isDark())}return orig.call(w,o)}}
 // Nothing upstream pushed yet: only a theme (or undoing one) needs a call; stock keeps the constructor's.
-var o=s.last||((__cdb_state.chrome||s.themed)?{color:dark?__cdb_STOCK_CHROME.dark:__cdb_STOCK_CHROME.light,symbolColor:dark?"#fff":"#000"}:null);
+var o=s.last||((__cdb_state.chrome||s.themed)?{color:dark?__cdb_STOCK_CHROME.dark:__cdb_STOCK_CHROME.light,symbolColor:dark?"#c2c0b6":"#3d3d3a"}:null);
 s.themed=!!__cdb_state.chrome;
 if(o)try{w.setTitleBarOverlay(o)}catch(e){}
 }
@@ -292,11 +331,23 @@ var __cdb_builtins={
 # section (driven by their "category":"gaming" key, not by the source).
 const THEME_INJECTION_JS_GAMING_A =
   """
+__cdb_builtins["catppuccin-frappe"].backdrop={"scene":"teletext-clouds","lightScene":"paper-garden","darkScene":"teletext-clouds"};
+__cdb_builtins["catppuccin-latte"].backdrop={"scene":"paper-garden","lightScene":"paper-garden","darkScene":"paper-garden-kraft"};
+__cdb_builtins["catppuccin-macchiato"].backdrop={"scene":"night-reef","lightScene":"paper-garden","darkScene":"night-reef"};
+__cdb_builtins["catppuccin-mocha"].backdrop={"scene":"braille-stars","lightScene":"paper-garden","darkScene":"braille-stars"};
+__cdb_builtins["mario"].backdrop={"scene":"mario"};
+__cdb_builtins["nord"].backdrop={"scene":"snow-pines","lightScene":"snow-pines","darkScene":"snow-pines"};
+__cdb_builtins["sweet"].backdrop={"scene":"aurora","lightScene":"halftone-dawn","darkScene":"aurora"};
 var __cdb_gaming="""
 
 const THEME_INJECTION_JS_GAMING_B =
   """;
 for(var __cdb_gk in __cdb_gaming)__cdb_builtins[__cdb_gk]=__cdb_gaming[__cdb_gk];
+var __cdb_scenes="""
+
+const THEME_INJECTION_JS_SCENES_B =
+  """;
+for(var __cdb_sk in __cdb_scenes)__cdb_builtins[__cdb_sk]=__cdb_scenes[__cdb_sk];
 """
 
 # Middle: community palettes, config load/merge, theme resolution, the reusable CSS
@@ -420,7 +471,7 @@ if(t.light||t.dark)return {light:t.light||{},dark:t.dark||{}};
 if(__cdb_isVarMap(t))return {light:t,dark:t};
 return {light:{},dark:{}};
 }
-var __cdb_INHERIT=["chatFont","spinner","customCss"]; // name and category are NOT inherited: a user theme keeps its own label and lands in "Your themes"
+var __cdb_INHERIT=["chatFont","spinner","backdrop","customCss"]; // name and category are NOT inherited: a user theme keeps its own label and lands in "Your themes"
 var __cdb_EXTENDS_MAX=8;
 // Fold "extends" into an effective theme: base first (recursively), then the child's
 // light/dark maps over it per mode, child keys winning; the metadata keys above are
@@ -484,6 +535,84 @@ return r;
 // The 150..400 stops of the CDS neutral ramp: color-mix steps from a per-mode page anchor
 // (--bg-500 light, --bg-000 dark) toward --text-500; percentages fitted to stock lightness.
 function __cdb_cdsMix(a){var p={150:85,200:70,250:55,300:40,350:25,400:12},k,o="";for(k in p)o+="--cds-neutral-"+k+":color-mix(in srgb,hsl(var("+a+")) "+p[k]+"%,hsl(var(--text-500)))!important;";return o}
+function __cdb_themeBackdropId(t){
+if(!t||typeof t!=="object")return "";
+var b=t.backdrop||(t.light&&t.light.backdrop);
+if(typeof b==="string")return (b==="off"||b==="none")?"":b;
+if(b&&typeof b==="object")return b.scene||b.id||"";
+return "";
+}
+function __cdb_resolveBackdrop(cfg,theme){
+var raw=(cfg&&typeof cfg.activeBackdrop==="string")?cfg.activeBackdrop.trim():"";
+var scenes=globalThis.__cdbBackdropScenes;
+if(raw==="off"||raw==="none")return {override:"off",effective:null,spec:null,json:"null"};
+if(raw&&raw!=="auto"){
+var overSpec=scenes&&scenes.buildSpec?scenes.buildSpec(raw):null;
+if(overSpec){
+var j1="null";try{j1=JSON.stringify(overSpec)}catch(e){j1="null"}
+return {override:overSpec.id,effective:overSpec.id,spec:overSpec,json:j1};
+}
+__cdb_log("activeBackdrop '"+raw+"' is not a known scene; falling back to theme backdrop");
+}
+var tb=theme&&(theme.backdrop||(theme.light&&theme.light.backdrop));
+if(tb&&scenes&&scenes.buildSpec){
+var tSpec=scenes.buildSpec(tb);
+if(tSpec){
+var j2="null";try{j2=JSON.stringify(tSpec)}catch(e){j2="null"}
+return {override:null,effective:tSpec.id,spec:tSpec,json:j2};
+}
+}
+return {override:null,effective:null,spec:null,json:"null"};
+}
+// Opt-in Chat appearance only: leave the editor, dock cards and hit targets alone.
+// These backing/fade testids are from ion-dist v5.11492.5. Do not clear every
+// descendant's background: approval cards and the rounded input need their fill.
+function __cdb_chatComposerCss(cfg){
+if(!cfg||cfg.transparentChatComposer!==true)return "";
+var css=".dframe-root :is([data-chat-input-container],[data-testid=transcript-bottom-fade],[data-testid=transcript-bottom-backing-start],[data-testid=transcript-bottom-backing-end],[data-testid=transcript-bottom-gap],[data-testid=chat-column] [data-disclaimer]){background:transparent!important;backdrop-filter:none!important;-webkit-backdrop-filter:none!important}"
++".dframe-root [data-chat-input-container]::before,.dframe-root [data-chat-input-container]::after{background:transparent!important;box-shadow:none!important;backdrop-filter:none!important;-webkit-backdrop-filter:none!important}"
++".dframe-root [data-chat-input-container] :is([data-composer-card-holder],.rounded-composer:has([data-cds=ChatComposer])){background:transparent!important;backdrop-filter:none!important;-webkit-backdrop-filter:none!important}"
++".dframe-root [data-chat-input-container] [data-cds=ChatComposerChin]{background:transparent!important;box-shadow:none!important}";
+if(cfg.frostedReplyField===true)return css
++".dframe-root [data-chat-input-container] [data-cds=ChatComposer]{background:transparent!important;backdrop-filter:none!important;-webkit-backdrop-filter:none!important}"
++".dframe-root [data-chat-input-container] .rounded-composer:has([data-cds=ChatComposerEditor]){background:color-mix(in srgb,hsl(var(--bg-100)) 35%,transparent)!important;backdrop-filter:blur(var(--engine-glass-blur,20px)) saturate(1.2)!important;-webkit-backdrop-filter:blur(var(--engine-glass-blur,20px)) saturate(1.2)!important}";
+return css
++".dframe-root [data-chat-input-container] [data-cds=ChatComposer]{border-radius:var(--cds-radius-composer,14px)!important;background:color-mix(in srgb,hsl(var(--bg-100)) 30%,transparent)!important;backdrop-filter:blur(var(--engine-glass-blur,20px)) saturate(1.2)!important;-webkit-backdrop-filter:blur(var(--engine-glass-blur,20px)) saturate(1.2)!important}"
++".dframe-root [data-chat-input-container] .rounded-composer:has([data-cds=ChatComposerEditor]){background:color-mix(in srgb,hsl(var(--bg-100)) 35%,transparent)!important;backdrop-filter:none!important;-webkit-backdrop-filter:none!important}";
+}
+function __cdb_backdropCss(){
+return ""
++".dframe-root:where([data-engine-backdrop-on]) .dframe-content,.dframe-root:where([data-engine-backdrop-on]) .dframe-main,.dframe-root:where([data-engine-backdrop-on]) main.dframe-main,.dframe-root:where([data-engine-backdrop-on]) .dframe-content-inner,.dframe-root:where([data-engine-backdrop-on]) [data-testid=\"chat-column\"],.dframe-root:where([data-engine-backdrop-on]) .epitaxy-root{background:transparent!important;background-color:transparent!important}"
++".dframe-root:where([data-engine-backdrop-on]) .dframe-content{isolation:isolate!important}"
++".dframe-root:where([data-engine-backdrop-on]) .dframe-content>[data-engine-backdrop]{top:0!important}"
++".dframe-root:where([data-engine-backdrop-on]){--tile-page-ground:transparent!important}"
++".dframe-root:where([data-engine-backdrop-on]) .tiles-shell:not(.is-moving){--tile-page-ground:transparent!important;--tile-shell-ground:transparent!important;background:transparent!important}"
+// Chat's sticky input container is an outer shell, not the rounded field.
+// Clear only its backing layers; cards, focus rings and the field keep their fill.
++".dframe-root:where([data-engine-backdrop-on]) :is([data-chat-input-container],[data-testid=transcript-bottom-fade],[data-testid=transcript-bottom-backing-start],[data-testid=transcript-bottom-backing-end],[data-testid=transcript-bottom-gap],[data-testid=chat-column] [data-disclaimer]){background:transparent!important;backdrop-filter:none!important;-webkit-backdrop-filter:none!important}"
++".dframe-root:where([data-engine-backdrop-on]) [data-chat-input-container]::before,.dframe-root:where([data-engine-backdrop-on]) [data-chat-input-container]::after{background:transparent!important;box-shadow:none!important;backdrop-filter:none!important;-webkit-backdrop-filter:none!important}"
++".dframe-root:where([data-engine-backdrop-on]) [data-chat-input-container] :where([data-composer-card-holder],[data-cds=ChatComposer],.rounded-composer:has([data-cds=ChatComposer])){background:transparent!important;backdrop-filter:none!important;-webkit-backdrop-filter:none!important}"
++".dframe-root:where([data-engine-backdrop-on]) [data-chat-input-container] [data-cds=ChatComposerChin]{background:transparent!important;box-shadow:none!important}"
++".dframe-root:where([data-engine-backdrop-on]) :is([data-transcript-fade-strip],[data-scroll-fade],[data-docked-column-edge],.epitaxy-top-scrim,.epitaxy-bottom-scrim){background-image:none!important;background:transparent!important}"
++".dframe-root:where([data-engine-backdrop-on]) :is([data-code-composer-column],[data-docked-column-backing],[data-docked-column-edge],.epitaxy-titlebar){--epitaxy-transcript-surface:transparent!important;background-color:transparent!important}"
++".dframe-root:where([data-engine-backdrop-on]) [data-cds=Toolbar]>[data-cds-part=toolbar-ground],.dframe-root:where([data-engine-backdrop-on]) [data-cds=Page] [data-cds-part=page-header-ground]{background-color:transparent!important;background-image:none!important}"
++".dframe-root:where([data-engine-glass]):not([data-engine-glass-unsuited]){--cdb-glass-fill:color-mix(in srgb,var(--engine-glass-tint,hsl(var(--bg-100))) calc(var(--engine-glass-opacity,0.38) * 100%),transparent);--cdb-glass-fill-elevated:color-mix(in srgb,var(--engine-glass-tint,hsl(var(--bg-000))) calc(min(var(--engine-glass-opacity,0.38) + 0.16,0.9) * 100%),transparent);--cdb-glass-filter:blur(var(--engine-glass-blur,14px)) saturate(1.2)}"
++".dframe-root:where([data-engine-glass])[data-engine-glass-unsuited]{--cdb-glass-fill:color-mix(in srgb,hsl(var(--bg-100)) calc(var(--engine-glass-opacity,0.38) * 100%),transparent);--cdb-glass-fill-elevated:color-mix(in srgb,hsl(var(--bg-000)) calc(min(var(--engine-glass-opacity,0.38) + 0.16,0.9) * 100%),transparent);--cdb-glass-filter:blur(var(--engine-glass-blur,14px)) saturate(1.2)}"
++".dframe-root:where([data-engine-backdrop-on])[data-engine-glass-unsuited] [data-engine-backdrop]::after{content:\"\";position:absolute;inset:0;background:hsl(var(--bg-100) / 0.48);pointer-events:none}"
++".dframe-root:where([data-engine-backdrop-on]) [data-engine-backdrop] svg .cdb-flank-l{transform-origin:0px 1000px;transform:translateX(var(--cdb-flank-lx,0px)) scale(var(--cdb-flank-scale,1))}"
++".dframe-root:where([data-engine-backdrop-on]) [data-engine-backdrop] svg .cdb-flank-r{transform-origin:1600px 1000px;transform:translateX(var(--cdb-flank-rx,0px)) scale(var(--cdb-flank-scale,1))}"
++".dframe-root:where([data-engine-backdrop-on]) [data-engine-backdrop] svg .cdb-flank-lt{transform-origin:0px 0px;transform:translate(var(--cdb-flank-lx,0px),var(--cdb-hud-top,0px)) scale(var(--cdb-flank-scale,1))}"
++".dframe-root:where([data-engine-backdrop-on]) [data-engine-backdrop] svg .cdb-flank-rt{transform-origin:1600px 0px;transform:translate(var(--cdb-flank-rx,0px),var(--cdb-hud-top,0px)) scale(var(--cdb-flank-scale,1))}"
++".dframe-root:where([data-engine-backdrop-on]) [data-engine-backdrop] svg .cdb-pane-c{transform-origin:800px 1000px;transform:translateX(var(--cdb-pane-cx,0px)) scale(var(--cdb-flank-scale,1))}"
++".dframe-root:where([data-engine-glass]) .dframe-sidebar,:where([data-darker]) .dframe-root:where([data-engine-glass]) .dframe-sidebar,.dframe-root:where([data-engine-glass]):where([data-darker]) .dframe-sidebar{background-color:var(--cdb-glass-fill)!important;background-image:none!important;backdrop-filter:var(--cdb-glass-filter)!important;-webkit-backdrop-filter:var(--cdb-glass-filter)!important}"
++".dframe-root:where([data-engine-glass]) :where([data-user-message-bubble],[data-testid=\"start-card-environments\"],[data-testid=\"start-card-setup\"],.rounded-composer:has([data-cds=ChatComposerEditor])){background-color:var(--cdb-glass-fill-elevated)!important;backdrop-filter:var(--cdb-glass-filter)!important;-webkit-backdrop-filter:var(--cdb-glass-filter)!important}";
+}
+function __cdb_buildBackdropOnlyCss(cfg){
+var bd=__cdb_resolveBackdrop(cfg,null);
+var composerCss=__cdb_chatComposerCss(cfg);
+if(!bd.spec&&!composerCss)return null;
+return {css:(bd.spec?__cdb_backdropCss():"")+composerCss,font:false,spinnerJson:"null",backdropJson:bd.json,backdrop:bd.override,effectiveBackdrop:bd.effective,overlay:null,chrome:null};
+}
 function __cdb_buildCss(cfg,theme,name){
 theme=__cdb_effective(cfg,theme,name);
 var v=__cdb_variants(theme);
@@ -504,11 +633,12 @@ if(__cdb_isDark())css+=":root:not([data-mode=light]){"+__cdb_block(v.dark)+"}";
 css+=""
 +"html,body{color:var(--claude-foreground-color)!important}"
 +"#root,[id=root]{background:hsl(var(--bg-000))!important}"
-+".dframe-sidebar{background-color:hsl(var(--bg-200))!important}"
++".dframe-sidebar{background-color:hsl(var(--bg-200))!important;--df-web-sidebar-bg:hsl(var(--bg-200))!important}"
 +".dframe-content,.dframe-main,main.dframe-main{background-color:hsl(var(--bg-100))!important}"
 +".dframe-root{--df-z1:var(--bg-100)!important;--df-z2:var(--bg-200)!important;--df-sidebar-bg:hsl(var(--bg-200))!important;--df-surface-primary:hsl(var(--bg-100))!important;--df-hover:hsl(var(--text-000) / 0.06)!important;--df-selected:hsl(var(--text-000) / 0.12)!important}"
-+"[data-darker] .dframe-sidebar{background-color:hsl(var(--bg-300))!important}"
-+":root,.cds-root,.epitaxy-root,[data-mode=dark],[data-mode=light]{--cds-page-bg:hsl(var(--bg-200))!important;--cds-surface-0:hsl(var(--bg-200))!important;--cds-surface-1:hsl(var(--bg-100))!important;--cds-surface-2:hsl(var(--bg-100))!important;--cds-surface-3:hsl(var(--bg-000))!important;--cds-surface-panel:hsl(var(--bg-100))!important;--cds-surface-popover:hsl(var(--bg-000))!important;--surface-primary:hsl(var(--bg-100))!important;--surface-primary-elevated:hsl(var(--bg-000))!important;--surface-popover:hsl(var(--bg-000))!important;--surface-panel:hsl(var(--bg-100))!important;--surface-hud:hsl(var(--bg-200))!important;--cds-text-primary:hsl(var(--text-000))!important;--cds-text-secondary:hsl(var(--text-200))!important;--cds-text-muted:hsl(var(--text-400))!important;--cds-border:hsl(var(--border-200) / 0.18)!important;--cds-clay:hsl(var(--accent-brand))!important}"
++"[data-darker] .dframe-sidebar{background-color:hsl(var(--bg-300))!important;--df-web-sidebar-bg:hsl(var(--bg-300))!important}"
++__cdb_backdropCss()
++":root,.cds-root,.epitaxy-root,[data-mode=dark],[data-mode=light]{--cds-page-bg:hsl(var(--bg-200))!important;--cds-fizzy-lake-color-sidebar:hsl(var(--bg-200))!important;--cds-surface-0:hsl(var(--bg-200))!important;--cds-surface-1:hsl(var(--bg-100))!important;--cds-surface-2:hsl(var(--bg-100))!important;--cds-surface-3:hsl(var(--bg-000))!important;--cds-surface-panel:hsl(var(--bg-100))!important;--cds-surface-popover:hsl(var(--bg-000))!important;--surface-primary:hsl(var(--bg-100))!important;--surface-primary-elevated:hsl(var(--bg-000))!important;--surface-popover:hsl(var(--bg-000))!important;--surface-panel:hsl(var(--bg-100))!important;--surface-hud:hsl(var(--bg-200))!important;--cds-text-primary:hsl(var(--text-000))!important;--cds-text-secondary:hsl(var(--text-200))!important;--cds-text-muted:hsl(var(--text-400))!important;--cds-border:hsl(var(--border-200) / 0.18)!important;--cds-clay:hsl(var(--accent-brand))!important}"
 +":root,.cds-root,.epitaxy-root,[data-mode=dark],[data-mode=light]{--cds-neutral-450:hsl(var(--text-500))!important;--cds-neutral-500:hsl(var(--text-500))!important;--cds-neutral-550:color-mix(in srgb,hsl(var(--text-500)) 65%,hsl(var(--text-300)))!important;--cds-neutral-600:color-mix(in srgb,hsl(var(--text-500)) 40%,hsl(var(--text-300)))!important;--cds-neutral-650:color-mix(in srgb,hsl(var(--text-500)) 20%,hsl(var(--text-300)))!important;--cds-neutral-700:hsl(var(--text-300))!important;--cds-neutral-750:color-mix(in srgb,hsl(var(--text-300)) 60%,hsl(var(--text-000)))!important;--cds-neutral-800:color-mix(in srgb,hsl(var(--text-300)) 30%,hsl(var(--text-000)))!important;--cds-neutral-900:hsl(var(--text-000))!important;--cds-fill-primary:hsl(var(--text-000))!important;--cds-fill-primary-hover:hsl(var(--text-200))!important;--cds-on-primary:hsl(var(--bg-000))!important;--cds-fill-accent:hsl(var(--accent-100))!important;--cds-fill-accent-hover:color-mix(in srgb,hsl(var(--accent-100)) 85%,hsl(var(--text-000)))!important;--cds-text-accent:hsl(var(--accent-000))!important;--cds-bg-accent:hsl(var(--accent-900))!important;--cds-border-accent:hsl(var(--accent-100) / 0.5)!important;--cds-radio-group-card-selected:hsl(var(--accent-900))!important;--cds-on-accent:hsl(var(--oncolor-100))!important;--cds-fill-brand:hsl(var(--brand-000))!important;--cds-fill-brand-hover:hsl(var(--accent-brand))!important;--cds-clay-emphasized:hsl(var(--brand-000))!important;--cds-on-brand:hsl(var(--oncolor-100))!important;--cds-fill-pro:hsl(var(--accent-pro-100))!important;--cds-fill-pro-hover:color-mix(in srgb,hsl(var(--accent-pro-100)) 85%,hsl(var(--text-000)))!important;--cds-text-pro:hsl(var(--accent-pro-000))!important;--cds-bg-pro:hsl(var(--accent-pro-900))!important;--cds-border-pro:hsl(var(--accent-pro-100) / 0.5)!important;--cds-on-pro:hsl(var(--oncolor-100))!important;--cds-fill-danger:hsl(var(--danger-100))!important;--cds-fill-danger-hover:color-mix(in srgb,hsl(var(--danger-100)) 85%,hsl(var(--text-000)))!important;--cds-text-danger:hsl(var(--danger-000))!important;--cds-bg-danger:hsl(var(--danger-900))!important;--cds-border-danger:hsl(var(--danger-100) / 0.5)!important;--cds-on-danger:hsl(var(--oncolor-100))!important;--cds-fill-success:hsl(var(--success-100))!important;--cds-fill-success-hover:color-mix(in srgb,hsl(var(--success-100)) 85%,hsl(var(--text-000)))!important;--cds-text-success:hsl(var(--success-000))!important;--cds-bg-success:hsl(var(--success-900))!important;--cds-border-success:hsl(var(--success-100) / 0.5)!important;--cds-on-success:hsl(var(--oncolor-100))!important;--cds-text-warning:hsl(var(--warning-000))!important;--cds-bg-warning:hsl(var(--warning-900))!important;--cds-border-warning:hsl(var(--warning-100) / 0.5)!important}"
 +".epitaxy-top-scrim{background:linear-gradient(hsl(var(--bg-100)),transparent)!important}"
 +".epitaxy-bottom-scrim{background:linear-gradient(transparent,hsl(var(--bg-100)))!important}"
@@ -589,6 +719,7 @@ if(extra||themeExtra)__cdb_log("customCss appended ("+((extra?extra.length:0)+(t
 // Spinner spec: the active theme's `spinner` object (per-theme or flat-shared).
 var spinnerJson="null",spec=(theme&&theme.spinner)||(v.light&&v.light.spinner)||null;
 if(spec){try{spinnerJson=JSON.stringify(spec)}catch(e){spinnerJson="null"}}
+var bd=__cdb_resolveBackdrop(cfg,theme);
 // Spinner animation keyframes ship via insertCSS (SPINNER_INJECTION_NOTES 4) for
 // EVERY animation name, whether or not THIS theme uses one: shapes switch live, so
 // the sheet on the page must already carry the keyframes the next shape may want.
@@ -599,13 +730,16 @@ css+="@keyframes cdbBounce{0%,100%{transform:translateY(0)}50%{transform:transla
 css+="@keyframes cdbPulse{0%,100%{opacity:1}50%{opacity:.45}}";
 css+="@keyframes cdbFlipA{from{opacity:1}to{opacity:0}}";
 css+="@keyframes cdbFlipB{from{opacity:0}to{opacity:1}}";
-css+="svg[data-cdb-spinner].cdb-anim-spin{animation:cdbSpin 1s linear infinite;transform-origin:50% 50%;transform-box:fill-box}";
+css+="svg[data-cdb-spinner].cdb-anim-spin{animation:cdbSpin 1s linear infinite;transform-origin:50% 50%;transform-box:view-box}";
 css+="svg[data-cdb-spinner].cdb-anim-bounce{animation:cdbBounce .8s ease-in-out infinite;transform-origin:50% 50%;transform-box:fill-box}";
 css+="svg[data-cdb-spinner].cdb-anim-pulse{animation:cdbPulse 1.2s ease-in-out infinite}";
 css+="svg[data-cdb-spinner].cdb-anim-flip [data-cdb-frame=\"1\"]{animation:cdbFlipA 1s steps(2,jump-none) infinite}";
 css+="svg[data-cdb-spinner].cdb-anim-flip [data-cdb-frame=\"2\"]{animation:cdbFlipB 1s steps(2,jump-none) infinite}";
+css+="@media (prefers-reduced-motion:reduce){svg[data-cdb-spinner],svg[data-cdb-spinner] [data-cdb-frame]{animation:none!important}svg[data-cdb-spinner].cdb-anim-flip [data-cdb-frame=\"2\"]{opacity:0!important}}";
 if(spinnerJson!=="null")__cdb_log("Spinner spec present ("+spinnerJson.length+" chars JSON) for '"+name+"'");
-return {css:css,font:fontFlag,spinnerJson:spinnerJson,overlay:overlay?overlay.name:null,chrome:{light:__cdb_chromeHex(v.light),dark:__cdb_chromeHex(v.dark),lightText:__cdb_hslHex((v.light||{})["--text-200"]),darkText:__cdb_hslHex((v.dark||{})["--text-200"])}};
+if(bd.effective)__cdb_log("Backdrop scene '"+bd.effective+"' resolved for '"+name+"'");
+css+=__cdb_chatComposerCss(cfg);
+return {css:css,font:fontFlag,spinnerJson:spinnerJson,backdropJson:bd.json,backdrop:bd.override,effectiveBackdrop:bd.effective,overlay:overlay?overlay.name:null,chrome:{light:__cdb_chromeHex(v.light),dark:__cdb_chromeHex(v.dark),lightText:__cdb_hslHex((v.light||{})["--text-200"]),darkText:__cdb_hslHex((v.dark||{})["--text-200"])}};
 }
 // --- top-level key persistence (comment-preserving) -------------------------
 // Walk the RAW text tracking string/comment state and return the value span of
@@ -697,7 +831,7 @@ return __cdb_writeFile(__cdb_cfgPathC,out);
 function __cdb_persist(name){return __cdb_persistKey("activeTheme",name||"")}
 // --- live stylesheet bookkeeping ------------------------------------------
 // What is applied right now (rewritten by apply(), read by every later window).
-var __cdb_state={name:null,src:"",css:"",font:false,spinnerJson:"null",overlay:null,chrome:null};
+var __cdb_state={name:null,src:"",css:"",font:false,spinnerJson:"null",backdropJson:"null",backdrop:null,effectiveBackdrop:null,overlay:null,chrome:null,dark:__cdb_isDark()};
 // webContents -> the insertCSS key we inserted last (null = nothing inserted).
 var __cdb_wcKeys=new Map();
 function __cdb_trackWc(wc){
@@ -714,7 +848,13 @@ if(old){var r=wc.removeInsertedCSS(old);if(r&&r.catch)r.catch(function(){})}
 __cdb_paintWindow(wc);
 if(!__cdb_state.css)return;
 var q=wc.insertCSS(__cdb_state.css);
-if(q&&q.then)q.then(function(k){if(!wc.isDestroyed())__cdb_wcKeys.set(wc,k)},function(e){__cdb_log("insertCSS rejected: "+(e&&e.message))});
+if(q&&q.then)q.then(function(k){
+if(wc.isDestroyed())return;
+// Untracked while the insert was pending (dom-ready saw a page we do not own): drop the key and do
+// not re-track. It is never removed: keys are per-renderer-process counters, so a late key could
+// name an unrelated sheet in the new document.
+if(__cdb_wcKeys.has(wc))__cdb_wcKeys.set(wc,k);
+},function(e){__cdb_log("insertCSS rejected: "+(e&&e.message))});
 }catch(e){__cdb_log("insertCSS error: "+e.message)}
 }
 function __cdb_restyleAll(){
@@ -728,14 +868,13 @@ return n;
 # web-contents-created/dom-ready injection hook.
 const THEME_INJECTION_JS_TAIL =
   """
-// --- live spinner push -----------------------------------------------------
-// One payload, used both at dom-ready and on every live switch: the spec, then the
-// injector source. The injector installs its engine only once per window and then
-// just calls window.__cdbSpinnerApply(spec) - so re-running it re-themes the glyphs
-// already on screen (spec) or puts Claude's own back (null). That is what makes a
-// theme change visible in the spinner without a restart.
+// --- live spinner & backdrop push ------------------------------------------
+// One payload, used both at dom-ready and on every live switch: the spinner and
+// backdrop specs, then the two injector sources. Each injector installs its engine
+// only once per window and then just calls window.__cdbSpinnerApply(spec) and
+// window.__cdbBackdropApply(spec).
 function __cdb_spinnerPayload(){
-return "var __CDB_SPINNER_SPEC="+__cdb_state.spinnerJson+";\n"+__cdb_spinnerSrc;
+return "var __CDB_SPINNER_SPEC="+__cdb_state.spinnerJson+";\nvar __CDB_BACKDROP_SPEC="+(__cdb_state.backdropJson||"null")+";\nvar __CDB_IS_DARK="+(__cdb_isDark()?"true":"false")+";\n"+__cdb_spinnerSrc+"\n"+__cdb_backdropSrc;
 }
 function __cdb_spinnerOne(wc){
 try{
@@ -760,7 +899,7 @@ if(theme&&theme.hidden===true){delete map[name];return}
 var v=__cdb_variants(theme);
 if(!v)return;
 if(!map[name])order.push(name);
-map[name]={name:name,displayName:(theme&&typeof theme.name==="string"&&theme.name)||__cdb_pretty(name),source:src,category:(theme&&typeof theme.category==="string"&&theme.category)||"",hidden:false,light:v.light,dark:v.dark};
+map[name]={name:name,displayName:(theme&&typeof theme.name==="string"&&theme.name)||__cdb_pretty(name),source:src,category:(theme&&typeof theme.category==="string"&&theme.category)||"",blurb:(theme&&typeof theme.blurb==="string"&&theme.blurb)||"",backdrop:__cdb_themeBackdropId(theme),hidden:false,light:v.light,dark:v.dark};
 }
 for(k in __cdb_community)put(k,"community",__cdb_community[k]);
 for(k in __cdb_builtins)put(k,"builtin",__cdb_builtins[k]);
@@ -773,7 +912,12 @@ return out;
 function __cdb_applyTheme(name){
 try{
 if(name===null||name===undefined||name===""){
-__cdb_state={name:null,src:"",css:"",font:false,spinnerJson:"null",overlay:null,chrome:null};
+var cfg0=__cdb_loadCfg(),bdOnly=__cdb_buildBackdropOnlyCss(cfg0),bd0=__cdb_resolveBackdrop(cfg0,null);
+if(bdOnly){
+__cdb_state={name:null,src:"",css:bdOnly.css,font:false,spinnerJson:"null",backdropJson:bdOnly.backdropJson,backdrop:bdOnly.backdrop,effectiveBackdrop:bdOnly.effectiveBackdrop,overlay:null,chrome:null,dark:__cdb_isDark()};
+}else{
+__cdb_state={name:null,src:"",css:"",font:false,spinnerJson:"null",backdropJson:"null",backdrop:bd0.override,effectiveBackdrop:null,overlay:null,chrome:null,dark:__cdb_isDark()};
+}
 var m=__cdb_restyleAll(),ms=__cdb_spinnerAll(),rp=__cdb_persist("");
 if(!rp.ok)return {ok:false,error:"reverted "+m+" window(s) but could not save: "+rp.error};
 __cdb_log("Reverted to the stock look in "+m+" window(s), restored the glyph in "+ms);
@@ -784,7 +928,7 @@ var canon=__cdb_resolveName(name),cfg=__cdb_loadCfg(),hit=__cdb_lookup(cfg,canon
 if(!hit)return {ok:false,error:"'"+name+"' is not a user, built-in, or community theme"};
 var built=__cdb_buildCss(cfg,hit.theme,canon);
 if(!built)return {ok:false,error:"'"+canon+"' has neither light/dark variants nor --token keys"};
-__cdb_state={name:canon,src:hit.src,css:built.css,font:built.font,spinnerJson:built.spinnerJson,overlay:built.overlay,chrome:built.chrome};
+__cdb_state={name:canon,src:hit.src,css:built.css,font:built.font,spinnerJson:built.spinnerJson,backdropJson:built.backdropJson,backdrop:built.backdrop,effectiveBackdrop:built.effectiveBackdrop,overlay:built.overlay,chrome:built.chrome,dark:__cdb_isDark()};
 var n=__cdb_restyleAll(),ns=__cdb_spinnerAll(),p=__cdb_persist(canon);
 if(!p.ok)return {ok:false,error:"applied to "+n+" window(s) but could not save: "+p.error};
 __cdb_log("Applied "+hit.src+" theme '"+canon+"' to "+n+" window(s) (spinner pushed to "+ns+"), saved to "+p.path);
@@ -796,7 +940,7 @@ return {ok:true,saved:_path.basename(p.path)};
 // An unset activeTheme reverts to stock. Identical output -> no window is touched.
 function __cdb_reload(reason){
 try{
-var cfg=__cdb_loadCfg(),raw=cfg.activeTheme,next={name:null,src:"",css:"",font:false,spinnerJson:"null",overlay:null,chrome:null};
+var cfg=__cdb_loadCfg(),raw=cfg.activeTheme,bd0=__cdb_resolveBackdrop(cfg,null),next={name:null,src:"",css:"",font:false,spinnerJson:"null",backdropJson:"null",backdrop:bd0.override,effectiveBackdrop:null,overlay:null,chrome:null,dark:__cdb_isDark()};
 if(cfg.__parseError)return {ok:false,error:"a config file has a syntax error (see log); keeping the current theme"};
 if(raw!==null&&raw!==undefined&&raw!==""){
 if(typeof raw!=="string")return {ok:false,error:"activeTheme must be a string"};
@@ -804,14 +948,17 @@ var canon=__cdb_resolveName(raw),hit=__cdb_lookup(cfg,canon);
 if(!hit)return {ok:false,error:"'"+raw+"' is not a user, built-in, or community theme"};
 var built=__cdb_buildCss(cfg,hit.theme,canon);
 if(!built)return {ok:false,error:"'"+canon+"' has neither light/dark variants nor --token keys"};
-next={name:canon,src:hit.src,css:built.css,font:built.font,spinnerJson:built.spinnerJson,overlay:built.overlay,chrome:built.chrome};
+next={name:canon,src:hit.src,css:built.css,font:built.font,spinnerJson:built.spinnerJson,backdropJson:built.backdropJson,backdrop:built.backdrop,effectiveBackdrop:built.effectiveBackdrop,overlay:built.overlay,chrome:built.chrome,dark:__cdb_isDark()};
+}else{
+var bdOnly=__cdb_buildBackdropOnlyCss(cfg);
+if(bdOnly)next={name:null,src:"",css:bdOnly.css,font:false,spinnerJson:"null",backdropJson:bdOnly.backdropJson,backdrop:bdOnly.backdrop,effectiveBackdrop:bdOnly.effectiveBackdrop,overlay:null,chrome:null,dark:__cdb_isDark()};
 }
-if(next.name===__cdb_state.name&&next.css===__cdb_state.css&&next.font===__cdb_state.font&&next.spinnerJson===__cdb_state.spinnerJson&&next.overlay===__cdb_state.overlay)return {ok:true,changed:false,name:next.name,overlay:next.overlay};
+if(next.name===__cdb_state.name&&next.css===__cdb_state.css&&next.font===__cdb_state.font&&next.spinnerJson===__cdb_state.spinnerJson&&next.backdropJson===__cdb_state.backdropJson&&next.backdrop===__cdb_state.backdrop&&next.overlay===__cdb_state.overlay&&next.dark===__cdb_state.dark)return {ok:true,changed:false,name:next.name,overlay:next.overlay,backdrop:next.backdrop,effectiveBackdrop:next.effectiveBackdrop};
 __cdb_state=next;
 var n=__cdb_restyleAll();
 __cdb_spinnerAll();
 __cdb_log("reload ("+reason+"): applied '"+(next.name||"")+"' to "+n+" window(s)");
-return {ok:true,changed:true,name:next.name,overlay:next.overlay,windows:n};
+return {ok:true,changed:true,name:next.name,overlay:next.overlay,backdrop:next.backdrop,effectiveBackdrop:next.effectiveBackdrop,windows:n};
 }catch(e){return {ok:false,error:(e&&e.message)||String(e)}}
 }
 // Persist "themeOverlay" and re-apply. "" or null clears it. The name must resolve and
@@ -835,6 +982,32 @@ __cdb_log((canon?"Overlay set to '"+canon+"'":"Overlay cleared")+", saved to "+p
 return {ok:true,overlay:canon,changed:rl.changed===true,saved:_path.basename(p.path)};
 }catch(e){return {ok:false,error:(e&&e.message)||String(e)}}
 }
+// Persist "activeBackdrop" and re-apply. "" / null / "auto" follows the active theme's
+// default backdrop; "off" / "none" disables backdrops; a scene id pins that scene.
+function __cdb_setBackdrop(name){
+try{
+var val="",scenes=globalThis.__cdbBackdropScenes,p,rl;
+if(name!==null&&name!==undefined&&name!==""&&name!=="auto"){
+if(typeof name!=="string")return {ok:false,error:"backdrop name must be a string"};
+var trimmed=name.trim();
+if(trimmed==="off"||trimmed==="none"){val="off"}
+else{
+if(!scenes||!scenes.get||!scenes.get(trimmed))return {ok:false,error:"'"+trimmed+"' is not a known backdrop scene"};
+val=trimmed;
+}
+}
+p=__cdb_persistKey("activeBackdrop",val);
+if(!p.ok)return {ok:false,error:"could not save activeBackdrop: "+p.error};
+rl=__cdb_reload("backdrop");
+if(!rl.ok)return {ok:false,error:"saved activeBackdrop to "+_path.basename(p.path)+" but could not apply it: "+rl.error};
+__cdb_log((val?("Backdrop set to '"+val+"'"):"Backdrop set to follow theme")+", saved to "+p.path+(rl.changed?" (re-applied)":" (no visible change)"));
+return {ok:true,backdrop:__cdb_state.backdrop,effectiveBackdrop:__cdb_state.effectiveBackdrop,changed:rl.changed===true,saved:_path.basename(p.path)};
+}catch(e){return {ok:false,error:(e&&e.message)||String(e)}}
+}
+function __cdb_backdropCandidates(){
+var scenes=globalThis.__cdbBackdropScenes;
+return (scenes&&scenes.list)?scenes.list():[];
+}
 // Candidate overlays for Settings: every user theme (config files + themes.d/) that
 // yields at least one "--" token after "extends" resolution. Hidden ones first (that
 // is what generator files set), then alphabetical. Built-ins/community are not
@@ -849,7 +1022,7 @@ out.push({name:k,displayName:(t&&typeof t.name==="string"&&t.name)||__cdb_pretty
 out.sort(function(a,b){if(a.hidden!==b.hidden)return a.hidden?-1:1;return a.name<b.name?-1:(a.name>b.name?1:0)});
 return out;
 }
-globalThis.__cdbThemes={version:3,list:__cdb_listEntries,active:function(){return __cdb_state.name},overlay:function(){return __cdb_state.overlay},apply:__cdb_applyTheme,reload:__cdb_reload,setOverlay:__cdb_setOverlay,overlays:__cdb_overlayCandidates,configPath:__cdb_cfgPathC,themesDir:__cdb_themesDir};
+globalThis.__cdbThemes={version:3,list:__cdb_listEntries,active:function(){return __cdb_state.name},overlay:function(){return __cdb_state.overlay},backdrop:function(){return __cdb_state.backdrop||""},effectiveBackdrop:function(){return __cdb_state.effectiveBackdrop},apply:__cdb_applyTheme,reload:__cdb_reload,setOverlay:__cdb_setOverlay,overlays:__cdb_overlayCandidates,setBackdrop:__cdb_setBackdrop,backdrops:__cdb_backdropCandidates,configPath:__cdb_cfgPathC,themesDir:__cdb_themesDir};
 // --- file watcher -----------------------------------------------------------
 // Watch DIRECTORIES, not files: our writer and tools like matugen write tmp+rename,
 // which orphans a file-level inotify watch. Events for the two config files (and
@@ -913,8 +1086,17 @@ var __cdb_cfg0=__cdb_loadCfg();
 if(!__cdb_cfg0.__present)__cdb_log("No config file found (claude-desktop-extra.json/.jsonc); registry installed, no theme applied");
 else{
 var __cdb_name0=__cdb_cfg0.activeTheme;
-if(!__cdb_name0)__cdb_log("No activeTheme set; registry installed, no theme applied");
-else{
+if(!__cdb_name0){
+var __cdb_bdOnly0=__cdb_buildBackdropOnlyCss(__cdb_cfg0);
+if(__cdb_bdOnly0){
+__cdb_state={name:null,src:"",css:__cdb_bdOnly0.css,font:false,spinnerJson:"null",backdropJson:__cdb_bdOnly0.backdropJson,backdrop:__cdb_bdOnly0.backdrop,effectiveBackdrop:__cdb_bdOnly0.effectiveBackdrop,overlay:null,chrome:null,dark:__cdb_isDark()};
+__cdb_log("No activeTheme set; applied standalone appearance options"+(__cdb_bdOnly0.effectiveBackdrop?" (backdrop '"+__cdb_bdOnly0.effectiveBackdrop+"')":""));
+}else{
+var __cdb_bd0=__cdb_resolveBackdrop(__cdb_cfg0,null);
+__cdb_state.backdrop=__cdb_bd0.override;
+__cdb_log("No activeTheme set; registry installed, no theme applied");
+}
+}else{
 if(__cdb_aliases[__cdb_name0]){__cdb_log("Alias '"+__cdb_name0+"' -> '"+__cdb_aliases[__cdb_name0]+"'");__cdb_name0=__cdb_aliases[__cdb_name0]}
 __cdb_log("Active theme: "+__cdb_name0);
 var __cdb_hit0=__cdb_lookup(__cdb_cfg0,__cdb_name0);
@@ -928,7 +1110,7 @@ __cdb_log("Press Ctrl+Shift+T to browse every theme, or define \""+__cdb_name0+"
 var __cdb_built0=__cdb_buildCss(__cdb_cfg0,__cdb_hit0.theme,__cdb_name0);
 if(!__cdb_built0)__cdb_log("Theme '"+__cdb_name0+"' has neither light/dark variants nor --token keys; nothing applied");
 else{
-__cdb_state={name:__cdb_name0,src:__cdb_hit0.src,css:__cdb_built0.css,font:__cdb_built0.font,spinnerJson:__cdb_built0.spinnerJson,overlay:__cdb_built0.overlay,chrome:__cdb_built0.chrome};
+__cdb_state={name:__cdb_name0,src:__cdb_hit0.src,css:__cdb_built0.css,font:__cdb_built0.font,spinnerJson:__cdb_built0.spinnerJson,backdropJson:__cdb_built0.backdropJson,backdrop:__cdb_built0.backdrop,effectiveBackdrop:__cdb_built0.effectiveBackdrop,overlay:__cdb_built0.overlay,chrome:__cdb_built0.chrome,dark:__cdb_isDark()};
 __cdb_log("Loaded "+__cdb_hit0.src+" theme '"+__cdb_name0+"' (dual-variant) with element overrides");
 }
 }
@@ -946,13 +1128,33 @@ try{if(_nt&&_nt.on)_nt.on("updated",function(){setTimeout(function(){var r=__cdb
 // localhost dev servers - shows third-party content that must keep its own colors.
 // app://localhost has the opaque origin "null", so normalise to protocol + "//" + host.
 var __cdb_themeOrigins=["https://claude.ai","https://preview.claude.ai","https://claude.com","https://preview.claude.com","app://localhost"];
+function __cdb_originOf(u){var o=u.origin;if(!o||o==="null")o=u.protocol+"//"+u.host;return o}
 function __cdb_themable(url){
 try{
 var u=new URL(url);
 if(u.protocol==="file:")return u.pathname.indexOf("/app.asar/.vite/renderer/")>=0;
-var o=u.origin;
-if(!o||o==="null")o=u.protocol+"//"+u.host;
-return __cdb_themeOrigins.indexOf(o)>=0;
+return __cdb_themeOrigins.indexOf(__cdb_originOf(u))>=0;
+}catch(e){return false}
+}
+// Matches the windows of upstream's window manager: every pop-out window the main view opens (Code
+// sessions, chats, projects, the shell of a popped-out artifact, and the idle pool windows upstream
+// pre-creates). Each is a window.open("about:blank") child whose document the main view's realm
+// portals into, so its URL is never themable. Content from other sites inside them lives in iframes
+// or separate views that insertCSS/executeJavaScript on this wc do not reach. Accept an about:blank
+// "window" that owns its BrowserWindow and whose opener is a MAIN frame (parent===null) on one of
+// __cdb_themeOrigins (a file: opener is refused). Any error or unknown means "no".
+function __cdb_popoutChild(wc,url){
+try{
+if(url!=="about:blank"||wc.getType()!=="window")return false;
+// It must be the own webContents of a BrowserWindow (the window manager's popout): a view hosted in
+// another window (the main view, a WebContentsView, a webview guest) resolves to its HOST window.
+var w=_BW&&_BW.fromWebContents&&_BW.fromWebContents(wc);
+if(!w||w.webContents!==wc||(w.isDestroyed&&w.isDestroyed()))return false;
+var o=wc.opener;
+if(!o||o.parent!==null)return false;
+if(typeof o.url!=="string")return false;
+var ou=new URL(o.url);
+return ou.protocol!=="file:"&&__cdb_themeOrigins.indexOf(__cdb_originOf(ou))>=0;
 }catch(e){return false}
 }
 // Reads __cdb_state at dom-ready, so a window opened after a live switch gets
@@ -963,39 +1165,46 @@ try{
 var url=wc.getURL()||"";
 // A tracked page that navigated to a third-party URL leaves the registry, so a
 // later live switch does not repaint it.
-if(!__cdb_themable(url)){__cdb_wcKeys.delete(wc);return}
+var pop=!__cdb_themable(url)&&__cdb_popoutChild(wc,url);
+if(!pop&&!__cdb_themable(url)){__cdb_wcKeys.delete(wc);return}
 if(url.indexOf("cdb-theme-picker")>=0)return;
 __cdb_trackWc(wc);
+if(__cdb_state.dark!==__cdb_isDark())__cdb_reload("nativeTheme "+(__cdb_isDark()?"dark":"light"));
 if(!__cdb_state.css)return;
 __cdb_styleOne(wc);
 if(__cdb_state.font){var qf=wc.executeJavaScript("window.__themeFontOverride=true;");if(qf&&qf.catch)qf.catch(function(){})}
 __cdb_spinnerOne(wc);
-__cdb_log("Injected CSS+JS into "+url);
+var po="";
+if(pop)try{po=__cdb_originOf(new URL(wc.opener.url))}catch(e){}
+__cdb_log("Injected CSS+JS into "+url+(pop?" (popout child of "+po+")":""));
 }catch(e){__cdb_log("dom-ready hook error: "+e.message)}
 });
 });
 })();"""
 
 # Assemble the full IIFE: HEAD (helpers + built-ins), the compile-time-validated
-# gaming palettes merged into the built-ins, the community palette map, MID
-# (config/resolve/build/persist/bookkeeping), the staticRead'd spinner injector as a JS
-# string literal (escapeJson yields a quoted, fully-escaped literal suitable for
-# executeJavaScript), then TAIL.
+# gaming and scene palettes merged into the built-ins, the backdrop scene registry,
+# the community palette map, MID (config/resolve/build/persist/bookkeeping), the
+# staticRead'd spinner & backdrop injectors as JS string literals, then TAIL.
 const THEME_INJECTION_JS =
   THEME_INJECTION_JS_HEAD & THEME_INJECTION_JS_GAMING_A & GAMING_JSON &
-  THEME_INJECTION_JS_GAMING_B & THEME_INJECTION_JS_MID_A & COMMUNITY_JSON &
+  THEME_INJECTION_JS_GAMING_B & SCENES_JSON & THEME_INJECTION_JS_SCENES_B & "\n" &
+  BACKDROP_SCENES_JS & "\n" & THEME_INJECTION_JS_MID_A & COMMUNITY_JSON &
   THEME_INJECTION_JS_MID_B & "\nvar __cdb_spinnerSrc=" & escapeJson(SPINNER_INJECTOR_JS) &
-  ";\n" & THEME_INJECTION_JS_TAIL
+  ";\nvar __cdb_backdropSrc=" & escapeJson(BACKDROP_INJECTOR_JS) & ";\n" &
+  THEME_INJECTION_JS_TAIL
 
 # Positive end-state markers (Rule 6). ALL must be present after patching, and all are
 # what an "already applied" run must find: the dual-variant css build, the
 # always-installed registry the theme picker talks to, the gaming palettes merged into
 # the built-ins, and the live spinner API the switch pushes into every window.
 const MARKERS = [
-  "__cdb_dualvariant", "globalThis.__cdbThemes=",
-  "__cdb_builtins[__cdb_gk]=__cdb_gaming[__cdb_gk]", "window.__cdbSpinnerApply",
-  "reload:__cdb_reload", "function __cdb_effective(", "setOverlay:__cdb_setOverlay",
-  "function __cdb_persistKey(",
+  "__cdb_dualvariant", "globalThis.__cdbThemes=", "function __cdb_chatComposerCss(",
+  "__cdb_builtins[__cdb_gk]=__cdb_gaming[__cdb_gk]",
+  "__cdb_builtins[__cdb_sk]=__cdb_scenes[__cdb_sk]", "window.__cdbSpinnerApply",
+  "window.__cdbBackdropApply", "reload:__cdb_reload", "function __cdb_effective(",
+  "setOverlay:__cdb_setOverlay", "setBackdrop:__cdb_setBackdrop",
+  "function __cdb_persistKey(", "transcript-bottom-backing-start",
 ]
 
 proc apply*(input: string): string =
@@ -1040,6 +1249,8 @@ proc apply*(input: string): string =
   echo "  [OK] Bundled community palettes: " & $COMMUNITY_COUNT
   echo "  [OK] Bundled gaming palettes: " & $GAMING_COUNT &
     " (builtin tier, own picker section)"
+  echo "  [OK] Bundled scene palettes: " & $SCENES_COUNT &
+    " (builtin tier, Scenes picker section)"
 
 when isMainModule:
   if paramCount() != 1:

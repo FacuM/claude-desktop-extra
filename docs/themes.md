@@ -6,20 +6,25 @@ From picking a bundled palette to recoloring the app from your wallpaper, in ord
 |------|--------------|
 | [1. Pick a theme](#1-pick-a-theme) | a new look in two keystrokes, no file |
 | [2. Set it in the config file](#2-set-it-in-the-config-file) | one line, survives reinstalls |
-| [3. Themes that ship with the app](#3-themes-that-ship-with-the-app) | 97 palettes to choose from |
+| [3. Themes that ship with the app](#3-themes-that-ship-with-the-app) | 124 palettes and 34 animated SVG backdrops to choose from |
 | [4. Tweak a theme with `extends`](#4-tweak-a-theme-with-extends) | a bundled theme with your accent |
 | [5. Write your own theme](#5-write-your-own-theme) | full control over every color |
 | [6. Dynamic themes from your wallpaper](#6-dynamic-themes-from-your-wallpaper-matugen-pywal-wallust) | wallpaper accents on any theme, live |
 | [7. Example configurations](#7-example-configurations) | every example in one list |
 | [Reference](#reference) | schema, tokens, palettes |
 
-Every theme is **dual light/dark**: it ships a `light` and a `dark` palette, and the app's own toggle (Settings → Appearance) picks the matching one live. Colors are CSS variables injected into every app window (chat, sidebar, Code/Cowork, dialogs, Quick Entry), never into third-party pages in the browser pane; every bundled theme is contrast-checked (WCAG AA).
+Every theme is **dual light/dark**: it ships a `light` and a `dark` palette, and the app's own toggle (Settings → Appearance) picks the matching one live. Colors are CSS variables injected into every app window (chat, sidebar, Code/Cowork, pop-out windows, dialogs, Quick Entry), never into third-party pages in the browser pane; every bundled theme is contrast-checked (WCAG AA).
+
+With an animated backdrop active, Chat's message-input backing and controls
+footer stay clear; the glass surface follows the rounded input field instead of
+the full-height square wrapper. Turning backdrops off keeps the original solid
+backing. Approval cards and focus rings retain their own surfaces.
 
 ## 1. Pick a theme
 
 Press <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd> anywhere in the app. A searchable picker opens with every theme available to you, each card showing a dark and a light row of swatches; click one and it applies immediately in every open window, no restart and no config file. Your choice is saved to `claude-desktop-extra.jsonc` with any comments in it left intact. The same list is also in the app's Settings dialog under **Extra → Themes**, next to an **Extra → Anthropic Features** panel that exposes the [feature flags](feature-flags.md) as switches. Both places also show an **Overlay** bar when a [`themeOverlay`](#6-dynamic-themes-from-your-wallpaper-matugen-pywal-wallust) is merged over your theme: it names the overlay, marks the active card with an `overlay` badge, and has a **Turn off** button; when none is active you can pick one of your own themes there and apply it, no config file needed.
 
-![Settings → Extra → Themes: the Overlay bar, your own themes, then the Gaming and Common sections](extra/themes.png)
+![Settings → Extra → Themes: the Overlay bar, your own themes, then the Gaming & Shows and Common sections](extra/themes.png)
 
 ## 2. Set it in the config file
 
@@ -49,9 +54,15 @@ The Mario theme ships a **light "overworld"** and a **dark "underground"** varia
 | `catppuccin-frappe` | Latte | Frappe | cat |
 | `catppuccin-latte` | Latte | Mocha | coffee cup |
 
-**6 gaming palettes** form their own **Gaming** section in the picker and in Settings → Extra → Themes, with Mario joining them: `playstation` (PS1 console gray / charcoal, button-symbol status colors, spinning button glyphs), `gameboy` (DMG shell / pea-green LCD, d-pad), `final-fantasy` (parchment / menu blue, crystal), `zelda` (forest green and gold, a two-frame walking hero), `warcraft` (parchment gold / dark brown, a two-frame peon at work) and `dragonball` (sky and white / deep blue, a spinning 4-star ball). They resolve at built-in rank, so `"activeTheme": "zelda"` is enough.
+**13 gaming & show palettes** form their own **Gaming & Shows** section in the picker and in Settings → Extra → Themes, with Mario joining them (14 total, each paired with a bespoke dual-mode animated SVG backdrop): `bfdi` (**Battle for Dream Island**: Goiky plains, Dream Island's golden gates & Yoyleland night meadow with a Lollipop & Pin flip duo spinner), `gta-i` (top-down neon pager grid), `gta-ii` (dusk Zaibatsu respect meters), `gta-iii` (Liberty City pager & radar rain), `gta-iv` (Broker Bridge fog & bowling pins), `gta-v` (Los Santos sunset palms & HUD wheel), `gta-vi` (Vice City pink-cyan neon palms), `playstation` (PS1 console gray / charcoal, button-symbol status colors, floating △○✕□ symbols), `gameboy` (DMG shell / pea-green LCD, d-pad), `final-fantasy` (parchment / menu blue, spinning crystal & Lifestream motes), `zelda` (forest green and gold, Triforce & Lost Woods fairies), `warcraft` (parchment gold / dark brown, arcane runes & forge embers) and `dragonball` (sky and white / deep blue, flying Nimbus, Shenron & 7 Dragon Balls). They resolve at built-in rank, so `"activeTheme": "bfdi"` or `"activeTheme": "gta-vi"` is enough (themes categorized `"gaming"` or `"shows"` land in **Gaming & Shows**).
 
-**84 community palettes** ship alongside them, converted from the [Noctalia community-palettes](https://github.com/noctalia-dev/community-palettes) collection - Rose Pine, Gruvbox, Everforest, Kanagawa, Solarized, Tokyo Night, the Catppuccin accent variants and more. Each is a full dual light/dark set, so `"activeTheme": "<slug>"` is all it takes, and each carries a spinner glyph drawn from its name or colors. Browse all 97 with their swatches in **[themes/PALETTES.md](../themes/PALETTES.md)**.
+![GTA I theme with live animated police-and-taxi chase, pager and wanted HUD](extra/themes-gta-i.gif)
+
+*`gta-i` dark mode: yellow pager, top-right cop-head wanted bar and `$` cash HUD, Police Cruiser spinner, frosted message input, and looping Police Cruiser vs. Taxi chase.*
+
+**20 animated scene palettes** form the **Scenes** section, adapted from Anthropic's [Claude Code interface mod examples](https://code.claude.com/docs/en/plugins/mods/interface#put-a-backdrop-behind-the-conversation) (`honu-lagoon`, `koi-mosaic`, `halftone-dawn`, `halftone-dusk`, `plotter-tide`, `plotter-tide-night`, `dither-dunes`, `dither-dunes-night`, `paper-garden`, `paper-garden-kraft`, `night-reef`, `snow-pines`, `braille-stars`, `teletext-clouds`, `vector-range`, `departure-board`, `blueprint`, `deep-water`, `aurora`, `ember`), each with its own bespoke monochrome spinner and working across Chat, Cowork and Code without installing any plugin. Any backdrop scene can be pinned over any theme (or turned off with `"activeBackdrop": "off"`) from the **Backdrop** selector in <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd> and Settings → Extra → Themes, and works together with **Transparent window**.
+
+**84 community palettes** ship alongside them, converted from the [Noctalia community-palettes](https://github.com/noctalia-dev/community-palettes) collection - Rose Pine, Gruvbox, Everforest, Kanagawa, Solarized, Tokyo Night, the Catppuccin accent variants and more. Each is a full dual light/dark set, so `"activeTheme": "<slug>"` is all it takes, and each carries a spinner glyph and a default animated backdrop scene. Browse the palettes in **[themes/PALETTES.md](../themes/PALETTES.md)**.
 
 ## 4. Tweak a theme with `extends`
 
@@ -132,8 +143,8 @@ Template values are HSL triplets built from matugen's `.hue`/`.saturation`/`.lig
 
 **Window shape.** Two switches in Settings -> Extra -> Community Features change the main window:
 
-- **Hide window controls** drops the min/max/close buttons (you then close and minimize through your WM). Window edges still resize normally. Also `claude-desktop --no-window-controls` for a single launch.
-- **Native titlebar** uses the system frame instead of the integrated titlebar. Also `claude-desktop --native-titlebar`.
+- **Hide window controls** drops the min/max/close buttons (you then close and minimize through your WM; pop-out windows get the window manager's frame). Window edges still resize normally. Also `claude-desktop --no-window-controls` for a single launch.
+- **Native titlebar** uses the system frame instead of the integrated titlebar, in pop-out windows too. Also `claude-desktop --native-titlebar`.
 
 Both are read when the main window is created, so they take effect on the next start; each row shows a "Restart now" button while its saved switch and the running window disagree. In both modes the header's icons move up to the window edge instead of leaving room for the buttons.
 
@@ -172,3 +183,26 @@ The whole desktop setup this was tested with (matugen config, GTK color template
 - [themes/PALETTES.md](../themes/PALETTES.md) - all 97 bundled palettes with swatches.
 - [contrib/matugen/README.md](../contrib/matugen/README.md) - the four matugen templates, the mode script and their setup.
 - [feature-flags.md](feature-flags.md) - the Extra → Anthropic Features panel next to the theme list.
+
+## Message input appearance
+
+Settings → Extra → Themes → Message input appearance → **Frosted message input** (also under
+Community → App and window) replaces the opaque Chat backing with a translucent,
+frosted outer input panel. The panel uses the native input corner radius, so its
+top corners follow the rounded input field. The full-width bottom fade, opaque
+side strips and controls-footer shadow are cleared. Editor behavior, approval
+cards and layout stay intact. Scrolling text may show behind surrounding
+controls. Off is the default and leaves the current message-input appearance unchanged.
+
+**Frost only the input field** selects the compact alternative: the outer panel
+becomes clear and the frost moves to the inner rounded field. This switch is off
+by default (outer-panel frost) and requires Frosted message input to be
+on. Both switches apply live and work with themes enabled or disabled.
+
+The booleans `transparentChatComposer` and `frostedReplyField` are stored in
+`claude-desktop-extra.json`. Manually set `.jsonc` values win and lock the
+corresponding UI switches. Only literal `true` enables either preference.
+The existing theme engine inserts/removes the optional stylesheet. The current
+Chat markup was checked at runtime on 5.11492.5: `data-cds=ChatComposer` is the
+outer shell and its inner `.rounded-composer` contains `ChatComposerEditor`.
+Recheck these anchors when upstream changes the Chat composer.
