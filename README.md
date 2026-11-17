@@ -96,7 +96,7 @@ sudo apt install claude-desktop-extra
 
 It replaces Anthropic's own `claude-desktop` package if installed (same files). The local Cowork VM tools come in as `Recommends`; the remaining step is Settings -> Extra -> Cowork (Linux) -> Enable KVM access, or the `kvm` group ([Cowork setup](docs/cowork.md)).
 
-Without the repo: `wget https://github.com/patrickjaja/claude-desktop-extra/releases/latest/download/claude-desktop-extra_5.11492.5-5_amd64.deb && sudo dpkg -i claude-desktop-extra_*_amd64.deb`
+Without the repo: `wget https://github.com/patrickjaja/claude-desktop-extra/releases/latest/download/claude-desktop-extra_5.11492.5-8_amd64.deb && sudo dpkg -i claude-desktop-extra_*_amd64.deb`
 </details>
 
 <a name="fedora--rhel-dnf-repository"></a>
@@ -111,7 +111,7 @@ sudo dnf install claude-desktop-extra
 
 The local Cowork VM tools come in as weak deps; the remaining step is Settings -> Extra -> Cowork (Linux) -> Enable KVM access, or the `kvm` group ([Cowork setup](docs/cowork.md)).
 
-Without the repo: `wget https://github.com/patrickjaja/claude-desktop-extra/releases/latest/download/claude-desktop-extra-5.11492.5-5.x86_64.rpm && sudo dnf install ./claude-desktop-extra-*.x86_64.rpm`
+Without the repo: `wget https://github.com/patrickjaja/claude-desktop-extra/releases/latest/download/claude-desktop-extra-5.11492.5-8.x86_64.rpm && sudo dnf install ./claude-desktop-extra-*.x86_64.rpm`
 </details>
 
 <a name="nixos--nix"></a>
@@ -237,7 +237,7 @@ Settings → Extra → **Cowork (Linux)** shows whether it works here and holds 
 
 ## Custom Themes
 
-124 dual light/dark palettes and 34 live animated SVG backdrops with frosted-glass panels across **Chat, Cowork and Code** - including **Gaming & Shows** (**Battle for Dream Island**, the **GTA I-VI** series, `mario`, `zelda`, `final-fantasy`, `warcraft`, `dragonball`, `playstation`, `gameboy`), 20 **Scenes** from Anthropic's [Claude Code interface mod examples](https://code.claude.com/docs/en/plugins/mods/interface#put-a-backdrop-behind-the-conversation) (no plugin needed), and 84 community palettes. Press <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd> (or open Settings → Extra → Themes) to switch themes and backdrops live, or combine them with **Transparent window**. Theme files reload live for [matugen](https://github.com/InioX/matugen), pywal and wallust. The new animated backdrops are our first pass and we will keep polishing them - PRs with your own light/dark palettes, animated SVG backdrops and custom SVG spinners are very welcome! Guide: [docs/themes.md](docs/themes.md), gallery: [themes/PALETTES.md](themes/PALETTES.md).
+150 dual light/dark palettes and 60 live animated SVG backdrops with frosted-glass panels across **Chat, Cowork and Code** - including a minimal **Linux** distro section (`cachyos`, `arch-linux`, `ubuntu`, `linux-mint`, `fedora`, `debian`, `nixos`, `opensuse`, `pop-os`, `manjaro`, `endeavouros`, `kali-linux`, `gentoo`, `zorin-os`, `linux-from-scratch`), **Gaming** (the **GTA I-VI** series, `mario`, `zelda`, `final-fantasy`, `warcraft`, `dragonball`, `playstation`, `gameboy`), 20 **Scenes** from Anthropic's [Claude Code interface mod examples](https://code.claude.com/docs/en/plugins/mods/interface#put-a-backdrop-behind-the-conversation) (no plugin needed), 84 community palettes, and a **Lollipop** animated show section (`bfdi`, `bfdi-lollipop-pin`, `bfdia`, `idfb`, `bfb`, `tpot`, `bfdie`, `ii`..`ii4`, `numberblocks`). Press <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd> (or open Settings → Extra → Themes) to switch themes and backdrops live, or combine them with **Transparent window**. Theme files reload live for [matugen](https://github.com/InioX/matugen), pywal and wallust. PRs with your own light/dark palettes, animated SVG backdrops and custom SVG spinners are very welcome! Guide: [docs/themes.md](docs/themes.md), gallery: [themes/PALETTES.md](themes/PALETTES.md).
 
 | GTA I (1997 top-down chase) | GTA VI (Vice City neon) | Winter / Snow Pines |
 |---|---|---|
@@ -267,7 +267,7 @@ Override Anthropic's server-side feature flags in `~/.config/Claude/claude-deskt
 
 ## Patches
 
-We patch the official `app.asar` at repackage time: [`patches/community/`](docs/patches.md#community-features) (25 patches, opt-in features), [`patches/core/`](docs/patches.md#core-infrastructure) (10, infrastructure) and [`patches/linux/`](docs/patches.md#linux-compatibility) (39, Linux fixes). A patch that stops matching fails the build, and a patch is removed once upstream ships the behavior. Catalog: [docs/patches.md](docs/patches.md).
+We patch the official `app.asar` at repackage time: [`patches/community/`](docs/patches.md#community-features) (26 patches, opt-in features), [`patches/core/`](docs/patches.md#core-infrastructure) (10, infrastructure) and [`patches/linux/`](docs/patches.md#linux-compatibility) (39, Linux fixes). A patch that stops matching fails the build, and a patch is removed once upstream ships the behavior. Catalog: [docs/patches.md](docs/patches.md).
 
 ## Command-line flags
 

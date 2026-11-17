@@ -149,14 +149,16 @@ community/add_feature_transcript_limits_worker: ../js/transcript_limits_worker.j
 
 # Theme patch embeds the spinner-reshape installer (swaps the loading-star SVG
 # for the active theme's custom shape), the animated SVG backdrop scenes +
-# injector, and the bundled community + gaming + scene palette collections via
-# staticRead.
+# injector, and the bundled community + gaming + linux + lollipop + scene
+# palette collections via staticRead.
 core/add_feature_custom_themes: \
   ../js/spinner_injector.js \
   ../js/backdrop_scenes.js \
   ../js/backdrop_injector.js \
   ../js/community_themes.json \
   ../js/gaming_themes.json \
+  ../js/linux_themes.json \
+  ../js/lollipop_themes.json \
   ../js/scene_themes.json
 
 # Theme picker embeds its page + preload + backdrop scenes via staticRead.
@@ -184,6 +186,11 @@ core/fix_profile_app_identity: ../js/profile_app_identity.js
 core/add_tool_path_resolver: ../js/tool_path.js
 
 linux/fix_open_external_tool_path: ../js/open_external_tool_path.js
+
+community/add_feature_github_alerts: \
+  ../js/github_alerts_main.js \
+  ../js/github_alerts_page.js \
+  ../js/github_alerts.css
 
 community/add_feature_jira_tracker: \
   ../js/jira_tracker_adf.js \

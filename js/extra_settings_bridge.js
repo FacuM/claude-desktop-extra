@@ -57,6 +57,18 @@
     frostedReplyFieldSet: function (enabled) {
       return ipcRenderer.invoke("cdb-reply-field:set", enabled === true);
     },
+    githubAlertsRead: function () {
+      return ipcRenderer.invoke("cdb-github-alerts:read");
+    },
+    githubAlertsSet: function (enabled) {
+      return ipcRenderer.invoke("cdb-github-alerts:set", enabled === true);
+    },
+    githubAlertIconsRead: function () {
+      return ipcRenderer.invoke("cdb-alert-icons:read");
+    },
+    githubAlertIconsSet: function (enabled) {
+      return ipcRenderer.invoke("cdb-alert-icons:set", enabled === true);
+    },
     themesActive: function () {
       return ipcRenderer.invoke("cdb-themes:active");
     },
@@ -276,6 +288,7 @@
         effort: Array.isArray(provider.effort) ? provider.effort.map(String) : undefined,
         // Absent stays absent: the main process keeps the stored values then.
         userAgent: typeof provider.userAgent === "string" ? provider.userAgent : undefined,
+        sessionHeader: typeof provider.sessionHeader === "string" ? provider.sessionHeader : undefined,
         stripBillingHeader: typeof provider.stripBillingHeader === "boolean" ? provider.stripBillingHeader : undefined
       } : {});
     },

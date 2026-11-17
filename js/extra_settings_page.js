@@ -1088,19 +1088,23 @@
   // so a source tier we do not know yet is still shown instead of dropped.
   var THEME_SECTIONS = [
     { key: "custom", label: "Your themes" },
+    { key: "linux", label: "Linux" },
     { key: "scenes", label: "Scenes" },
-    { key: "gaming", label: "Gaming & Shows" },
+    { key: "gaming", label: "Gaming" },
     { key: "common", label: "Common" },
+    { key: "lollipop", label: "Lollipop" },
     { key: "other", label: "More" }
   ];
 
-  // Category wins over source, so a gaming palette is in Gaming wherever it came
-  // from. An entry with no category (or from a registry that does not report one
-  // yet) is bucketed by source exactly as before.
+  // Category wins over source, so linux/scenes/gaming/lollipop palettes stay
+  // in their sections wherever they came from. An entry with no category (or
+  // from a registry that does not report one yet) falls back to source.
   function themeBucket(entry) {
     var cat = entry.category || "";
+    if (cat === "linux") return "linux";
     if (cat === "scenes") return "scenes";
-    if (cat === "gaming" || cat === "shows") return "gaming";
+    if (cat === "gaming") return "gaming";
+    if (cat === "lollipop" || cat === "shows" || cat === "kids") return "lollipop";
     var source = entry.source || "";
     if (source === "custom") return "custom";
     if (source === "builtin" || source === "community") return "common";
@@ -3771,18 +3775,26 @@
       off.value = "off";
       select.appendChild(off);
 
+      var linuxGroup = el("optgroup");
+      linuxGroup.label = "Linux Scenes";
       var scenesGroup = el("optgroup");
       scenesGroup.label = "Animated Scenes";
       var gamingGroup = el("optgroup");
-      gamingGroup.label = "Gaming & Show Scenes";
+      gamingGroup.label = "Gaming Scenes";
+      var lollipopGroup = el("optgroup");
+      lollipopGroup.label = "Lollipop Scenes";
       state.entries.forEach(function (e) {
         var opt = el("option", null, e.displayName || e.id);
         opt.value = e.id;
-        if (e.category === "gaming") gamingGroup.appendChild(opt);
+        if (e.category === "linux") linuxGroup.appendChild(opt);
+        else if (e.category === "gaming") gamingGroup.appendChild(opt);
+        else if (e.category === "lollipop" || e.category === "shows" || e.category === "kids") lollipopGroup.appendChild(opt);
         else scenesGroup.appendChild(opt);
       });
+      if (linuxGroup.children.length) select.appendChild(linuxGroup);
       if (scenesGroup.children.length) select.appendChild(scenesGroup);
       if (gamingGroup.children.length) select.appendChild(gamingGroup);
+      if (lollipopGroup.children.length) select.appendChild(lollipopGroup);
       select.value = state.backdrop || "";
 
       select.addEventListener("change", function () {
@@ -3851,6 +3863,45 @@
       lockFile: "claude-desktop-extra.jsonc",
       errorPrefix: "Could not change frost placement: ",
       toast: function (on) { return on ? "Input-field frost enabled" : "Outer-panel frost restored"; }
+    });
+  }
+
+  function renderGithubAlertsRow(panel) {
+    return renderToggleRow(panel, {
+      section: "Chat appearance",
+      title: "GitHub alert callouts",
+      note: "Render markdown alerts (a blockquote opening with [!NOTE], [!TIP], [!IMPORTANT], [!WARNING] or " +
+        "[!CAUTION]) as coloured callouts with a label instead of the literal marker. Applies live to open chats.",
+      keywords: "markdown alert note tip warning caution callout blockquote github admonition",
+      ariaLabel: "GitHub alert callouts",
+      read: "githubAlertsRead", write: "githubAlertsSet",
+      hideIf: function (res) { return failed(res) && /Linux only/.test(reason(res)); },
+      isOn: function (r) { return r.enabled === true; },
+      writeArg: function (on) { return on; },
+      describe: function (on) { return on ? "on - alerts render as callouts" : "off - alert markers stay literal text"; },
+      lockFile: "claude-desktop-extra.jsonc",
+      errorPrefix: "Could not change alert rendering: ",
+      toast: function (on) { return on ? "GitHub alert callouts enabled" : "Alert rendering restored"; }
+    });
+  }
+
+  function renderGithubAlertIconsRow(panel) {
+    return renderToggleRow(panel, {
+      section: "Chat appearance",
+      sharedSection: true,
+      title: "Alert icons",
+      note: "Show a small icon before the label of every callout. Off by default: the accent bar and the label " +
+        "highlight the alert on their own. Requires GitHub alert callouts. Applies live.",
+      keywords: "markdown alert callout icon glyph label",
+      ariaLabel: "Alert icons",
+      read: "githubAlertIconsRead", write: "githubAlertIconsSet",
+      hideIf: function (res) { return failed(res) && /Linux only/.test(reason(res)); },
+      isOn: function (r) { return r.enabled === true; },
+      writeArg: function (on) { return on; },
+      describe: function (on) { return on ? "on - icon before each label" : "off - label only"; },
+      lockFile: "claude-desktop-extra.jsonc",
+      errorPrefix: "Could not change alert icons: ",
+      toast: function (on) { return on ? "Alert icons enabled" : "Alert icons off"; }
     });
   }
 
@@ -3963,11 +4014,15 @@
         var buckets = {};
         var shown = 0;
         result.entries.forEach(function (entry) {
+          var catMatch =
+            (entry.category === "linux" && "linux distro distros".indexOf(needle) >= 0) ||
+            ((entry.category === "lollipop" || entry.category === "shows" || entry.category === "kids") &&
+              "lollipop shows kids cartoons".indexOf(needle) >= 0);
           if (needle &&
               (entry.displayName || "").toLowerCase().indexOf(needle) < 0 &&
               (entry.name || "").toLowerCase().indexOf(needle) < 0 &&
               (entry.category || "").toLowerCase().indexOf(needle) < 0 &&
-              !((entry.category === "gaming" || entry.category === "shows") && "gaming & shows".indexOf(needle) >= 0) &&
+              !catMatch &&
               (entry.backdrop || "").toLowerCase().indexOf(needle) < 0 &&
               (entry.blurb || "").toLowerCase().indexOf(needle) < 0) return;
           var key = themeBucket(entry);
@@ -4061,6 +4116,8 @@
       renderThemePickerRow,
       renderTransparentChatComposerRow,
       renderFrostedReplyFieldRow,
+      renderGithubAlertsRow,
+      renderGithubAlertIconsRow,
       renderDevToolsRow
     ] },
     { title: "Models and 3P", sub: "Extra models and gateway options", items: [
@@ -4545,7 +4602,8 @@
         ? "API key: " + ({ value: "in the config file", env: "from the environment", file: "from a key file", stored: "stored" })[p.keySource]
         : "API key: MISSING - sessions on these models fail until one is set";
       main.appendChild(el("div", "cdbx-state" + (p.keyOk ? "" : " cdbx-models-warn"), keyLine +
-        " - effort levels " + (p.effort || []).join("/")));
+        " - effort levels " + (p.effort || []).join("/") +
+        (p.sessionHeader ? " - session header " + p.sessionHeader : "")));
       // Models skipped because even under this provider's prefix they would
       // be listed with one of Anthropic's own ids (a provider named "opus"):
       // they are not in the list below, so they are named here, with a way
@@ -4843,6 +4901,9 @@
         "Sent with every request to this endpoint: the sessions', and fetch models, test and detect here. Empty: " +
         "Claude Code's runtime default (Bun/<version>), or on Anthropic's API the CLI's own. Printable ASCII, " +
         "300 characters at most.");
+      var sessionHeader = field(form, "Session header", input("text", existing ? existing.sessionHeader || "" : "", "optional, e.g. x-opencode-session"),
+        "Header carrying a stable per-conversation ID on every Messages request (and on test and detect here) for " +
+        "routing and prompt caching - OpenCode Go requires x-opencode-session. Empty: none sent.");
       // Anthropic's API uses the billing line: not offered there.
       var stripBilling = existing && existing.native ? null
         : field(form, "Drop the billing line", checkbox(existing ? existing.stripBillingHeader : false),
@@ -4903,6 +4964,9 @@
           url.value = pr.baseUrl;
           key.placeholder = pr.keyHint || "API key";
           modelsUrl.value = pr.modelsUrl || "";
+          userAgent.value = pr.userAgent || "";
+          sessionHeader.value = pr.sessionHeader || "";
+          if (stripBilling) stripBilling.checked = pr.stripBillingHeader === true;
           var lv = pr.effort || EFFORT_LEVELS;
           EFFORT_LEVELS.forEach(function (l) { levelBoxes[l].checked = lv.indexOf(l) !== -1; });
         });
@@ -4913,13 +4977,14 @@
       save.addEventListener("click", function () {
         save.disabled = true;
         var payload = { id: id.value, baseUrl: url.value, apiKey: key.value, preset: chosenPreset, modelsUrl: modelsUrl.value,
-          userAgent: userAgent.value, effort: EFFORT_LEVELS.filter(function (lv) { return levelBoxes[lv].checked; }) };
+          userAgent: userAgent.value, sessionHeader: sessionHeader.value,
+          effort: EFFORT_LEVELS.filter(function (lv) { return levelBoxes[lv].checked; }) };
         if (stripBilling) payload.stripBillingHeader = stripBilling.checked;
         api.customModelsProviderSet(payload).then(function (r) {
           if (failed(r)) { save.disabled = false; toast("Could not save: " + reason(r), true); return; }
           refresh(r);
           if (r.keyCleared || r.headersCleared) {
-            toast("Provider " + existing.id + " saved - its base URL moved to another host, so " +
+            toast("Provider " + (existing ? existing.id : payload.id.trim()) + " saved - its base URL moved to another host, so " +
               (r.keyCleared && r.headersCleared ? "the stored key and the custom headers were" : r.keyCleared ? "the stored key was" : "the custom headers were") +
               " cleared" + (r.keyCleared ? ": paste the key again" : " (add them again in the config file)"), true);
           }

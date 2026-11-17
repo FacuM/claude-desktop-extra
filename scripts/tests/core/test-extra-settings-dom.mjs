@@ -1104,7 +1104,7 @@ async function featuresPanel(featuresItem) {
     ok(titlesIn(subGroup[0]).join("|") === "Trusted Auto-fix PR authors|Auto-fix notices: ready to merge, comments after merge|Auto-archive delay after a PR merges or closes",
        "Pull requests rows: " + titlesIn(subGroup[0]).join("|"));
     // The harness bridge has no tray or developer-tools halves, so those two rows are skipped here.
-    const appOrder = ["Hide window controls", "Native titlebar", "Transparent window", "Always use the white tray icon", "Theme picker", "Frosted message input", "Frost only the input field", "Developer tools"];
+    const appOrder = ["Hide window controls", "Native titlebar", "Transparent window", "Always use the white tray icon", "Theme picker", "Frosted message input", "Frost only the input field", "GitHub alert callouts", "Alert icons", "Developer tools"];
     ok(titlesIn(topGroups[1]).join("|") === appOrder.filter(function (t) { return titlesIn(topGroups[1]).indexOf(t) >= 0; }).join("|") &&
        titlesIn(topGroups[1]).length >= 4,
        "App and window rows in order: " + titlesIn(topGroups[1]).join("|"));
@@ -1261,6 +1261,42 @@ async function featuresPanel(featuresItem) {
     const lp = document.querySelector(".cdbx-panel");
     ok(Array.from(lp.querySelectorAll(".cdbx-group")).some(function (g) { return g.style.display !== "none" && g.firstElementChild.textContent === "Computer Use"; }),
        "Linux again: the Computer Use group is back");
+  }
+  // GitHub alert callouts & Alert icons: toggle live in Community Features, and
+  // hide on the downstream Windows build when main answers "Linux only".
+  {
+    const gaSel = '.cdbx-switch[aria-label="GitHub alert callouts"]';
+    const giSel = '.cdbx-switch[aria-label="Alert icons"]';
+    const gp = document.querySelector(".cdbx-panel");
+    const ga = gp && gp.querySelector(gaSel);
+    const gi = gp && gp.querySelector(giSel);
+    ok(!!ga && !!gi, "renders the GitHub alert callouts and Alert icons switches");
+    if (ga && gi) {
+      ok(ga.getAttribute("aria-checked") === "false" && gi.getAttribute("aria-checked") === "false",
+         "both GitHub alert switches start off by default");
+      ga.click();
+      await sleep(40);
+      gi.click();
+      await sleep(40);
+      ok((window.__ghAlertsCalls || []).join(",") === "true" && ga.getAttribute("aria-checked") === "true" &&
+         (window.__ghIconsCalls || []).join(",") === "true" && gi.getAttribute("aria-checked") === "true",
+         "both GitHub alert switches toggle live");
+      ga.click();
+      await sleep(40);
+      gi.click();
+      await sleep(40);
+      ok(ga.getAttribute("aria-checked") === "false" && gi.getAttribute("aria-checked") === "false",
+         "and both GitHub alert switches restore cleanly");
+    }
+    window.__ghAlertsState = { ok: false, error: "GitHub alert callouts are Linux only" };
+    window.__ghIconsState = { ok: false, error: "GitHub alert callouts are Linux only" };
+    featuresItem.click();
+    await sleep(150);
+    const wp2 = document.querySelector(".cdbx-panel");
+    ok(!wp2.querySelector(gaSel) && !wp2.querySelector(giSel),
+       "win32 ('Linux only'): both GitHub alert switches hide");
+    window.__ghAlertsState = undefined;
+    window.__ghIconsState = undefined;
   }
   // Jira issue tracker: the i beside the token label holds the scope list (hover or focus shows it,
   // a click pins it, Escape or a click outside closes it); Test connection reports one line per feature.
@@ -2545,8 +2581,16 @@ async function modelsPanel(modelsItem) {
     subagentModel: "", subagentModelLocked: false, announce: true, announceLocked: false,
     announceText: "Custom models available in this app (claude-desktop-extra), served by the user's own providers: claude-deepseek-flash[1m] (DeepSeek Flash, deepseek; sub-agent type deepseek-flash).",
     anthropicModels: [{ id: "claude-opus-5", name: "Opus 5" }, { id: "claude-haiku-4-5-20251001", name: "Haiku 4.5" }],
-    presets: [{ id: "deepseek", label: "DeepSeek", baseUrl: "https://api.deepseek.com/anthropic", keyHint: "sk-...",
-      modelsUrl: "https://api.deepseek.com/v1/models", effort: ["low", "high", "max"], context: "1m" }],
+    presets: [
+      { id: "deepseek", label: "DeepSeek", baseUrl: "https://api.deepseek.com/anthropic", keyHint: "sk-...",
+        modelsUrl: "https://api.deepseek.com/v1/models", effort: ["low", "high", "max"], context: "1m" },
+      { id: "opencode", label: "OpenCode Console (Zen)", baseUrl: "https://opencode.ai/inference/anthropic", keyHint: "oc_sk_...",
+        modelsUrl: "https://opencode.ai/inference/v1/models", sessionHeader: "x-opencode-session",
+        userAgent: "claude-desktop-extra/1.0", stripBillingHeader: true },
+      { id: "opencode-go", label: "OpenCode Go", baseUrl: "https://opencode.ai/inference/go/anthropic", keyHint: "oc_sk_...",
+        modelsUrl: "https://opencode.ai/inference/go/v1/models", sessionHeader: "x-opencode-session",
+        userAgent: "claude-desktop-extra/1.0", stripBillingHeader: true }
+    ],
     paths: { json: "/home/u/.config/Claude/claude-desktop-extra.json", jsonc: "/home/u/.config/Claude/claude-desktop-extra.jsonc",
       secrets: "/home/u/.config/Claude/custom-models/secrets.json", routes: "/home/u/.config/Claude/custom-models/routes.json" },
     providers: [
@@ -2725,14 +2769,25 @@ async function modelsPanel(modelsItem) {
   ok(!!addForm, "Add a provider opens the form under the button");
   if (addForm) {
     const preset = addForm.querySelector("select");
-    preset.value = "deepseek";
+    preset.value = "opencode-go";
     preset.dispatchEvent(new Event("change", { bubbles: true }));
     const f = addForm.querySelectorAll("input.cdbx-input");
-    ok(f[0].value === "deepseek" && f[1].value === "https://api.deepseek.com/anthropic" && f[3].value === "https://api.deepseek.com/v1/models" && f.length === 5,
-       "the preset prefills id, base URL and models URL");
-    ok(fieldControl(addForm, "User-Agent") === f[4] && f[4].value === "" && fieldControl(addForm, "Drop the billing line").checked === false,
-       "a new provider's User-Agent starts empty and the billing line is kept");
+    ok(f.length === 6 && f[0].value === "opencode-go" && f[1].value === "https://opencode.ai/inference/go/anthropic" &&
+       f[3].value === "https://opencode.ai/inference/go/v1/models" &&
+       fieldControl(addForm, "User-Agent") === f[4] && f[4].value === "claude-desktop-extra/1.0" &&
+       fieldControl(addForm, "Session header") === f[5] && f[5].value === "x-opencode-session" &&
+       fieldControl(addForm, "Drop the billing line").checked === true,
+       "opencode-go preset prefills id, URLs, User-Agent, Session header and billing-line switch");
+    preset.value = "deepseek";
+    preset.dispatchEvent(new Event("change", { bubbles: true }));
+    ok(f[0].value === "deepseek" && f[1].value === "https://api.deepseek.com/anthropic" && f[3].value === "https://api.deepseek.com/v1/models" && f.length === 6,
+       "the preset prefills id, base URL and models URL (and resets User-Agent / Session header / billing line)");
+    ok(fieldControl(addForm, "User-Agent") === f[4] && f[4].value === "" &&
+       fieldControl(addForm, "Session header") === f[5] && f[5].value === "" &&
+       fieldControl(addForm, "Drop the billing line").checked === false,
+       "a new deepseek provider's User-Agent and Session header start empty and the billing line is kept");
     f[4].value = "MyAgent/1.0";
+    f[5].value = "x-opencode-session";
     fieldControl(addForm, "Drop the billing line").checked = true;
     const plv = addForm.querySelectorAll(".cdbx-models-level input[type=checkbox]");
     ok(plv.length === 5 && Array.from(plv).map((c) => c.checked).join(",") === "true,false,true,false,true",
@@ -2747,8 +2802,8 @@ async function modelsPanel(modelsItem) {
     ok(window.__cmWrites.some((w) => w === "provider-set:ds2:https://api.deepseek.com/anthropic:key:deepseek:https://api.deepseek.com/v1/models:low/high/max"),
        "Add provider sends the id, URL, key, preset, models URL and effort levels: " + JSON.stringify(window.__cmWrites));
     const sentP = (window.__cmProviderPayloads || []).filter((p) => p.id === "ds2").pop();
-    ok(!!sentP && sentP.userAgent === "MyAgent/1.0" && sentP.stripBillingHeader === true,
-       "and the User-Agent and the billing-line switch: " + JSON.stringify(sentP));
+    ok(!!sentP && sentP.userAgent === "MyAgent/1.0" && sentP.sessionHeader === "x-opencode-session" && sentP.stripBillingHeader === true,
+       "and the User-Agent, Session header and billing-line switch: " + JSON.stringify(sentP));
     ok(!window.__cmWrites.some((w) => /^model-set:ds2/.test(w)), "no model is added silently - fetch models is the next step");
     ok(!/sk-secret-123456/.test(panel.textContent), "the key never appears in the panel");
     // By hand (no preset): the provider alone, the card's Add a model is next.
@@ -2763,7 +2818,8 @@ async function modelsPanel(modelsItem) {
     ok(window.__cmWrites.length === 1 && window.__cmWrites[0] === "provider-set:gw2:https://gw.example/anthropic:nokey:::low/medium/high/xhigh/max",
        "by hand: only the provider is created, no preset, all five levels: " + JSON.stringify(window.__cmWrites));
     const sentG = (window.__cmProviderPayloads || []).filter((p) => p.id === "gw2").pop();
-    ok(!!sentG && sentG.userAgent === "" && sentG.stripBillingHeader === false, "untouched, they go empty and off: " + JSON.stringify(sentG));
+    ok(!!sentG && sentG.userAgent === "" && sentG.sessionHeader === "" && sentG.stripBillingHeader === false,
+       "untouched, they go empty and off: " + JSON.stringify(sentG));
 
   // Edit the existing provider: detect is live there and ticks what the
   // provider accepted.
@@ -2822,12 +2878,63 @@ async function modelsPanel(modelsItem) {
       return card.querySelector(".cdbx-models-form");
     };
     window.__cmConfig.providers[0].userAgent = "Other/2.0";
+    window.__cmConfig.providers[0].sessionHeader = "x-opencode-session";
     window.__cmConfig.providers[0].stripBillingHeader = true;
     await saveVia(panel.querySelectorAll(".cdbx-models-card")[0]);
+    const cardState0 = panel.querySelectorAll(".cdbx-models-card")[0].querySelector(".cdbx-state").textContent;
+    const cardState1 = panel.querySelectorAll(".cdbx-models-card")[1].querySelector(".cdbx-state").textContent;
+    ok(cardState0.indexOf(" - session header x-opencode-session") !== -1 && cardState1.indexOf("session header") === -1,
+       "provider card shows session header when set and omits it when empty: " + cardState0);
     let ef = await editedForm();
-    ok(fieldControl(ef, "User-Agent").value === "Other/2.0" && fieldControl(ef, "Drop the billing line").checked === true,
-       "a compatible provider's form shows its User-Agent and its billing-line switch");
+    ok(fieldControl(ef, "User-Agent").value === "Other/2.0" &&
+       fieldControl(ef, "Session header").value === "x-opencode-session" &&
+       fieldControl(ef, "Drop the billing line").checked === true,
+       "a compatible provider's form shows its User-Agent, Session header and its billing-line switch");
     Array.from(ef.querySelectorAll("button")).find((b) => b.textContent === "cancel").click();
+
+    // Edit an existing opencode-go provider, clear its preset defaults and Save:
+    window.__cmConfig = JSON.parse(JSON.stringify(cfg));
+    window.__cmConfig.providers[0] = Object.assign({}, cfg.providers[0], {
+      id: "ocgo", preset: "opencode-go", baseUrl: "https://opencode.ai/inference/go/anthropic",
+      userAgent: "claude-desktop-extra/1.0", sessionHeader: "x-opencode-session", stripBillingHeader: true
+    });
+    await saveVia(panel.querySelectorAll(".cdbx-models-card")[0]);
+    const editOc = await editedForm();
+    ok(!editOc.querySelector("select") && fieldControl(editOc, "Provider id").disabled === true &&
+       fieldControl(editOc, "User-Agent").value === "claude-desktop-extra/1.0" &&
+       fieldControl(editOc, "Session header").value === "x-opencode-session" &&
+       fieldControl(editOc, "Drop the billing line").checked === true,
+       "editing an existing opencode-go provider locks id, hides Preset, and pre-fills its defaults");
+    fieldControl(editOc, "User-Agent").value = "";
+    fieldControl(editOc, "Session header").value = "";
+    fieldControl(editOc, "Drop the billing line").checked = false;
+    Array.from(editOc.querySelectorAll("button")).find((b) => b.textContent === "Save").click();
+    await sleep(60);
+    const savedOc = (window.__cmProviderPayloads || []).filter((p) => p.id === "ocgo").pop();
+    ok(!!savedOc && savedOc.preset === "opencode-go" && savedOc.userAgent === "" &&
+       savedOc.sessionHeader === "" && savedOc.stripBillingHeader === false,
+       "clearing fields on an edited opencode-go provider submits empty/false overrides: " + JSON.stringify(savedOc));
+
+    // DOM XSS safety on p.sessionHeader and Add-a-provider keyCleared toast without TypeError:
+    window.__cmConfig = JSON.parse(JSON.stringify(cfg));
+    window.__cmConfig.providers[0].sessionHeader = '<img src=x onerror="window.__xss=5">';
+    await saveVia(panel.querySelectorAll(".cdbx-models-card")[0]);
+    const xssCard = panel.querySelectorAll(".cdbx-models-card")[0];
+    ok(xssCard.querySelector(".cdbx-state").textContent.indexOf('<img src=x onerror="window.__xss=5">') !== -1 &&
+       xssCard.querySelectorAll("img").length === 0 && window.__xss === undefined,
+       "p.sessionHeader renders as literal text with zero HTML execution");
+
+    window.__cmConfig = Object.assign({}, cfg, { keyCleared: true });
+    panel.querySelector(".cdbx-models-add-provider").click();
+    await sleep(30);
+    const addCleared = panel.querySelector(".cdbx-models-form-provider-new");
+    const acIn = addCleared.querySelectorAll("input.cdbx-input");
+    acIn[0].value = "deepseek"; acIn[1].value = "https://other.example/anthropic";
+    Array.from(addCleared.querySelectorAll("button")).find((b) => b.textContent === "Add provider").click();
+    await sleep(60);
+    const tCleared = document.querySelector(".cdbx-toast");
+    ok(!!tCleared && /Provider deepseek saved - its base URL moved to another host/.test(tCleared.textContent),
+       "adding a provider that matches an existing id on a new origin handles keyCleared without null crash");
     window.__cmConfig = JSON.parse(JSON.stringify(cfg));
     window.__cmConfig.providers[0].shadowed = ["claude-opus-5-5", "claude-sonnet-5-5"];
     window.__cmConfig.providers[0].native = true;
@@ -3289,23 +3396,30 @@ async function themesPanel(themesItem) {
     ok(!h.classList.contains("cdbx-sheen-play"), "animationend removes it again");
   }
   const secs = sections();
-  ok(labels() === "Your themes:1 | Gaming & Shows:3 | Common:5 | More:1",
+  ok(labels() === "Your themes:1 | Linux:1 | Gaming:3 | Common:5 | Lollipop:2 | More:1",
      "section order and counts: " + labels());
-  ok(secs.length === 4, "four sections for this list (" + secs.length + ")");
+  ok(secs.length === 6, "six sections for this list (" + secs.length + ")");
 
-  const gaming = secs[1];
-  ok(gaming.cards.indexOf("Mario") >= 0, "the built-in mario is under Gaming & Shows, not lost in Common");
-  ok(gaming.cards.indexOf("Zelda") >= 0, "a community gaming palette is under Gaming & Shows");
-  ok(gaming.cards.indexOf("My-neon") >= 0, "a user gaming theme is under Gaming & Shows");
-  ok(gaming.cards.join(",") === "Mario,My-neon,Zelda", "Gaming & Shows is alphabetical: " + gaming.cards.join(","));
+  const linuxSec = secs[1];
+  const gaming = secs[2];
+  const commonSec = secs[3];
+  const lollipopSec = secs[4];
+  const moreSec = secs[5];
+  ok(linuxSec.cards.join(",") === "Cachyos", "Linux category sits right after Your themes");
+  ok(gaming.cards.indexOf("Mario") >= 0, "the built-in mario is under Gaming, not lost in Common");
+  ok(gaming.cards.indexOf("Zelda") >= 0, "a community gaming palette is under Gaming");
+  ok(gaming.cards.indexOf("My-neon") >= 0, "a user gaming theme is under Gaming");
+  ok(gaming.cards.join(",") === "Mario,My-neon,Zelda", "Gaming is alphabetical: " + gaming.cards.join(","));
   ok(secs[0].cards.join(",") === "My-own", "Your themes holds the non-gaming custom theme only");
   // Built-in and community share one section: the packaging tier is not
   // something a user picks a theme by.
-  ok(secs[2].cards.join(",") === "Almond,Catppuccin-mocha,Dracula,Nord,Solarized",
+  ok(commonSec.cards.join(",") === "Almond,Catppuccin-mocha,Dracula,Nord,Solarized",
      "Common merges built-in and community, alphabetically, and keeps the entry with no category field: " +
-     secs[2].cards.join(","));
-  ok(secs[3].cards.join(",") === "Mystery", "an unknown source tier is still shown, under More");
-  ok(secs.reduce(function (n, s) { return n + s.cards.length; }, 0) === 10,
+     commonSec.cards.join(","));
+  ok(lollipopSec.cards.join(",") === "Bfdi,My-show",
+     "Lollipop collects lollipop and shows categories at the end after Common: " + lollipopSec.cards.join(","));
+  ok(moreSec.cards.join(",") === "Mystery", "an unknown source tier is still shown, under More");
+  ok(secs.reduce(function (n, s) { return n + s.cards.length; }, 0) === 13,
      "every theme appears exactly once across the sections");
 
   // The active card keeps its highlight and its badge wherever it is sectioned.
@@ -3319,15 +3433,19 @@ async function themesPanel(themesItem) {
   // Filtering searches across sections and takes empty headings with it.
   await type("nord");
   ok(labels() === "Common:1", "filtering to one theme leaves one section: " + labels());
+  await type("linux");
+  ok(labels() === "Linux:1", "the filter also matches the linux category: " + labels());
   await type("gaming");
-  ok(labels() === "Gaming & Shows:3", "the filter also matches the category: " + labels());
+  ok(labels() === "Gaming:3", "the filter also matches the gaming category: " + labels());
+  await type("lollipop");
+  ok(labels() === "Lollipop:2", "the filter also matches the lollipop category: " + labels());
   await type("shows");
-  ok(labels() === "Gaming & Shows:3", "the filter also matches 'shows' for Gaming & Shows: " + labels());
+  ok(labels() === "Lollipop:2", "the filter also matches 'shows' for Lollipop: " + labels());
   await type("zzzz");
   ok(labels() === "", "no section heading survives a filter that matches nothing");
   ok(!!document.querySelector(".cdbx-panel .cdbx-empty"), "the empty message is shown instead");
   await type("");
-  ok(labels() === "Your themes:1 | Gaming & Shows:3 | Common:5 | More:1",
+  ok(labels() === "Your themes:1 | Linux:1 | Gaming:3 | Common:5 | Lollipop:2 | More:1",
      "clearing the filter brings every section back");
 
   // The config file we write is a link, not just text - and it must be the file
@@ -3362,7 +3480,7 @@ async function themesPanel(themesItem) {
   await sleep(40);
   ok(window.__revealCalls.indexOf("config-jsonc:open") >= 0,
      "and the link follows it too: " + window.__revealCalls.join(","));
-  ok(labels() === "Your themes:1 | Gaming & Shows:3 | Common:5 | More:1",
+  ok(labels() === "Your themes:1 | Linux:1 | Gaming:3 | Common:5 | Lollipop:2 | More:1",
      "the sections survive a re-render after apply");
 
   // The overlay row: what themeOverlay merges over the picked theme, above the
@@ -3412,7 +3530,7 @@ async function themesPanel(themesItem) {
     ok(!!row && row.querySelector(".cdbx-id").textContent === "Overlay: My-own",
        "the row names the new overlay: " + (row ? row.querySelector(".cdbx-id").textContent : "no row"));
     ok(/active \+ overlay/.test(activeBadge()), "and the badge is back: " + activeBadge());
-    ok(labels() === "Your themes:1 | Gaming & Shows:3 | Common:5 | More:1",
+    ok(labels() === "Your themes:1 | Linux:1 | Gaming:3 | Common:5 | Lollipop:2 | More:1",
        "the sections survive the overlay re-render");
   }
 }
@@ -3543,7 +3661,42 @@ async function run() {
     ok(items.length === 1, "Windows: one row was added (" + items.length + ")");
     ok(items.length === 1 && items[0].textContent.trim() === "Models",
        "Windows: the row is Models (" + (items[0] ? items[0].textContent.trim() : "none") + ")");
-    if (items.length === 1) await assertPanelMounts(items[0]);
+    window.__cmConfig = { ok: true, enabled: true, configured: true, lockedByJsonc: false, source: "default",
+      surfaces: ["ccd", "code"], models: 1, webSearch: "", webSearchLocked: false,
+      smallFastModel: "", smallFastModelLocked: false, searchConflict: "", subagentModel: "", subagentModelLocked: false,
+      announce: true, announceLocked: false, announceText: "", anthropicModels: [],
+      presets: [
+        { id: "deepseek", label: "DeepSeek", baseUrl: "https://api.deepseek.com/anthropic", keyHint: "sk-..." },
+        { id: "opencode-go", label: "OpenCode Go", baseUrl: "https://opencode.ai/inference/go/anthropic",
+          modelsUrl: "https://opencode.ai/inference/go/v1/models", sessionHeader: "x-opencode-session",
+          userAgent: "claude-desktop-extra/1.0", stripBillingHeader: true }
+      ],
+      paths: { json: "C:\\Users\\u\\AppData\\Roaming\\Claude\\claude-desktop-extra.json" },
+      providers: [{ id: "ocgo", baseUrl: "https://opencode.ai/inference/go/anthropic", locked: false, keyOk: true,
+        keySource: "stored", preset: "opencode-go", sessionHeader: "x-opencode-session", effort: ["low", "max"], context: "1m",
+        models: [{ id: "glm-5.3", alias: "claude-glm-5.3", listedAs: ["claude-glm-5.3[1m]"], name: "GLM-5.3",
+          description: "", vision: false, thinking: true, context: "1m", effort: ["low", "max"], effortDefault: "max", badge: "", agent: false }] }] };
+    if (items.length === 1) {
+      await assertPanelMounts(items[0]);
+      const winPanel = document.querySelector(".cdbx-panel");
+      const winCard = winPanel && winPanel.querySelector(".cdbx-models-card");
+      ok(!!winCard && /session header x-opencode-session/.test(winCard.querySelector(".cdbx-state").textContent),
+         "Windows: Models panel renders provider cards and session header state");
+      const addBtn = winPanel && winPanel.querySelector(".cdbx-models-add-provider");
+      if (addBtn) {
+        addBtn.click();
+        await sleep(30);
+        const fWin = winPanel.querySelector(".cdbx-models-form-provider-new");
+        const selWin = fWin && fWin.querySelector("select");
+        if (selWin) {
+          selWin.value = "opencode-go";
+          selWin.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+        const fWinInputs = fWin ? fWin.querySelectorAll("input.cdbx-input") : [];
+        ok(fWinInputs.length === 6 && fWinInputs[4].value === "claude-desktop-extra/1.0" && fWinInputs[5].value === "x-opencode-session",
+           "Windows: opencode-go preset prefills User-Agent and Session header in Add a provider");
+      }
+    }
     return;
   }
 
@@ -3941,9 +4094,12 @@ function theme(name, source, category) {
 window.__themes = [
   theme("nord", "builtin", ""),
   theme("catppuccin-mocha", "builtin", ""),
+  theme("cachyos", "builtin", "linux"),
   theme("mario", "builtin", "gaming"),
   theme("zelda", "community", "gaming"),
   theme("my-neon", "custom", "gaming"),
+  theme("bfdi", "builtin", "lollipop"),
+  theme("my-show", "custom", "shows"),
   theme("solarized", "community", ""),
   theme("dracula", "community"),
   theme("my-own", "custom", ""),
@@ -4114,6 +4270,10 @@ window.cdbExtra = {
   frostedReplyFieldSet: function (on) { window.__frostedField=on; return Promise.resolve({ok:true}); },
   transparentChatComposerRead: function () { return Promise.resolve({ok:true, enabled:!!window.__transparentReply}); },
   transparentChatComposerSet: function (on) { window.__transparentReply=on; return Promise.resolve({ok:true}); },
+  githubAlertsRead: function () { return Promise.resolve(window.__ghAlertsState || { ok: true, enabled: !!window.__ghAlertsOn, lockedByJsonc: null }); },
+  githubAlertsSet: function (on) { window.__ghAlertsCalls = (window.__ghAlertsCalls || []).concat([on]); window.__ghAlertsOn = on; return Promise.resolve({ ok: true, enabled: on }); },
+  githubAlertIconsRead: function () { return Promise.resolve(window.__ghIconsState || { ok: true, enabled: !!window.__ghIconsOn, lockedByJsonc: null }); },
+  githubAlertIconsSet: function (on) { window.__ghIconsCalls = (window.__ghIconsCalls || []).concat([on]); window.__ghIconsOn = on; return Promise.resolve({ ok: true, enabled: on }); },
   themesList: stub({ ok: true, entries: window.__themes, active: "mario",
     configPath: "/home/u/.config/Claude/claude-desktop-extra.jsonc",
     savePath: "/home/u/.config/Claude/claude-desktop-extra.json" }),
