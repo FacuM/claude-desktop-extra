@@ -96,7 +96,7 @@ sudo apt install claude-desktop-extra
 
 It replaces Anthropic's own `claude-desktop` package if installed (same files). The local Cowork VM tools come in as `Recommends`; the remaining step is Settings -> Extra -> Cowork (Linux) -> Enable KVM access, or the `kvm` group ([Cowork setup](docs/cowork.md)).
 
-Without the repo: `wget https://github.com/patrickjaja/claude-desktop-extra/releases/latest/download/claude-desktop-extra_5.11492.5-8_amd64.deb && sudo dpkg -i claude-desktop-extra_*_amd64.deb`
+Without the repo: `wget https://github.com/patrickjaja/claude-desktop-extra/releases/latest/download/claude-desktop-extra_5.11492.5-9_amd64.deb && sudo dpkg -i claude-desktop-extra_*_amd64.deb`
 </details>
 
 <a name="fedora--rhel-dnf-repository"></a>
@@ -111,7 +111,7 @@ sudo dnf install claude-desktop-extra
 
 The local Cowork VM tools come in as weak deps; the remaining step is Settings -> Extra -> Cowork (Linux) -> Enable KVM access, or the `kvm` group ([Cowork setup](docs/cowork.md)).
 
-Without the repo: `wget https://github.com/patrickjaja/claude-desktop-extra/releases/latest/download/claude-desktop-extra-5.11492.5-8.x86_64.rpm && sudo dnf install ./claude-desktop-extra-*.x86_64.rpm`
+Without the repo: `wget https://github.com/patrickjaja/claude-desktop-extra/releases/latest/download/claude-desktop-extra-5.11492.5-9.x86_64.rpm && sudo dnf install ./claude-desktop-extra-*.x86_64.rpm`
 </details>
 
 <a name="nixos--nix"></a>
@@ -191,7 +191,7 @@ Check it with `curl -fsSL https://patrickjaja.github.io/claude-desktop-extra/gpg
 
 Settings → **Extra** holds everything this project adds, no config file or `sudo` needed:
 
-- **[Themes](docs/themes.md)** - pick one of 123 palettes and 33 animated SVG backdrops (or your own), applied live across Chat, Cowork and Code.
+- **[Themes](docs/themes.md)** - pick one of 138 palettes and 48 animated SVG backdrops (or your own), applied live across Chat, Cowork and Code.
 - **[Community](docs/patches.md#community-features)** - opt-in switches such as Files quick open, panel tabs, diff view modes, custom models and Escape stops Computer Use (see [Computer Use](docs/cu-escape-abort.md)).
 - **[Models](docs/custom-models.md)** - providers and models for the Code tab's model picker.
 - **[Anthropic](docs/feature-flags.md)** - every upstream feature flag as a switch.
@@ -237,7 +237,7 @@ Settings → Extra → **Cowork (Linux)** shows whether it works here and holds 
 
 ## Custom Themes
 
-150 dual light/dark palettes and 60 live animated SVG backdrops with frosted-glass panels across **Chat, Cowork and Code** - including a minimal **Linux** distro section (`cachyos`, `arch-linux`, `ubuntu`, `linux-mint`, `fedora`, `debian`, `nixos`, `opensuse`, `pop-os`, `manjaro`, `endeavouros`, `kali-linux`, `gentoo`, `zorin-os`, `linux-from-scratch`), **Gaming** (the **GTA I-VI** series, `mario`, `zelda`, `final-fantasy`, `warcraft`, `dragonball`, `playstation`, `gameboy`), 20 **Scenes** from Anthropic's [Claude Code interface mod examples](https://code.claude.com/docs/en/plugins/mods/interface#put-a-backdrop-behind-the-conversation) (no plugin needed), 84 community palettes, and a **Lollipop** animated show section (`bfdi`, `bfdi-lollipop-pin`, `bfdia`, `idfb`, `bfb`, `tpot`, `bfdie`, `ii`..`ii4`, `numberblocks`). Press <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd> (or open Settings → Extra → Themes) to switch themes and backdrops live, or combine them with **Transparent window**. Theme files reload live for [matugen](https://github.com/InioX/matugen), pywal and wallust. PRs with your own light/dark palettes, animated SVG backdrops and custom SVG spinners are very welcome! Guide: [docs/themes.md](docs/themes.md), gallery: [themes/PALETTES.md](themes/PALETTES.md).
+138 dual light/dark palettes and 48 live animated SVG backdrops with frosted-glass panels across **Chat, Cowork and Code** - including a minimal **Linux** distro section (`cachyos`, `arch-linux`, `ubuntu`, `linux-mint`, `fedora`, `debian`, `nixos`, `opensuse`, `pop-os`, `manjaro`, `endeavouros`, `kali-linux`, `gentoo`, `zorin-os`, `linux-from-scratch`), **Gaming** (the **GTA I-VI** series, `mario`, `zelda`, `final-fantasy`, `warcraft`, `dragonball`, `playstation`, `gameboy`), 20 **Scenes** from Anthropic's [Claude Code interface mod examples](https://code.claude.com/docs/en/plugins/mods/interface#put-a-backdrop-behind-the-conversation) (no plugin needed) and 84 community palettes. Press <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd> (or open Settings → Extra → Themes) to switch themes and backdrops live, or combine them with **Transparent window**. Theme files reload live for [matugen](https://github.com/InioX/matugen), pywal and wallust. PRs with your own light/dark palettes, animated SVG backdrops and custom SVG spinners are very welcome! Guide: [docs/themes.md](docs/themes.md), gallery: [themes/PALETTES.md](themes/PALETTES.md).
 
 | GTA I (1997 top-down chase) | GTA VI (Vice City neon) | Winter / Snow Pines |
 |---|---|---|
@@ -296,6 +296,7 @@ To add a feature, write one patch following [Adding your own feature](docs/patch
 
 ## See Also
 
+- [claude-desktop-extra for Windows](https://github.com/stratosjl/claude-desktop-extra/releases/latest) - portable Windows 11 build with profiles, themes, custom models and Settings → Extra. Download the `.zip`, unzip and run `Install.cmd`. Thanks to maintainer [@stratosjl](https://github.com/stratosjl) for supporting it.
 - [tweakcc](https://github.com/Piebald-AI/tweakcc) - a CLI tool for customizing Claude Code (system prompts, themes, UI). Same patching-JS-to-make-it-yours energy. Thanks to the Piebald team.
 - [agent-skills](https://github.com/addyosmani/agent-skills) - production-grade engineering skills for AI coding agents; the maintainer uses them to spec, plan and build changes here.
 
