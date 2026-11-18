@@ -96,7 +96,7 @@ sudo apt install claude-desktop-extra
 
 It replaces Anthropic's own `claude-desktop` package if installed (same files). The local Cowork VM tools come in as `Recommends`; the remaining step is Settings -> Extra -> Cowork (Linux) -> Enable KVM access, or the `kvm` group ([Cowork setup](docs/cowork.md)).
 
-Without the repo: `wget https://github.com/patrickjaja/claude-desktop-extra/releases/latest/download/claude-desktop-extra_5.11492.5-9_amd64.deb && sudo dpkg -i claude-desktop-extra_*_amd64.deb`
+Without the repo: `wget https://github.com/patrickjaja/claude-desktop-extra/releases/latest/download/claude-desktop-extra_5.11492.5-11_amd64.deb && sudo dpkg -i claude-desktop-extra_*_amd64.deb`
 </details>
 
 <a name="fedora--rhel-dnf-repository"></a>
@@ -111,7 +111,7 @@ sudo dnf install claude-desktop-extra
 
 The local Cowork VM tools come in as weak deps; the remaining step is Settings -> Extra -> Cowork (Linux) -> Enable KVM access, or the `kvm` group ([Cowork setup](docs/cowork.md)).
 
-Without the repo: `wget https://github.com/patrickjaja/claude-desktop-extra/releases/latest/download/claude-desktop-extra-5.11492.5-9.x86_64.rpm && sudo dnf install ./claude-desktop-extra-*.x86_64.rpm`
+Without the repo: `wget https://github.com/patrickjaja/claude-desktop-extra/releases/latest/download/claude-desktop-extra-5.11492.5-11.x86_64.rpm && sudo dnf install ./claude-desktop-extra-*.x86_64.rpm`
 </details>
 
 <a name="nixos--nix"></a>
@@ -267,7 +267,7 @@ Override Anthropic's server-side feature flags in `~/.config/Claude/claude-deskt
 
 ## Patches
 
-We patch the official `app.asar` at repackage time: [`patches/community/`](docs/patches.md#community-features) (26 patches, opt-in features), [`patches/core/`](docs/patches.md#core-infrastructure) (10, infrastructure) and [`patches/linux/`](docs/patches.md#linux-compatibility) (39, Linux fixes). A patch that stops matching fails the build, and a patch is removed once upstream ships the behavior. Catalog: [docs/patches.md](docs/patches.md).
+We patch the official `app.asar` at repackage time: [`patches/community/`](docs/patches.md#community-features) (27 patches, opt-in features), [`patches/core/`](docs/patches.md#core-infrastructure) (10, infrastructure) and [`patches/linux/`](docs/patches.md#linux-compatibility) (39, Linux fixes). A patch that stops matching fails the build, and a patch is removed once upstream ships the behavior. Catalog: [docs/patches.md](docs/patches.md).
 
 ## Command-line flags
 
