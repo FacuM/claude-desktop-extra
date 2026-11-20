@@ -559,6 +559,143 @@ index 45c4fc1..d41c4fa 100644
      ".sessionId),"
  
    # What C, D, E and G sit in front of; asserted on the patched result too.
+diff --git a/patches/community/add_feature_auto_archive_grace_ion.nim b/patches/community/add_feature_auto_archive_grace_ion.nim
+index f3c4fa2..8343fae 100644
+--- a/patches/community/add_feature_auto_archive_grace_ion.nim
++++ b/patches/community/add_feature_auto_archive_grace_ion.nim
+@@ -22,7 +22,7 @@
+ # notice chunk's import list, and that export to the rail chunk's own local
+ # name through the rail chunk's import list; the rail's own `aside` call must
+ # use the same jsxs.
+-import std/[os, strutils, tables]
++import std/[os, sequtils, strutils, tables]
+ import regex
+ 
+ const source = staticRead("../../js/auto_archive_grace_ui.js")
+@@ -62,10 +62,59 @@ type Aliases = object
+   vendor: string
+   exports: array[5, string] # in `placeholders` order
+ 
+-proc resolveAliases(notice: string): Aliases =
++# The vendor-frame bundle's export names for the jsx-runtime's Fragment, jsx and
++# jsxs. The runtime binds them next to each other, on one object:
++#   le=ce.Fragment,q=ce.jsx,ue=ce.jsxs
++# and the bundle's `export{le as Ba,...}` clause renames them. Minified inner
++# names repeat across scopes, so only this triple (not a lone `x=y.Fragment`)
++# identifies them.
++type RuntimeExports = object
++  fragment, jsx, jsxs: string
++
++proc jsxRuntimeExports(vendor: string): RuntimeExports =
++  let triple = vendor.findAll(
++    re2"""([\w$]+)=([\w$]+)\.Fragment,([\w$]+)=([\w$]+)\.jsx,([\w$]+)=([\w$]+)\.jsxs[,;]"""
++  )
++  if triple.len != 1 or vendor[triple[0].group(1)] != vendor[triple[0].group(3)] or
++      vendor[triple[0].group(1)] != vendor[triple[0].group(5)]:
++    raise newException(ValueError, "vendor-frame: jsx-runtime bindings not found")
++  let clause = vendor.findAll(re2"""export\{([^}]+)\}""")
++  if clause.len != 1:
++    raise newException(ValueError, "vendor-frame: expected one export clause")
++  var exported: Table[string, string] # internal name -> export name
++  for entry in vendor[clause[0].group(0)].split(','):
++    let parts = entry.split(" as ")
++    if parts.len == 2:
++      exported[parts[0]] = parts[1]
++  for (internal, role) in [
++    (vendor[triple[0].group(0)], 0),
++    (vendor[triple[0].group(2)], 1),
++    (vendor[triple[0].group(4)], 2),
++  ]:
++    if internal notin exported:
++      raise newException(ValueError, "vendor-frame: " & internal & " is not exported")
++    case role
++    of 0:
++      result.fragment = exported[internal]
++    of 1:
++      result.jsx = exported[internal]
++    else:
++      result.jsxs = exported[internal]
++
++proc resolveAliases(notice, assetsDir: string): Aliases =
++  # Anthropic's Windows 6.28899 shape: the subscriber is memoised by the React
++  # compiler's cache and registers through a helper instead of
++  # onPreferencesChanged:
++  #   [t,n]=N(),r,i;return J1($,0,e)?(r=()=>{if(!e)return;let t=e=>{n(e.ccAutoArchiveOnPrClose===!0)};
++  #   return ...},i=[e],K2($,0,e,r,i)):(r=$[1],i=$[2]),S(r,i),t}
++  let subscriberCompiled =
++    re2"""\[[\w$]+,[\w$]+\]=([\w$]+)\(\),[\w$]+,[\w$]+;return [\w$]+\([\w$]+,\d+,[\w$]+\)\?\([\w$]+=\(\)=>\{if\(![\w$]+\)return;let [\w$]+=[\w$]+=>\{[\w$]+\([\w$]+\.ccAutoArchiveOnPrClose===!0\)\};return [^;]*?\},[\w$]+=\[[\w$]+\],[\w$]+\([^;]*?\)\):\([^;]*?\),([\w$]+)\([\w$]+,[\w$]+\),[\w$]+\}"""
+   let subscriber = unique(
+     notice,
+-    re2"""\[[\w$]+,[\w$]+\]=([\w$]+)\(\),[^;]*;return [^;]*;let [^;]*?ccAutoArchiveOnPrClose===!0\)\};return [^;]*?onPreferencesChanged[^;]*?,([\w$]+)\([\w$]+,[\w$]+\),[\w$]+\}""",
++    if notice.findAll(subscriberCompiled).len == 1:
++      subscriberCompiled
++    else:
++      re2"""\[[\w$]+,[\w$]+\]=([\w$]+)\(\),[^;]*;return [^;]*;let [^;]*?ccAutoArchiveOnPrClose===!0\)\};return [^;]*?onPreferencesChanged[^;]*?,([\w$]+)\([\w$]+,[\w$]+\),[\w$]+\}""",
+     "preference subscriber",
+   )
+   let jsx = unique(
+@@ -73,19 +122,45 @@ proc resolveAliases(notice: string): Aliases =
+     re2"""([\w$]+)\("div",\{role:"status","aria-live":"polite","data-find-omitted":"",className:""",
+     "notice jsx",
+   )
+-  let fragment = unique(
+-    notice,
+-    re2"""function [\w$]+\([\w$]+,[\w$]+\)\{let [\w$]+=[\w$]+\(\d+\),\{repoKey:[\w$]+,sessionRef:[\w$]+,sessionRepo:[\w$]+,isPrimary:[\w$]+,[\s\S]*?([\w$]+)\(([\w$]+),\{children:\[[\w$]+,[\w$]+,[\w$]+,[\w$]+,[\w$]+,[\w$]+\]\}\)\):[\w$]+\[\d+\]\}""",
+-    "PR bar row fragment",
++  let imports = vendorImports(notice)
++  # jsxs and Fragment. Up to 5.11492 they were read off the PR bar row's closing
++  # fragment (a `function X(a,b){...{repoKey:..}...}` component). In Anthropic's
++  # Windows 6.28899 that row lives in another chunk and this chunk holds several
++  # six-child jsxs calls (one is a ViewTransition, not a Fragment), so each
++  # candidate is checked against the vendor-frame bundle's jsx-runtime exports.
++  var jsxsLocal, fragmentLocal: string
++  let prBarRow = notice.findAll(
++    re2"""function [\w$]+\([\w$]+,[\w$]+\)\{let [\w$]+=[\w$]+\(\d+\),\{repoKey:[\w$]+,sessionRef:[\w$]+,sessionRepo:[\w$]+,isPrimary:[\w$]+,[\s\S]*?([\w$]+)\(([\w$]+),\{children:\[[\w$]+,[\w$]+,[\w$]+,[\w$]+,[\w$]+,[\w$]+\]\}\)\):[\w$]+\[\d+\]\}"""
+   )
++  if prBarRow.len == 1:
++    jsxsLocal = notice[prBarRow[0].group(0)]
++    fragmentLocal = notice[prBarRow[0].group(1)]
++  else:
++    let runtime = jsxRuntimeExports(readFile(assetsDir / imports.file))
++    var pairs: seq[(string, string)]
++    for m in notice.findAll(
++      re2"""([\w$]+)\(([\w$]+),\{children:\[[\w$]+,[\w$]+,[\w$]+,[\w$]+,[\w$]+,[\w$]+\]\}\)\):[\w$]+\[\d+\]\}"""
++    ):
++      let jsxsName = notice[m.group(0)]
++      let fragName = notice[m.group(1)]
++      if jsxsName in imports.byLocal and fragName in imports.byLocal and
++          imports.byLocal[jsxsName] == runtime.jsxs and
++          imports.byLocal[fragName] == runtime.fragment:
++        pairs.add (jsxsName, fragName)
++    pairs = pairs.deduplicate
++    if pairs.len != 1:
++      raise newException(
++        ValueError, "jsxs/Fragment: expected one verified pair, got " & $pairs.len
++      )
++    jsxsLocal = pairs[0][0]
++    fragmentLocal = pairs[0][1]
+   let locals = [
+     notice[subscriber.group(0)],
+     notice[subscriber.group(1)],
+     notice[jsx.group(0)],
+-    notice[fragment.group(0)],
+-    notice[fragment.group(1)],
++    jsxsLocal,
++    fragmentLocal,
+   ]
+-  let imports = vendorImports(notice)
+   result.vendor = imports.file
+   for i, local in locals:
+     if local notin imports.byLocal:
+@@ -234,7 +309,7 @@ when isMainModule:
+     # original text and must re-apply byte-identically.
+     let noticeOriginal = restoreNotice(noticeInput)
+     let railOriginal = restoreRail(railInput)
+-    let aliases = resolveAliases(noticeOriginal)
++    let aliases = resolveAliases(noticeOriginal, paramStr(1) / "assets" / "v1")
+     let noticeOutput = applyNotice(noticeOriginal, aliases)
+     let railOutput = applyRail(railOriginal, aliases)
+     if (marker in noticeInput and noticeOutput != noticeInput) or
 diff --git a/patches/community/add_feature_custom_models.nim b/patches/community/add_feature_custom_models.nim
 index 166412d..4b0e5c2 100644
 --- a/patches/community/add_feature_custom_models.nim
@@ -681,7 +818,7 @@ index 38265f3..9355c1f 100644
  __cdbPk_win.loadFile(a.html);
  __cdbPk_log("window opened ("+a.html+")");
 diff --git a/patches/community/add_feature_transcript_limits.nim b/patches/community/add_feature_transcript_limits.nim
-index bbfc05a..3579253 100644
+index bbfc05a..4798107 100644
 --- a/patches/community/add_feature_transcript_limits.nim
 +++ b/patches/community/add_feature_transcript_limits.nim
 @@ -142,9 +142,11 @@ proc apply*(input: string): string =
@@ -690,11 +827,11 @@ index bbfc05a..3579253 100644
    let (ctorReads, configReads) = limitsReadCounts(result)
 -  if ctorReads != 1 or configReads != 1:
 +  # Anthropic's Windows 6.28899 reads `this.config.loadLimits` twice (the
-+  # truncation prediction and searchLeftFile's mainBytes), so one or more is enough.
-+  if ctorReads != 1 or configReads < 1:
++  # truncation prediction and searchLeftFile's mainBytes), so one (Linux) or two (Windows) are the audited layouts.
++  if ctorReads != 1 or configReads notin [1, 2]:
      echo "  [FAIL] transcript limits: expected upstream to read loadLimits at exactly 1 " &
 -      "`new <Reader>(<cfg>.loadLimits)` and 1 `this.config.loadLimits`, found " &
-+      "`new <Reader>(<cfg>.loadLimits)` and at least 1 `this.config.loadLimits`, found " &
++      "`new <Reader>(<cfg>.loadLimits)` and 1 or 2 `this.config.loadLimits`, found " &
        $ctorReads & " and " & $configReads & " - the option was renamed or its reads " &
        "moved, so passing it would change nothing; re-audit before re-fitting C"
      quit(1)
@@ -703,7 +840,7 @@ index bbfc05a..3579253 100644
    else:
      if MARKER notin output or forkEndStateCount(output) != 1 or
 -        limitsReadCounts(output) != (1, 1) or ctorEndStateCount(output) != CTOR_SITES:
-+        limitsReadCounts(output)[0] != 1 or limitsReadCounts(output)[1] < 1 or
++        limitsReadCounts(output)[0] != 1 or limitsReadCounts(output)[1] notin [1, 2] or
 +        ctorEndStateCount(output) != CTOR_SITES:
        echo "  [FAIL] No changes made and the end-state is absent"
        quit(1)
