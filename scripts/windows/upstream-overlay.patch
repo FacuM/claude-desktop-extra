@@ -548,7 +548,7 @@ index 45c4fc1..a980388 100644
  
    # What C, D, E and G sit in front of; asserted on the patched result too.
 diff --git a/patches/community/add_feature_files_quick_open_worker.nim b/patches/community/add_feature_files_quick_open_worker.nim
-index 56fbde3..e3bb47f 100644
+index 56fbde3..e5821b8 100644
 --- a/patches/community/add_feature_files_quick_open_worker.nim
 +++ b/patches/community/add_feature_files_quick_open_worker.nim
 @@ -28,7 +28,7 @@ const DIRECTIVES = ["\"use strict\";", "'use strict';"]
@@ -556,7 +556,7 @@ index 56fbde3..e3bb47f 100644
  # helper is prepended, even if the rewrite never happened (Rule 6: an [OK] must
  # rest on a positively verified end-state).
 -let callRe = re2"\}of __cdbQoSearch\(this\.index,[\w$]+,[\w$]+\)\)"
-+let callRe = re2"\}of __cdbQoSearch\((?:this\.index|[\w$]+),[\w$]+,[\w$]+(?:,this\.files\.size)?\)\)"
++let callRe = re2"\}of __cdbQoSearch\((?:this\.index,[\w$]+,[\w$]+|[\w$]+,[\w$]+,[\w$]+,this\.files\.size)\)\)"
  
  proc hasCallSite(s: string): bool = s.contains(callRe)
  
