@@ -158,7 +158,11 @@ else
 fi
 [ -f "$ION_DIR/index.html" ] && [ -d "$ION_DIR/assets/v1" ] ||
     die "the staged ion-dist ($ION_FORMAT) has no index.html or assets/v1/ - the setup window's layout moved"
-WINDOWS_ION_PATCHES=(community/add_feature_allow_non_anthropic_models_ion community/add_feature_auto_archive_grace_ion)
+# add_feature_auto_archive_grace_ion (the "keep" notice and session-rail control)
+# is out of the set since Anthropic's Windows 6.28899 reshaped the ion-dist
+# session panel chunks; the archive delay itself (a main-process patch) still
+# ships. Put it back once its anchors are re-fitted to those chunks.
+WINDOWS_ION_PATCHES=(community/add_feature_allow_non_anthropic_models_ion)
 
 # Upstream absorption probe (AGENTS.md Rule 4) on the Windows set: a shared
 # patch that changes nothing in the pristine Windows bundle means Anthropic now
